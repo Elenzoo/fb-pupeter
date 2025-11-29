@@ -1,0 +1,10 @@
+# katalogi
+node_modules/
+
+# pliki z sekretami
+.env
+cookies.json
+
+# pliki, które mogą się generować same
+npm-debug.log*
+dist/
