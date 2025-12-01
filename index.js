@@ -3,35 +3,128 @@ import axios from "axios";
 import "dotenv/config";
 import fs from "fs/promises";
 
-// ================== KONFIG ==================
+/* ============================================================
+   =========================  KONFIG  ==========================
+   ============================================================ */
 
-const POSTS = [
-  {
-    id: "post1",
-    url: "https://www.facebook.com/watch?v=4154742398114913",
-  },
-];
+// FB_POST_URLS = url1,url2,url3
+function getPostsFromEnv() {
+  const raw = process.env.FB_POST_URLS || "";
+  const urls = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-// true  = rozwijamy komentarze + wysyłamy content nowych
-// false = NIE klikamy nic, tylko licznik komentarzy
-const EXPAND_COMMENTS = true;
+  return urls.map((url, index) => ({
+    id: `post${index + 1}`,
+    url,
+  }));
+}
+
+// FB_POST_LABELS = nazwa1,nazwa2,nazwa3 (opcjonalnie)
+function getPostLabelsFromEnv(posts) {
+  const raw = process.env.FB_POST_LABELS || "";
+  const labels = raw.split(",").map((s) => s.trim());
+
+  const map = {};
+  posts.forEach((post, idx) => {
+    map[post.id] = labels[idx] || post.id;
+  });
+  return map;
+}
+
+const POSTS = getPostsFromEnv();
+
+if (!POSTS.length) {
+  console.error(
+    "[CONFIG] Brak postów do monitorowania. Ustaw FB_POST_URLS w .env (lista URL, oddzielone przecinkami)."
+  );
+  process.exit(1);
+}
+
+const POST_LABELS = getPostLabelsFromEnv(POSTS);
+
+// EXPAND_COMMENTS=false → tylko licznik
+const EXPAND_COMMENTS =
+  process.env.EXPAND_COMMENTS === "false" ? false : true;
 
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
 
-// stan
+// stany
 const lastCounts = new Map();
-const knownComments = new Set(); // <- z powrotem śledzimy znane ID
+const knownComments = new Set();
 
-// ================== UTYLsy ==================
+/* ============================================================
+   ========================  UTYLITY  ==========================
+   ============================================================ */
 
 function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
+
 function sleepRandom(minMs, maxMs) {
   const delta = maxMs - minMs;
   const extra = Math.random() * delta;
   return sleep(minMs + extra);
 }
+
+/**
+ * Scrollowanie posta:
+ * - znajdujemy scrollowalny kontener pod środkiem ekranu
+ * - jeśli się nie uda → dialog → dokument
+ */
+async function scrollPost(page, amount = 450) {
+  await page.evaluate((dy) => {
+    function findScrollableAncestor(start) {
+      let el = start;
+      while (el) {
+        const style = window.getComputedStyle(el);
+        const canScrollY =
+          style.overflowY === "auto" || style.overflowY === "scroll";
+        if (canScrollY && el.scrollHeight - el.clientHeight > 50) {
+          return el;
+        }
+        el = el.parentElement;
+      }
+      return null;
+    }
+
+    // element pod środkiem ekranu (tam gdzie normalnie kręcisz kółkiem)
+    const centerEl = document.elementFromPoint(
+      window.innerWidth / 2,
+      window.innerHeight / 2
+    );
+
+    let target = centerEl ? findScrollableAncestor(centerEl) : null;
+
+    // fallback: dialog
+    if (!target) {
+      const dialog = document.querySelector("div[role='dialog']");
+      if (dialog && dialog.scrollHeight - dialog.clientHeight > 50) {
+        target = dialog;
+      }
+    }
+
+    // ostateczny fallback: dokument
+    if (!target) {
+      target =
+        document.scrollingElement || document.documentElement || document.body;
+    }
+
+    if (
+      target === document.body ||
+      target === document.documentElement ||
+      target === document.scrollingElement
+    ) {
+      const before = window.scrollY;
+      window.scrollTo(0, before + dy);
+    } else {
+      target.scrollTop += dy;
+    }
+  }, amount);
+}
+
+/* ====================== COOKIES ======================= */
 
 async function loadCookies(page) {
   try {
@@ -49,42 +142,15 @@ async function loadCookies(page) {
 async function saveCookies(page) {
   try {
     const cookies = await page.cookies();
-    await fs.writeFile("cookies.json", JSON.stringify(cookies, null, 2), "utf8");
-    console.log("[FB][cookies] Cookies zapisane do cookies.json");
+    await fs.writeFile(
+      "cookies.json",
+      JSON.stringify(cookies, null, 2),
+      "utf8"
+    );
+    console.log("[FB][cookies] Cookies zapisane.");
   } catch (e) {
     console.error("[FB][cookies] Błąd zapisu cookies:", e.message);
   }
-}
-
-async function clickByText(page, text, scope = "body") {
-  const handle = await page.evaluateHandle((t, scopeSel) => {
-    const root =
-      scopeSel === "body"
-        ? document.body
-        : document.querySelector(scopeSel) || document.body;
-
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_ELEMENT,
-      null
-    );
-
-    while (walker.nextNode()) {
-      const el = walker.currentNode;
-      const txt = (el.textContent || "").trim();
-      if (!txt) continue;
-      if (txt.toLowerCase() === t.toLowerCase()) {
-        return el;
-      }
-    }
-    return null;
-  }, text, scope);
-
-  const element = handle.asElement?.();
-  if (!element) return false;
-
-  await element.click();
-  return true;
 }
 
 async function acceptCookies(page, label) {
@@ -106,6 +172,7 @@ async function acceptCookies(page, label) {
       .filter(Boolean);
 
     let target = null;
+
     outer: for (const el of buttons) {
       const txt = (el.innerText || "").trim();
       if (!txt) continue;
@@ -116,6 +183,7 @@ async function acceptCookies(page, label) {
         }
       }
     }
+
     if (!target) {
       for (const el of buttons) {
         const txt = (el.innerText || "").trim().toLowerCase();
@@ -126,9 +194,11 @@ async function acceptCookies(page, label) {
         }
       }
     }
+
     if (!target) {
       return { clicked: false, texts };
     }
+
     target.click();
     return { clicked: true, texts };
   });
@@ -144,154 +214,208 @@ async function acceptCookies(page, label) {
   }
 }
 
-// ================== LOGOWANIE ==================
+/* ============================================================
+   ======================== LOGOWANIE =========================
+   ============================================================ */
 
 async function fbLogin(page) {
   console.log("[FB] Trwa logowanie...");
+
   await page.goto("https://www.facebook.com/login", {
-    waitUntil: "load",
+    waitUntil: "networkidle2",
     timeout: 60000,
   });
-  console.log("[FB] Strona login załadowana:", page.url());
-  await acceptCookies(page, "login");
+
   await page.waitForSelector("#email", { timeout: 60000 });
-  await page.type("#email", process.env.FB_EMAIL || "", { delay: 80 });
-  await page.type("#pass", process.env.FB_PASSWORD || "", { delay: 80 });
+
+  await page.type("#email", process.env.FB_EMAIL || "", { delay: 60 });
+  await page.type("#pass", process.env.FB_PASSWORD || "", { delay: 60 });
+
   await Promise.all([
     page.click('button[name="login"]'),
     page
-      .waitForNavigation({ waitUntil: "load", timeout: 60000 })
+      .waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 })
       .catch(() => {}),
   ]);
-  console.log("[FB] Po zalogowaniu, aktualny URL:", page.url());
+
+  console.log("[FB] Po logowaniu:", page.url());
 }
 
 async function checkIfLogged(page) {
   return page.evaluate(() => {
-    const selCandidates = [
+    const selectors = [
       'input[aria-label*="Szukaj"]',
-      'input[placeholder*="Search"]',
+      'input[placeholder*="Szukaj"]',
       'a[aria-label*="Profil"]',
       'div[aria-label*="Konto"]',
     ];
-    return selCandidates.some((sel) => document.querySelector(sel));
+    return selectors.some((sel) => document.querySelector(sel));
   });
+}
+
+async function clickByText(page, text) {
+  const res = await page.evaluate((label) => {
+    const els = Array.from(
+      document.querySelectorAll("button, a, div[role='button']")
+    );
+    const lowLabel = label.toLowerCase();
+    for (const el of els) {
+      const t = (el.innerText || el.textContent || "").trim().toLowerCase();
+      if (!t) continue;
+      if (t === lowLabel) {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  }, text);
+  return res;
 }
 
 async function ensureLoggedInOnPostOverlay(page) {
+  // Sprawdzamy, czy jest nakładka typu "Wyświetl więcej na Facebooku"
   const overlayDetected = await page.evaluate(() => {
     const texts = Array.from(
-      document.querySelectorAll("div, span, h2, h3, button, a")
+      document.querySelectorAll("div, span, h1, h2, h3, button, a")
     )
       .map((el) => (el.textContent || "").trim())
       .filter(Boolean);
-    return texts.some((t) =>
-      t.toLowerCase().includes("wyświetl więcej na facebooku")
-    );
+
+    return texts.some((t) => {
+      const low = t.toLowerCase();
+      return (
+        low.includes("wyświetl więcej na facebooku") ||
+        low.includes("zobacz więcej na facebooku") ||
+        low.includes("see more on facebook")
+      );
+    });
   });
+
   if (!overlayDetected) return;
 
   console.log("[FB] Wykryto okno logowania na poście – próba zalogowania.");
-  const clicked = await clickByText(page, "Zaloguj się");
+
+  // Najpierw spróbuj PL
+  let clicked = await clickByText(page, "Zaloguj się");
+  if (!clicked) {
+    // potem EN jako fallback
+    clicked = await clickByText(page, "Log In");
+  }
+
   if (clicked) {
-    console.log("[FB] Kliknięto przycisk 'Zaloguj się' w nakładce postu.");
+    console.log(
+      "[FB] Kliknięto przycisk logowania w nakładce posta. Czekam na przeładowanie..."
+    );
     await sleepRandom(4000, 6000);
   } else {
-    console.log("[FB] Nie udało się znaleźć przycisku 'Zaloguj się' na nakładce.");
+    console.log(
+      "[FB] Nie udało się znaleźć przycisku logowania w nakładce posta."
+    );
   }
 }
 
-// ================== FILTR KOMENTARZY (Najtrafniejsze -> Wszystkie) ==================
+/* ============================================================
+   =======  PRZEŁĄCZANIE FILTRA „WSZYSTKIE KOMENTARZE”  ========
+   ============================================================ */
 
 async function switchCommentsFilterToAll(page) {
-  console.log(
-    "[FB] Próba przełączenia filtra komentarzy z 'Najtrafniejsze' na 'Wszystkie komentarze'..."
-  );
+  console.log("[FB] Próba przełączenia filtra komentarzy…");
 
-  const clickedDropdown = await page.evaluate(() => {
-    const candidates = Array.from(
-      document.querySelectorAll("div[role='button'], span, div")
+  // 1. Kliknij w przycisk Najtrafniejsze/Wszystkie komentarze
+  const opened = await page.evaluate(() => {
+    const els = Array.from(
+      document.querySelectorAll("div[role='button'], span[role='button']")
     );
-    const dropdown = candidates.find((el) => {
+
+    const btn = els.find((el) => {
       const t = (el.textContent || "").trim();
-      return t === "Najtrafniejsze";
+      return (
+        t === "Najtrafniejsze" ||
+        t === "Most relevant" ||
+        t === "Wszystkie komentarze" ||
+        t === "All comments"
+      );
     });
-    if (!dropdown) return false;
-    dropdown.click();
-    return true;
+
+    if (!btn) return { found: false };
+
+    btn.click();
+    return { found: true };
   });
 
-  if (!clickedDropdown) {
-    console.log(
-      "[FB] Nie znaleziono elementu 'Najtrafniejsze' – być może już jest ustawione 'Wszystkie'."
-    );
+  if (!opened.found) {
+    console.log("[FB] Nie znaleziono przycisku filtra komentarzy.");
     return false;
   }
 
-  await sleepRandom(800, 1500);
+  await sleepRandom(400, 800);
 
-  const clickedAll = await page.evaluate(() => {
+  // 2. Kliknij opcję "Wszystkie komentarze"
+  const clicked = await page.evaluate(() => {
     const nodes = Array.from(
       document.querySelectorAll(
         "div[role='menuitem'], div[role='menuitemradio'], span, div"
       )
     );
-    const allOpt = nodes.find((el) => {
+    const opt = nodes.find((el) => {
       const t = (el.textContent || "").trim();
-      return t.includes("Wszystkie");
+      return (
+        t.startsWith("Wszystkie komentarze") || t.startsWith("All comments")
+      );
     });
-    if (!allOpt) return false;
-    allOpt.click();
-    return true;
+    if (!opt) return { clicked: false };
+
+    opt.click();
+    return { clicked: true };
   });
 
-  if (clickedAll) {
-    console.log("[FB] Przełączono filtr komentarzy na opcję z 'Wszystkie'.");
-    return true;
-  } else {
-    console.log(
-      "[FB] Nie znaleziono opcji z 'Wszystkie' w menu – możliwy inny layout."
-    );
+  if (!clicked.clicked) {
+    console.log("[FB] Nie ma opcji 'Wszystkie komentarze' w menu drop-down.");
     return false;
   }
+
+  console.log("[FB] Filtr komentarzy ustawiony na: Wszystkie komentarze.");
+
+  return true;
 }
 
-// ================== LICZBA KOMENTARZY ==================
+/* ============================================================
+   ==================== LICZBA KOMENTARZY ======================
+   ============================================================ */
 
 async function getCommentCount(page, postUrl) {
   console.log(`[FB] Otwieranie posta: ${postUrl}`);
-  await page.goto(postUrl, { waitUntil: "load", timeout: 60000 });
 
-  await sleepRandom(4000, 6000);
+  await page.goto(postUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  await sleepRandom(3000, 4500);
+
+  // cookies i nakładki
   await acceptCookies(page, "post-initial");
   await ensureLoggedInOnPostOverlay(page);
-  await sleepRandom(2500, 4000);
   await acceptCookies(page, "post");
-  await sleepRandom(2000, 3500);
-
-  // lekki scroll, żeby załadować sekcję komentarzy
-  await page.evaluate(() => window.scrollBy(0, 200));
   await sleepRandom(1500, 2500);
 
-  // przełącz filtr komentarzy na "Wszystkie" (jeśli się da)
+  await scrollPost(page, 300);
+  await sleepRandom(1000, 1500);
+
+  /* ---- FILTR „WSZYSTKIE KOMENTARZE” ---- */
   try {
-    const switched = await switchCommentsFilterToAll(page);
-    if (switched) {
-      await sleepRandom(1200, 2000);
-    }
+    const ok = await switchCommentsFilterToAll(page);
+    if (ok) await sleepRandom(1200, 2000);
   } catch (e) {
-    console.log("[FB] Błąd podczas przełączania filtra komentarzy:", e.message);
+    console.log("[FB] Błąd switchCommentsFilterToAll:", e.message);
   }
 
-  await page.evaluate(() => window.scrollBy(0, 200));
-  await sleepRandom(1000, 1500);
+  await scrollPost(page, 200);
+  await sleepRandom(800, 1200);
+
+  /* ---- GŁÓWNY PARSER LICZNIKA ---- */
 
   const uiInfo = await page.evaluate(() => {
     const debug = {};
 
-    // ====== GLOBALNE TEKSTY I PRZYCISKI ======
     const allEls = Array.from(
-      document.querySelectorAll("span, div, a, button")
+      document.querySelectorAll("span, div, button, a")
     );
 
     const globalTexts = allEls
@@ -301,11 +425,11 @@ async function getCommentCount(page, postUrl) {
           .trim()
       )
       .filter(Boolean);
-    debug.globalSample = globalTexts.slice(0, 30);
 
     const btnEls = Array.from(
       document.querySelectorAll("button, div[role='button']")
     );
+
     const btnTexts = btnEls
       .map((el) =>
         (el.innerText || el.textContent || "")
@@ -313,383 +437,395 @@ async function getCommentCount(page, postUrl) {
           .trim()
       )
       .filter(Boolean);
+
+    debug.globalSample = globalTexts.slice(0, 30);
     debug.buttonTextsSample = btnTexts.slice(0, 20);
 
-    // ====== HEURYSTYKA 0: frazy typu "306 komentarzy", "1,5 tys. komentarzy" ======
-    function parseFromCommentsPhrase(texts) {
+    /* ===============================
+       A) „X z Y komentarzy”
+       =============================== */
+    function parseXofY(texts) {
       let best = null;
-      let bestRaw = null;
+      let raw = null;
+      for (const t of texts) {
+        const lower = t.toLowerCase();
+        if (!lower.includes("komentarz") && !lower.includes("comment"))
+          continue;
 
-      for (const raw of texts) {
-        const lower = raw.toLowerCase();
-        if (!lower.includes("komentarz") && !lower.includes("comment")) continue;
+        const m = lower.match(/(\d+)\s*z\s*(\d+)/);
+        if (!m) continue;
+
+        const total = parseInt(m[2], 10);
+        if (!Number.isFinite(total) || total <= 0) continue;
+
+        if (best === null || total > best) {
+          best = total;
+          raw = t;
+        }
+      }
+      return best != null && best > 0 ? { num: best, raw } : null;
+    }
+
+    const xOfY = parseXofY([...globalTexts, ...btnTexts]);
+    if (xOfY) return { num: xOfY.num, debug: { ...debug, source: "xOfY" } };
+
+    /* ===============================
+       B) Frazy typu „306 komentarzy”
+       =============================== */
+
+    function parsePhrase(texts) {
+      let best = null;
+      let raw = null;
+
+      for (const t of texts) {
+        const lower = t.toLowerCase();
+        if (!lower.includes("komentarz") && !lower.includes("comment"))
+          continue;
+
+        if (
+          lower.startsWith("zobacz jeszcze") ||
+          lower.startsWith("wyświetl jeszcze") ||
+          lower.startsWith("view more")
+        )
+          continue;
 
         const m = lower.match(
           /(\d+(?:[.,]\d+)?)(?:\s*(tys\.|k))?\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
         );
+
         if (!m) continue;
 
         let n = parseFloat(m[1].replace(",", "."));
-        if (m[2]) {
-          // tys. / k
-          n = n * 1000;
-        }
+        if (m[2]) n *= 1000;
         n = Math.round(n);
-        if (!Number.isFinite(n)) continue;
 
-        if (best === null || n > best) {
+        if (!best || n > best) {
           best = n;
-          bestRaw = raw;
+          raw = t;
         }
       }
 
-      return best != null ? { num: best, raw: bestRaw } : null;
+      return best != null ? { num: best, raw } : null;
     }
 
-    const phraseRes = parseFromCommentsPhrase([...btnTexts, ...globalTexts]);
-    if (phraseRes) {
-      debug.source = "commentsPhraseSmart";
-      debug.phraseMatch = phraseRes.raw;
-      return { num: phraseRes.num, debug };
-    }
+    const pRes = parsePhrase([...globalTexts, ...btnTexts]);
+    if (pRes)
+      return { num: pRes.num, debug: { ...debug, source: "phrase" } };
 
-    // ========= 1. GŁÓWNE ŹRÓDŁO: przyciski po "Wszystkie reakcje" =========
-    const idxReactions = btnTexts.findIndex((t) => {
-      const low = t.toLowerCase();
-      return (
-        low.startsWith("wszystkie reakcje") ||
-        low.startsWith("all reactions")
-      );
-    });
+    /* ===============================
+       C) Cyfra po „Wszystkie reakcje”
+       =============================== */
 
-    if (idxReactions !== -1) {
-      for (let i = idxReactions + 1; i < btnTexts.length; i++) {
+    const idx = btnTexts.findIndex((t) =>
+      t.toLowerCase().startsWith("wszystkie reakcje")
+    );
+
+    if (idx !== -1) {
+      for (let i = idx + 1; i < btnTexts.length; i++) {
         const t = btnTexts[i];
         if (/^\d+$/.test(t)) {
-          const n = Number(t);
-          if (Number.isFinite(n)) {
-            debug.source = "buttonsAfterReactions";
-            debug.reactionsIndex = idxReactions;
-            debug.rawCommentsText = t;
-            return { num: n, debug };
-          }
+          return {
+            num: Number(t),
+            debug: { ...debug, source: "buttonsAfterReactions", raw: t },
+          };
         }
       }
     }
 
-    // ========= 2. HEURYSTYKA "Wszystkie reakcje" + "X komentarzy" =========
-    const reactionLabels = allEls.filter((el) => {
-      const t = (el.textContent || "").trim().toLowerCase();
-      return (
-        t.startsWith("wszystkie reakcje") || t.startsWith("all reactions")
-      );
-    });
-    debug.reactionLabelCount = reactionLabels.length;
+    /* ===============================
+       D) Cyfra obok słowa Komentarz
+       =============================== */
 
-    function scanBlockForMaxComments(root, labelText) {
-      const texts = Array.from(root.querySelectorAll("span, div"))
-        .map((el) => (el.textContent || "").trim())
-        .filter(Boolean);
-
-      let bestNum = null;
-      let bestStr = null;
-
-      for (const raw of texts) {
-        const lower = raw.toLowerCase();
-        const m = lower.match(
-          /^(\d+)\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (m) {
-          const n = parseInt(m[1], 10);
-          if (Number.isFinite(n) && (bestNum === null || n > bestNum)) {
-            bestNum = n;
-            bestStr = raw;
-          }
-        }
-      }
-
-      if (bestNum != null) {
-        return {
-          num: bestNum,
-          debugExtra: {
-            source: "labelAncestorPhraseMax",
-            labelText,
-            matchedText: bestStr,
-            blockSample: texts.slice(0, 20),
-          },
-        };
-      }
-      return null;
-    }
-
-    let bestNum = null;
-    let bestLabel = null;
-    let bestLevel = null;
-    let bestExtra = null;
-
-    for (const lbl of reactionLabels) {
-      const labelText = (lbl.textContent || "").trim();
-      let root = lbl.parentElement;
-      for (let level = 0; level < 5 && root; level++) {
-        const res = scanBlockForMaxComments(root, labelText);
-        if (res && res.num != null) {
-          if (bestNum == null || res.num > bestNum) {
-            bestNum = res.num;
-            bestLabel = labelText;
-            bestLevel = level;
-            bestExtra = res.debugExtra;
-          }
-        }
-        root = root.parentElement;
-      }
-    }
-
-    if (bestNum != null) {
-      debug.usedLabel = bestLabel;
-      debug.usedLevel = bestLevel;
-      debug.fromLabel = bestExtra;
-      debug.source = "labelAncestorMax";
-      return { num: bestNum, debug };
-    }
-
-    // ========= 3. Globalne szukanie "X komentarzy" =========
-    let gBestNum = null;
-    let gBestStr = null;
-    for (const raw of globalTexts) {
-      const lower = raw.toLowerCase();
-      const m = lower.match(
-        /^(\d+)\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-      );
-      if (m) {
-        const n = parseInt(m[1], 10);
-        if (Number.isFinite(n) && (gBestNum === null || n > gBestNum)) {
-          gBestNum = n;
-          gBestStr = raw;
-        }
-      }
-    }
-    if (gBestNum != null) {
-      debug.globalMatch = gBestStr;
-      debug.source = "globalCommentsPhraseMax";
-      return { num: gBestNum, debug };
-    }
-
-    // ========= 4. "Goła cyfra" obok słowa "Komentarz" (layout z photo-overlay) =========
-    let numNearComment = null;
-    let sampleBlock = null;
-
+    let near = null;
     for (const el of allEls) {
       const txt = (el.textContent || "").trim();
-      if (!/^\d+$/.test(txt)) continue; // musi być czysta liczba
+      if (!/^\d+$/.test(txt)) continue;
 
       const parent = el.parentElement;
       if (!parent) continue;
 
-      const blockText = (parent.innerText || "").toLowerCase();
-      if (
-        blockText.includes("komentarz") ||
-        blockText.includes("komentarze") ||
-        blockText.includes("comment")
-      ) {
+      const block = (parent.innerText || "").toLowerCase();
+      if (block.includes("komentarz") || block.includes("comment")) {
         const n = parseInt(txt, 10);
-        if (
-          Number.isFinite(n) &&
-          (numNearComment === null || n > numNearComment)
-        ) {
-          numNearComment = n;
-          sampleBlock = blockText.slice(0, 200);
-        }
+        if (!near || n > near) near = n;
       }
     }
 
-    if (numNearComment != null) {
-      debug.source = "digitNearCommentWord";
-      debug.blockSample = sampleBlock;
-      return { num: numNearComment, debug };
-    }
+    if (near != null)
+      return { num: near, debug: { ...debug, source: "digitNear" } };
 
-    // ========= nic nie znaleziono =========
-    debug.source = "none";
-    return { num: null, debug };
+    return { num: null, debug: { ...debug, source: "none" } };
   });
 
-  console.log("[DBG] Comments-from-buttons debug:", uiInfo.debug);
+  console.log("[DBG] Comments debug:", uiInfo.debug);
 
   if (uiInfo.num != null) {
-    console.log("[FB] Liczba komentarzy (z UI):", uiInfo.num);
+    console.log("[FB] Liczba komentarzy (UI):", uiInfo.num);
     return uiInfo.num;
   }
 
-  console.log(
-    "[FB] Nie udało się odczytać liczby komentarzy z UI – fallback na anchorach."
-  );
+  /* ---- FALLBACK: unikalne ID z anchorów ---- */
 
   const fallback = await page.evaluate(() => {
     const anchors = Array.from(
       document.querySelectorAll('a[href*="comment_id"]')
     );
     const ids = new Set();
+
     for (const a of anchors) {
       try {
         const url = new URL(a.href);
         const cid = url.searchParams.get("comment_id");
         const rid = url.searchParams.get("reply_comment_id");
-        const id = rid || cid;
-        if (id) ids.add(id);
+        let raw = rid || cid;
+
+        if (!raw) continue;
+
+        if (!/^\d+$/.test(raw)) {
+          try {
+            const dec = atob(raw);
+            const m = dec.match(/:(\d+)_([0-9]+)/);
+            if (m) raw = m[2];
+          } catch {}
+        }
+
+        if (raw) ids.add(raw);
       } catch {}
     }
-    const count = ids.size > 0 ? 1 : 0;
-    return { uniqueIds: ids.size, count };
+
+    return { count: ids.size };
   });
 
-  console.log(
-    `[FB] Liczba komentarzy (fallback po anchorach, uproszczona ${fallback.count}):`,
-    fallback
-  );
+  console.log("[FB] Fallback – anchor IDs:", fallback.count);
   return fallback.count;
 }
 
-// ================== ROZWIJANIE KOMENTARZY ==================
+/* ============================================================
+   ================= ROZWIJANIE KOMENTARZY ====================
+   ============================================================ */
 
 async function expandAllComments(page) {
   if (!EXPAND_COMMENTS) {
-    console.log(
-      "[FB] EXPAND_COMMENTS=false – pomijam klikanie 'więcej komentarzy/odpowiedzi'."
-    );
+    console.log("[FB] EXPAND_COMMENTS=false → pomijam rozwijanie.");
     return;
   }
 
   let expanded = false;
 
+  /* === więcej komentarzy === */
   while (true) {
     const clicked = await page.evaluate(() => {
-      const elements = Array.from(
+      const els = Array.from(
         document.querySelectorAll(
           "button, div[role='button'], span[role='button']"
         )
       );
-      for (const el of elements) {
-        if (el.tagName === "A") continue;
-        const txt = (el.textContent || "").trim().toLowerCase();
-        if (!txt) continue;
+
+      for (const el of els) {
+        const t = (el.textContent || "").trim().toLowerCase();
         if (
-          txt.startsWith("wyświetl więcej komentarzy") ||
-          txt.startsWith("view more comments") ||
-          txt.startsWith("wyświetl wcześniejsze komentarze") ||
-          txt.startsWith("view previous comments")
+          t.startsWith("wyświetl więcej komentarzy") ||
+          t.startsWith("zobacz więcej komentarzy") ||
+          t.startsWith("view more comments") ||
+          t.startsWith("wyświetl wcześniejsze komentarze") ||
+          t.startsWith("view previous comments") ||
+          (t.includes("zobacz jeszcze") && t.includes("komentarz"))
         ) {
           el.click();
           return true;
         }
       }
+
       return false;
     });
+
     if (!clicked) break;
+
     expanded = true;
-    console.log(
-      "[FB] Kliknięto 'więcej komentarzy' – ładowanie kolejnych komentarzy..."
+    console.log("[FB] -> klik 'więcej komentarzy'");
+    await new Promise((r) =>
+      setTimeout(r, 800 + Math.random() * 700)
     );
-    await sleepRandom(2000, 3000);
   }
 
+  /* === więcej odpowiedzi === */
   while (true) {
     const clicked = await page.evaluate(() => {
-      const elements = Array.from(
+      const els = Array.from(
         document.querySelectorAll(
           "button, div[role='button'], span[role='button']"
         )
       );
-      for (const el of elements) {
-        if (el.tagName === "A") continue;
-        const txt = (el.textContent || "").trim();
-        if (!txt) continue;
-        const lower = txt.toLowerCase();
+
+      for (const el of els) {
+        const t = (el.textContent || "").trim().toLowerCase();
+
+        // klasyczne teksty
         if (
-          lower.startsWith("wyświetl więcej odpowiedzi") ||
-          lower.startsWith("view more replies") ||
-          lower.startsWith("wyświetl wcześniejsze odpowiedzi") ||
-          lower.startsWith("view previous replies") ||
-          (lower.includes("odpowied") &&
-            !lower.startsWith("odpowiedz") &&
-            (/[0-9]|więcej/.test(lower)))
+          t.startsWith("wyświetl więcej odpowiedzi") ||
+          t.startsWith("zobacz więcej odpowiedzi") ||
+          t.startsWith("view more replies") ||
+          t.startsWith("wyświetl wcześniejsze odpowiedzi") ||
+          t.startsWith("view previous replies")
         ) {
           el.click();
           return true;
         }
+
+        // NOWE: „2 odpowiedzi”, „3 odpowiedzi” itd.
+        if (t.includes("odpowiedzi") && /\d/.test(t)) {
+          el.click();
+          return true;
+        }
       }
+
       return false;
     });
+
     if (!clicked) break;
+
     expanded = true;
-    console.log(
-      "[FB] Kliknięto 'więcej odpowiedzi' – ładowanie kolejnych odpowiedzi..."
+    console.log("[FB] -> klik 'więcej odpowiedzi / X odpowiedzi'");
+    await new Promise((r) =>
+      setTimeout(r, 600 + Math.random() * 600)
     );
-    await sleepRandom(1500, 2500);
   }
 
+  /* === "Zobacz więcej" w treści komentarza === */
   while (true) {
     const clicked = await page.evaluate(() => {
-      const buttons = Array.from(
+      const els = Array.from(
         document.querySelectorAll("span[role='button'], div[role='button']")
       );
-      for (const btn of buttons) {
-        if (btn.tagName === "A") continue;
-        const txt = (btn.textContent || "").trim();
-        if (txt === "Zobacz więcej" || txt === "See more") {
-          btn.click();
+
+      for (const el of els) {
+        const t = (el.textContent || "").trim();
+        if (t === "Zobacz więcej" || t === "See more") {
+          el.click();
           return true;
         }
       }
       return false;
     });
+
     if (!clicked) break;
-    await sleepRandom(500, 1000);
+
+    await new Promise((r) =>
+      setTimeout(r, 400 + Math.random() * 500)
+    );
+  }
+
+  /* === Dodatkowy lazy scroll (full preload komentarzy) === */
+
+  for (let i = 0; i < 12; i++) {
+    const reached = await page.evaluate((dy) => {
+      function findScrollableAncestor(start) {
+        let el = start;
+        while (el) {
+          const style = window.getComputedStyle(el);
+          const canScrollY =
+            style.overflowY === "auto" || style.overflowY === "scroll";
+          if (canScrollY && el.scrollHeight - el.clientHeight > 50) {
+            return el;
+          }
+          el = el.parentElement;
+        }
+        return null;
+      }
+
+      const centerEl = document.elementFromPoint(
+        window.innerWidth / 2,
+        window.innerHeight / 2
+      );
+
+      let target = centerEl ? findScrollableAncestor(centerEl) : null;
+
+      if (!target) {
+        const dialog = document.querySelector("div[role='dialog']");
+        if (dialog && dialog.scrollHeight - dialog.clientHeight > 50) {
+          target = dialog;
+        }
+      }
+
+      if (!target) {
+        target =
+          document.scrollingElement ||
+          document.documentElement ||
+          document.body;
+      }
+
+      let before, after;
+      if (
+        target === document.body ||
+        target === document.documentElement ||
+        target === document.scrollingElement
+      ) {
+        before = window.scrollY;
+        window.scrollTo(0, before + dy);
+        after = window.scrollY;
+      } else {
+        before = target.scrollTop;
+        target.scrollTop = before + dy;
+        after = target.scrollTop;
+      }
+
+      return after === before;
+    }, 350);
+
+    await new Promise((r) =>
+      setTimeout(r, 300 + Math.random() * 300)
+    );
+    if (reached) break;
   }
 
   if (expanded) {
-    console.log(
-      "[FB] Wszystkie komentarze i odpowiedzi zostały rozwinięte (na ten moment)."
-    );
+    console.log("[FB] Wszystkie komentarze i odpowiedzi rozwinięte.");
   } else {
-    console.log(
-      "[FB] Brak ukrytych komentarzy/odpowiedzi do rozwinięcia (na ten moment)."
-    );
+    console.log("[FB] Nic nie było ukryte.");
   }
 }
 
-// ================== EKSTRAKCJA KOMENTARZY ==================
+/* ============================================================
+   ================== EXTRACT COMMENTS DATA ====================
+   ============================================================ */
 
 async function extractCommentsData(page) {
-  if (!EXPAND_COMMENTS) {
-    return [];
-  }
+  if (!EXPAND_COMMENTS) return [];
 
   return page.evaluate(() => {
+    /* ------------------ FUNKCJE POMOCNICZE ------------------ */
+
     function looksLikeTime(t) {
       const lower = t.toLowerCase();
       if (!lower) return false;
+
       if (
-        /\b(min|minut|godz|h|hr|dni|day|days|tyg|week|weeks|wczoraj|yesterday|sek|s ago|m ago|h ago|d ago)\b/.test(
+        /\b(min|minut|godz|h|hr|dni|day|days|tyg|week|weeks|sek|s ago|m ago|h ago|d ago)\b/.test(
           lower
         )
-      ) {
+      )
         return true;
-      }
+
+      if (/\b(wczoraj|yesterday)\b/.test(lower)) return true;
+
       if (/^\d+\s*(s|min|h|d)\b/.test(lower)) return true;
+
       return false;
     }
 
     function stripUiWords(str, timeText, author) {
-      let out = str || "";
+      if (!str) return "";
+
+      let out = str;
 
       if (author) {
         const escaped = author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        out = out.replace(new RegExp(escaped, "g"), "").trim();
+        out = out.replace(new RegExp(escaped, "g"), "");
       }
 
       if (timeText) {
         const escapedTime = timeText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        out = out.replace(new RegExp(escapedTime, "g"), "").trim();
+        out = out.replace(new RegExp(escapedTime, "g"), "");
       }
 
       out = out.replace(
@@ -698,153 +834,164 @@ async function extractCommentsData(page) {
       );
 
       out = out.replace(/lubię to!?/gi, "");
-      out = out.replace(
-        /\b(like|odpowiedz|reply|komentarz|comment|comments|udostępnij|share|autor)\b/gi,
-        ""
-      );
+      out = out.replace(/(like|odpowiedz|reply)/gi, "");
+      out = out.replace(/(komentarz|komentarze|udostępnij|share)/gi, "");
 
       out = out.replace(/\s+/g, " ").trim();
       return out;
     }
 
+    /* ------------------ GŁÓWNY PARSER ------------------ */
+
     const anchors = Array.from(
-      document.querySelectorAll('a[href*="comment_id"]')
+      document.querySelectorAll(
+        'a[href*="comment_id"], a[href*="reply_comment_id"]'
+      )
     );
+
     const byId = new Map();
 
-    for (const anchor of anchors) {
-      const href = anchor.href;
-      let commentId = null;
+    for (const a of anchors) {
+      const href = a.href;
+      let rawId = null;
+
+      /* ====== ID KOMENTARZA ====== */
+
       try {
         const url = new URL(href);
-        const cid = url.searchParams.get("comment_id");
-        const rid = url.searchParams.get("reply_comment_id");
-        commentId = rid || cid;
+        const c = url.searchParams.get("comment_id");
+        const r = url.searchParams.get("reply_comment_id");
+        rawId = r || c;
       } catch {
         continue;
       }
-      if (!commentId) continue;
 
-      const rawAnchorText =
-        (anchor.innerText || anchor.textContent || "").trim() || "";
+      if (!rawId) continue;
 
-      let timeText = looksLikeTime(rawAnchorText) ? rawAnchorText : "";
+      let commentId = rawId;
 
-      let commentItem =
-        anchor.closest("div[aria-label*='Komentarz']") ||
-        anchor.closest("div[aria-label*='comment']") ||
-        anchor.closest("li") ||
-        anchor.closest("[role='article']") ||
-        anchor.parentElement;
+      // base64 → numer
+      if (!/^\d+$/.test(commentId)) {
+        try {
+          const decoded = atob(commentId); // "comment:xxx_12345"
+          const m = decoded.match(/_(\d+)$/);
+          if (m) commentId = m[1];
+        } catch {}
+      }
 
-      if (!timeText && commentItem) {
-        const timeCand = Array.from(
-          commentItem.querySelectorAll("a, span, time")
-        )
+      /* ====== SZUKAMY BLOKU KOMENTARZA ====== */
+
+      let block =
+        a.closest("div[aria-label*='Komentarz']") ||
+        a.closest("div[aria-label*='comment']") ||
+        a.closest("li") ||
+        a.closest("[role='article']") ||
+        a.parentElement;
+
+      // fallback
+      if (!block) block = a.parentElement;
+
+      /* ====== CZAS ====== */
+
+      const rawTime = (a.innerText || a.textContent || "").trim();
+      let timeText = looksLikeTime(rawTime) ? rawTime : "";
+
+      if (!timeText && block) {
+        const t = Array.from(block.querySelectorAll("a, span, time"))
           .map((el) => (el.textContent || "").trim())
-          .filter(looksLikeTime)[0];
-        if (timeCand) timeText = timeCand;
+          .find((txt) => looksLikeTime(txt));
+        if (t) timeText = t;
       }
 
-      let existing = byId.get(commentId);
-      if (!existing) {
-        existing = {
-          id: commentId,
-          author: null,
-          text: "",
-          time: "",
-          permalink: href,
-        };
-      }
+      /* ====== AUTHOR ====== */
 
-      let author = existing.author;
-      let content = existing.text;
-      let finalTime = existing.time || timeText;
+      let author = null;
 
-      if (commentItem) {
-        if (!author) {
-          const linkElems = Array.from(commentItem.querySelectorAll("a"));
-          for (const link of linkElems) {
-            const ltxt = (link.innerText || "").trim();
-            if (!ltxt) continue;
-            const low = ltxt.toLowerCase();
-            if (
-              low === "lubię to!" ||
-              low === "lubię to" ||
-              low === "like" ||
-              low === "odpowiedz" ||
-              low === "reply"
-            )
-              continue;
-            if (looksLikeTime(ltxt)) continue;
-            author = ltxt;
-            break;
-          }
+      if (block) {
+        const links = Array.from(block.querySelectorAll("a"));
+        for (const l of links) {
+          const t = (l.innerText || l.textContent || "").trim();
+          if (!t) continue;
+
+          const low = t.toLowerCase();
+          if (
+            low === "lubię to!" ||
+            low === "lubię to" ||
+            low === "like" ||
+            low === "odpowiedz" ||
+            low === "reply"
+          )
+            continue;
+          if (looksLikeTime(t)) continue;
+
+          author = t;
+          break;
         }
+      }
 
-        const potentialBlocks = Array.from(
-          commentItem.querySelectorAll("div[dir='auto'], span[dir='auto'], p")
-        );
+      /* ====== TREŚĆ KOMENTARZA ====== */
+
+      let finalText = "";
+      let pos = null;
+
+      if (block) {
+        try {
+          const rect = block.getBoundingClientRect();
+          pos = Math.round(rect.top + window.scrollY);
+        } catch {}
 
         const candidates = [];
 
-        for (const el of potentialBlocks) {
-          const txtRaw = (el.textContent || "").trim();
-          if (!txtRaw) continue;
-          let txt = txtRaw;
-          const lower = txt.toLowerCase();
+        const divs = Array.from(
+          block.querySelectorAll("div[dir='auto'], span[dir='auto'], p")
+        );
 
-          if (author && txt === author) continue;
-          if (timeText && txt === timeText) continue;
-          if (looksLikeTime(txt)) continue;
+        for (const el of divs) {
+          let raw = (el.textContent || "").trim();
+          if (!raw) continue;
 
-          if (
-            lower.includes("lubię to") ||
-            lower.includes("like") ||
-            lower.includes("odpowiedz") ||
-            lower.includes("reply") ||
-            lower.includes("komentarz") ||
-            lower.includes("udostępnij")
-          ) {
-            const withoutUi = stripUiWords(txt, timeText, author);
-            if (!withoutUi) continue;
-            txt = withoutUi;
-          } else {
-            txt = stripUiWords(txt, timeText, author);
-          }
+          const lower = raw.toLowerCase();
 
+          if (raw === author) continue;
+          if (raw === timeText) continue;
+          if (looksLikeTime(raw)) continue;
+
+          // usuń UI śmieci
+          const txt = stripUiWords(raw, timeText, author);
           if (!txt) continue;
 
-          const btn = el.closest("button,[role='button']");
-          if (btn) continue;
+          const isBtn = el.closest("button,[role='button']");
+          if (isBtn) continue;
 
           candidates.push(txt);
         }
 
-        let bestText = content || "";
-        for (const t of candidates) {
-          if (!bestText) {
-            bestText = t;
-          } else if (t.length > bestText.length) {
-            bestText = t;
-          }
+        if (candidates.length > 0) {
+          // bierzemy najdłuższy
+          finalText = candidates.reduce(
+            (acc, cur) => (cur.length > acc.length ? cur : acc),
+            ""
+          );
         }
 
-        if (!bestText) {
-          let fullText = (commentItem.innerText || "").trim();
-          fullText = stripUiWords(fullText, timeText, author);
-          bestText = fullText;
+        if (!finalText) {
+          let fallback = (block.innerText || "").trim();
+          fallback = stripUiWords(fallback, timeText, author);
+          finalText = fallback;
         }
-
-        content = bestText;
       }
+
+      /* ====== ZAPIS DO MAPY ====== */
+
+      const existing = byId.get(commentId) || {};
 
       byId.set(commentId, {
         id: commentId,
-        author: author || null,
-        text: content || "",
-        time: finalTime,
+        author: author || existing.author || null,
+        text: finalText || existing.text || "",
+        time: timeText || existing.time || "",
         permalink: href,
+        pos: pos ?? existing.pos ?? null,
       });
     }
 
@@ -852,20 +999,21 @@ async function extractCommentsData(page) {
   });
 }
 
-// ================== WEBHOOK ==================
+/* ============================================================
+   ======================== WEBHOOK ============================
+   ============================================================ */
 
 async function sendWebhook(post, newComments, newCount, oldCount) {
   const url = process.env.WEBHOOK_URL;
   if (!url) {
-    console.warn(
-      "[Webhook] Brak ustawionego URL webhooka (WEBHOOK_URL) – pomijam wysyłkę."
-    );
+    console.warn("[Webhook] Brak WEBHOOK_URL – pomijam wysyłkę.");
     return;
   }
 
   const payload = {
     postId: post.id,
     postUrl: post.url,
+    postName: POST_LABELS[post.id] || post.id,
     commentCount: newCount,
     previousCommentCount: oldCount,
     newComments,
@@ -878,11 +1026,13 @@ async function sendWebhook(post, newComments, newCount, oldCount) {
     await axios.post(url, payload, { timeout: 10000 });
     console.log("[Webhook] Wysłano nowe komentarze do webhooka.");
   } catch (err) {
-    console.error("[Webhook] Błąd wysyłania do webhooka:", err.message);
+    console.error("[Webhook] Błąd wysyłania:", err.message);
   }
 }
 
-// ================== GŁÓWNA PĘTLA ==================
+/* ============================================================
+   ======================== WATCHER ============================
+   ============================================================ */
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
@@ -902,6 +1052,7 @@ async function startWatcher() {
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   );
 
+  /* ==== LOGOWANIE / COOKIES ==== */
   await loadCookies(page);
   await page
     .goto("https://www.facebook.com/", {
@@ -912,7 +1063,7 @@ async function startWatcher() {
 
   let loggedIn = await checkIfLogged(page);
   if (!loggedIn) {
-    console.log("[FB] Nie zalogowano, następuje normalne logowanie.");
+    console.log("[FB] Brak aktywnej sesji – logowanie...");
     await fbLogin(page);
     await saveCookies(page);
   } else {
@@ -925,65 +1076,92 @@ async function startWatcher() {
     "sekund."
   );
 
+  /* ========================================================
+     ===================== GŁÓWNA PĘTLA =====================
+     ======================================================== */
+
   const loop = async () => {
     for (const post of POSTS) {
       try {
         const count = await getCommentCount(page, post.url);
+
         if (count == null) {
           console.log(
-            `[Watcher] Post ${post.id}: Nie udało się odczytać liczby komentarzy.`
+            `[Watcher] Post ${post.id}: Nie udało się odczytać licznika.`
           );
           continue;
         }
 
         const prev = lastCounts.get(post.id) ?? null;
 
-        // ================== PIERWSZE ODCZYTANIE POSTA ==================
+        /* ------------------ PIERWSZE ODCZYTANIE ------------------ */
         if (prev === null) {
           lastCounts.set(post.id, count);
+
           console.log(
             `[Watcher] Post ${post.id}: Startowa liczba komentarzy = ${count}`
           );
 
-          if (EXPAND_COMMENTS) {
-            await expandAllComments(page);
-            const allComments = await extractCommentsData(page);
-
-            // zapamiętujemy wszystkie istniejące komentarze jako "znane"
-            for (const c of allComments) {
-              if (c.id) knownComments.add(c.id);
-            }
-
+          if (!EXPAND_COMMENTS) {
             console.log(
-              `[Watcher] Post ${post.id}: Zapamiętano ${allComments.length} istniejących komentarzy (bez wysyłki do webhooka).`
+              `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam wczytywanie istniejących.`
             );
-          } else {
-            console.log(
-              `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – nie wczytuję treści istniejących komentarzy.`
-            );
+            continue;
           }
+
+          await expandAllComments(page);
+          let allComments = await extractCommentsData(page);
+
+          // sort DOM-top → bottom
+          allComments = allComments.sort((a, b) => {
+            const pa = typeof a.pos === "number" ? a.pos : 999999999;
+            const pb = typeof b.pos === "number" ? b.pos : 999999999;
+            return pa - pb;
+          });
+
+          let maxPos = 0;
+          for (const c of allComments) {
+            if (c.id) knownComments.add(c.id);
+            if (typeof c.pos === "number" && c.pos > maxPos) {
+              maxPos = c.pos;
+            }
+          }
+
+          console.log(
+            `[Watcher] Post ${post.id}: Zapamiętano ${allComments.length} istniejących komentarzy (maxPos=${maxPos}).`
+          );
+
+          continue;
         }
 
-        // ================== ZMIANA LICZNIKA ==================
-        else if (count !== prev) {
+        /* ------------------ ZMIANA LICZNIKA ------------------ */
+        if (count !== prev) {
           console.log(
             `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
           );
+
           lastCounts.set(post.id, count);
 
+          // wzrost liczby komentarzy
           if (count > prev) {
             let newComments = [];
 
             if (EXPAND_COMMENTS) {
               await expandAllComments(page);
-              const snapshot = await extractCommentsData(page);
+              let snapshot = await extractCommentsData(page);
+
+              snapshot = snapshot.sort((a, b) => {
+                const pa = typeof a.pos === "number" ? a.pos : 999999999;
+                const pb = typeof b.pos === "number" ? b.pos : 999999999;
+                return pa - pb;
+              });
 
               console.log(
-                `[DBG] extractCommentsData – snapshot ${snapshot.length} komentarzy.`
+                `[DBG] extractCommentsData – snapshot = ${snapshot.length}`
               );
               console.dir(snapshot.slice(0, 5), { depth: null });
 
-              // 1) normalnie: tylko komentarze z nowymi ID
+              // normalne wyszukiwanie nowych komentarzy po ID
               for (const c of snapshot) {
                 if (!c.id) continue;
                 if (!knownComments.has(c.id)) {
@@ -992,61 +1170,53 @@ async function startWatcher() {
                 }
               }
 
-              // 2) usuwamy totalne śmieci
+              // filtracja śmieci
               newComments = newComments.filter((c) => {
-                const hasId = !!(c.id && String(c.id).trim());
-                const hasAuthor = !!(c.author && String(c.author).trim());
-                const hasText = !!(c.text && String(c.text).trim());
-                const hasPermalink =
-                  !!(c.permalink && String(c.permalink).trim());
-
-                if (!hasId && !hasAuthor && !hasText && !hasPermalink) {
-                  return false;
-                }
-                return true;
+                const idOk = c.id && c.id.trim();
+                const textOk = c.text && c.text.trim();
+                const authorOk = c.author && c.author.trim();
+                const linkOk = c.permalink && c.permalink.trim();
+                return idOk || textOk || authorOk || linkOk;
               });
 
-              // 3) fallback: jeśli mimo wzrostu licznika nie znaleźliśmy nic po ID,
-              //    bierzemy ostatnie (count - prev) komentarzy ze snapshotu
+              // FALLBACK gdy FB nie da ID
               if (newComments.length === 0) {
                 const diff = Math.max(1, count - prev);
-                const cleanedSnapshot = snapshot.filter((c) => {
-                  const hasText = !!(c.text && String(c.text).trim());
-                  const hasId = !!(c.id && String(c.id).trim());
-                  const hasPermalink =
-                    !!(c.permalink && String(c.permalink).trim());
-                  return hasText || hasId || hasPermalink;
+
+                const cleaned = snapshot.filter((c) => {
+                  const textOk = c.text && c.text.trim();
+                  const idOk = c.id && c.id.trim();
+                  const linkOk = c.permalink && c.permalink.trim();
+                  return textOk || idOk || linkOk;
                 });
 
-                const tail = cleanedSnapshot.slice(-diff);
+                const tail = cleaned.slice(-diff);
+
                 for (const c of tail) {
                   if (c.id) knownComments.add(c.id);
                 }
+
                 newComments = tail;
 
                 console.log(
-                  `[Watcher] Post ${post.id}: Fallback – po ID nic nie wyszło, biorę ostatnie ${diff} komentarzy jako nowe.`
+                  `[Watcher] Post ${post.id}: Fallback — brak ID, biorę ostatnie ${diff} komentarzy jako nowe.`
                 );
               }
 
               console.log(
-                `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy do wysłania.`
-              );
-            } else {
-              console.log(
-                `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – wysyłam tylko nowy licznik, bez treści komentarzy.`
+                `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
               );
             }
 
             await sendWebhook(post, newComments, count, prev);
           } else {
             console.log(
-              `[Watcher] Post ${post.id}: Liczba komentarzy zmniejszyła się (${prev} -> ${count}).`
+              `[Watcher] Post ${post.id}: Komentarzy mniej (${prev} -> ${count}).`
             );
           }
         }
 
-        // ================== BEZ ZMIAN ==================
+        /* ------------------ BEZ ZMIAN ------------------ */
         else {
           console.log(
             `[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`
@@ -1054,7 +1224,7 @@ async function startWatcher() {
         }
       } catch (err) {
         console.error(
-          `[Watcher] Błąd podczas sprawdzania post ${post.id}:`,
+          `[Watcher] Błąd przy sprawdzaniu ${post.id}:`,
           err.message
         );
       }
@@ -1066,6 +1236,10 @@ async function startWatcher() {
 
   loop();
 }
+
+/* ============================================================
+   ===================== START APPLICATION =====================
+   ============================================================ */
 
 startWatcher().catch((err) => {
   console.error("Fatal error:", err);
