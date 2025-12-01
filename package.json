@@ -3,10 +3,10 @@
   "name": "fb_puppeteer",
   "version": "1.0.0",
   "description": "Watcher komentarzy FB + webhook do Make",
-  "main": "index.js",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node src/index.js"
   },
   "keywords": [],
   "author": "",
