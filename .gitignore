@@ -4,6 +4,7 @@ node_modules/
 # pliki z sekretami
 .env
 cookies.json
+config/links.json
 
 # pliki, które mogą się generować same
 npm-debug.log*

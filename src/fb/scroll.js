@@ -1,3 +1,8 @@
+/**
+ * Scrollowanie posta:
+ * - znajdujemy scrollowalny kontener pod środkiem ekranu
+ * - jeśli się nie uda → dialog → dokument
+ */
 async function scrollPost(page, amount = 450) {
   await page.evaluate((dy) => {
     function findScrollableAncestor(start) {

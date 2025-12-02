@@ -96,4 +96,4 @@ async function ensureLoggedInOnPostOverlay(page) {
   }
 }
 
-export { fbLogin, checkIfLogged, clickByText, ensureLoggedInOnPostOverlay };
+export { fbLogin, checkIfLogged, ensureLoggedInOnPostOverlay, clickByText };

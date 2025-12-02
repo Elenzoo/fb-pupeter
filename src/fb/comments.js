@@ -1,8 +1,12 @@
 import { EXPAND_COMMENTS } from "../config.js";
 import { sleepRandom } from "../utils/sleep.js";
+import { scrollPost } from "./scroll.js";
 import { acceptCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay } from "./login.js";
-import { scrollPost } from "./scroll.js";
+
+/* ============================================================
+   =======  PRZEŁĄCZANIE FILTRA „WSZYSTKIE KOMENTARZE”  ========
+   ============================================================ */
 
 async function switchCommentsFilterToAll(page) {
   console.log("[FB] Próba przełączenia filtra komentarzy…");
@@ -65,6 +69,11 @@ async function switchCommentsFilterToAll(page) {
   return true;
 }
 
+
+/* ============================================================
+   ==================== LICZBA KOMENTARZY ======================
+   ============================================================ */
+
 async function getCommentCount(page, postUrl) {
   console.log(`[FB] Otwieranie posta: ${postUrl}`);
 
@@ -91,7 +100,7 @@ async function getCommentCount(page, postUrl) {
   await scrollPost(page, 200);
   await sleepRandom(800, 1200);
 
-  /* ---- GŁÓWNY PARSER LICZNIKA ---- */
+  /* ---- GŁÓWNY PARSER LICZNIKA (UI) ---- */
 
   const uiInfo = await page.evaluate(() => {
     const debug = {};
@@ -123,37 +132,101 @@ async function getCommentCount(page, postUrl) {
     debug.globalSample = globalTexts.slice(0, 30);
     debug.buttonTextsSample = btnTexts.slice(0, 20);
 
-    /* ===============================
-       A) „X z Y komentarzy”
-       =============================== */
-    function parseXofY(texts) {
-      let best = null;
-      let raw = null;
-      for (const t of texts) {
-        const lower = t.toLowerCase();
-        if (!lower.includes("komentarz") && !lower.includes("comment"))
-          continue;
+    /* ==========================================
+       1) LICZBA OBOK "WSZYSTKIE KOMENTARZE"
+       ========================================== */
 
-        const m = lower.match(/(\d+)\s*z\s*(\d+)/);
-        if (!m) continue;
+    function fromAllCommentsButton(buttonTexts) {
+      const idx = buttonTexts.findIndex((t) => {
+        const low = t.toLowerCase();
+        return (
+          low === "wszystkie komentarze" ||
+          low === "all comments"
+        );
+      });
 
-        const total = parseInt(m[2], 10);
-        if (!Number.isFinite(total) || total <= 0) continue;
+      if (idx === -1) return null;
 
-        if (best === null || total > best) {
-          best = total;
-          raw = t;
-        }
+      const numericCandidates = [];
+      for (let i = idx - 3; i <= idx + 3; i++) {
+        if (i < 0 || i >= buttonTexts.length || i === idx) continue;
+        const t = buttonTexts[i];
+        if (!t) continue;
+        const m = t.match(/^\d+$/);
+        if (m) numericCandidates.push(parseInt(m[0], 10));
       }
-      return best != null && best > 0 ? { num: best, raw } : null;
+
+      if (!numericCandidates.length) return null;
+      const best = Math.max(...numericCandidates);
+      return { num: best, raw: numericCandidates.join(",") };
     }
 
-    const xOfY = parseXofY([...globalTexts, ...btnTexts]);
-    if (xOfY) return { num: xOfY.num, debug: { ...debug, source: "xOfY" } };
+    const btnRes = fromAllCommentsButton(btnTexts);
+    if (btnRes) {
+      return {
+        num: btnRes.num,
+        debug: { ...debug, source: "buttonAllComments", raw: btnRes.raw },
+      };
+    }
 
-    /* ===============================
-       B) Frazy typu „306 komentarzy”
-       =============================== */
+    /* ==========================================
+       2) LICZNIK POWIĄZANY Z FILTREM
+          "Najtrafniejsze / Wszystkie komentarze"
+       ========================================== */
+
+    function fromFilterLinkedCount(buttonTexts) {
+      const filterIdx = buttonTexts.findIndex((t) => {
+        const low = t.toLowerCase();
+        return (
+          low === "najtrafniejsze" ||
+          low === "most relevant" ||
+          low === "wszystkie komentarze" ||
+          low === "all comments"
+        );
+      });
+
+      if (filterIdx === -1) return null;
+
+      // szukamy wstecz pierwszego "X komentarzy" PRZED filtrem
+      for (let i = filterIdx - 1; i >= 0; i--) {
+        const txt = buttonTexts[i];
+        if (!txt) continue;
+        const lower = txt.toLowerCase();
+
+        if (
+          !lower.includes("komentarz") &&
+          !lower.includes("comment")
+        ) {
+          continue;
+        }
+
+        const m = lower.match(
+          /(\d+(?:[.,]\d+)?)(?:\s*(tys\.|k))?\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
+        );
+        if (!m) continue;
+
+        let n = parseFloat(m[1].replace(",", "."));
+        if (m[2]) n *= 1000;
+        n = Math.round(n);
+
+        return { num: n, raw: txt };
+      }
+
+      return null;
+    }
+
+    const filterRes = fromFilterLinkedCount(btnTexts);
+    if (filterRes) {
+      return {
+        num: filterRes.num,
+        debug: { ...debug, source: "filterLinked", raw: filterRes.raw },
+      };
+    }
+
+    /* ==========================================
+       3) Frazy typu „174 komentarzy”
+          (ogólny fallback, jak wyżej nic nie zadziała)
+       ========================================== */
 
     function parsePhrase(texts) {
       let best = null;
@@ -161,6 +234,12 @@ async function getCommentCount(page, postUrl) {
 
       for (const t of texts) {
         const lower = t.toLowerCase();
+
+        // IGNORUJEMY bloki powiązane z "Wszystkie reakcje"
+        if (lower.includes("wszystkie reakcje") || lower.includes("all reactions")) {
+          continue;
+        }
+
         if (!lower.includes("komentarz") && !lower.includes("comment"))
           continue;
 
@@ -181,42 +260,59 @@ async function getCommentCount(page, postUrl) {
         if (m[2]) n *= 1000;
         n = Math.round(n);
 
-        if (!best || n > best) {
-          best = n;
-          raw = t;
-        }
+        // tutaj bierzemy po prostu OSTATNIĄ dopasowaną frazę,
+        // a nie największą liczbę (żeby nie brać 231 z innego posta)
+        best = n;
+        raw = t;
       }
 
       return best != null ? { num: best, raw } : null;
     }
 
     const pRes = parsePhrase([...globalTexts, ...btnTexts]);
-    if (pRes)
-      return { num: pRes.num, debug: { ...debug, source: "phrase" } };
-
-    /* ===============================
-       C) Cyfra po „Wszystkie reakcje”
-       =============================== */
-
-    const idx = btnTexts.findIndex((t) =>
-      t.toLowerCase().startsWith("wszystkie reakcje")
-    );
-
-    if (idx !== -1) {
-      for (let i = idx + 1; i < btnTexts.length; i++) {
-        const t = btnTexts[i];
-        if (/^\d+$/.test(t)) {
-          return {
-            num: Number(t),
-            debug: { ...debug, source: "buttonsAfterReactions", raw: t },
-          };
-        }
-      }
+    if (pRes) {
+      return {
+        num: pRes.num,
+        debug: { ...debug, source: "phrase", raw: pRes.raw },
+      };
     }
 
-    /* ===============================
-       D) Cyfra obok słowa Komentarz
-       =============================== */
+    /* ==========================================
+       4) Wzór „X z Y komentarzy”
+       ========================================== */
+
+    function parseXofY(texts) {
+      let best = null;
+      let raw = null;
+      for (const t of texts) {
+        const lower = t.toLowerCase();
+        const m = lower.match(
+          /(\d+)\s*z\s*(\d+)\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
+        );
+        if (!m) continue;
+
+        const total = parseInt(m[2], 10);
+        if (!Number.isFinite(total) || total <= 0) continue;
+
+        if (best === null || total > best) {
+          best = total;
+          raw = t;
+        }
+      }
+      return best != null && best > 0 ? { num: best, raw } : null;
+    }
+
+    const xOfY = parseXofY([...globalTexts, ...btnTexts]);
+    if (xOfY) {
+      return {
+        num: xOfY.num,
+        debug: { ...debug, source: "xOfY", raw: xOfY.raw },
+      };
+    }
+
+    /* ==========================================
+       5) Cyfra w tym samym bloku co „komentarz”
+       ========================================== */
 
     let near = null;
     for (const el of allEls) {
@@ -233,20 +329,19 @@ async function getCommentCount(page, postUrl) {
       }
     }
 
-    if (near != null)
-      return { num: near, debug: { ...debug, source: "digitNear" } };
+    if (near != null) {
+      return {
+        num: near,
+        debug: { ...debug, source: "digitNear" },
+      };
+    }
 
     return { num: null, debug: { ...debug, source: "none" } };
   });
 
   console.log("[DBG] Comments debug:", uiInfo.debug);
 
-  if (uiInfo.num != null) {
-    console.log("[FB] Liczba komentarzy (UI):", uiInfo.num);
-    return uiInfo.num;
-  }
-
-  /* ---- FALLBACK: unikalne ID z anchorów ---- */
+  /* ---- FALLBACK: unikalne ID z anchorów (liczymy ZAWSZE) ---- */
 
   const fallback = await page.evaluate(() => {
     const anchors = Array.from(
@@ -279,8 +374,41 @@ async function getCommentCount(page, postUrl) {
   });
 
   console.log("[FB] Fallback – anchor IDs:", fallback.count);
-  return fallback.count;
+
+  /* ---- FUZJA: UI vs anchor ---- */
+
+  let finalNum = uiInfo.num;
+
+  // 🔥 ZASADA:
+  // - jeśli UI dało liczbę > 0 → trzymamy się UI
+  // - jeśli UI nie dało nic (null/0), a anchory > 0 → używamy anchorów
+  if ((finalNum == null || finalNum === 0) && fallback.count > 0) {
+    finalNum = fallback.count;
+    console.log(
+      `[FB] Liczba komentarzy z anchorów (UI puste/0): ${finalNum}`
+    );
+  } else {
+    console.log("[FB] UI ma priorytet, anchory tylko jako debug:", {
+      ui: finalNum,
+      anchor: fallback.count,
+    });
+  }
+
+  if (finalNum != null) {
+    console.log("[FB] Liczba komentarzy (final):", finalNum);
+    return finalNum;
+  }
+
+  // totalny fallback – jakby nic nie wyszło
+  console.log("[FB] Brak liczby komentarzy w UI i brak anchorów, zwracam 0.");
+  return 0;
 }
+
+
+
+/* ============================================================
+   ================= ROZWIJANIE KOMENTARZY ====================
+   ============================================================ */
 
 async function expandAllComments(page) {
   if (!EXPAND_COMMENTS) {
@@ -321,9 +449,7 @@ async function expandAllComments(page) {
 
     expanded = true;
     console.log("[FB] -> klik 'więcej komentarzy'");
-    await new Promise((r) =>
-      setTimeout(r, 800 + Math.random() * 700)
-    );
+    await new Promise((r) => setTimeout(r, 800 + Math.random() * 700));
   }
 
   /* === więcej odpowiedzi === */
@@ -364,9 +490,7 @@ async function expandAllComments(page) {
 
     expanded = true;
     console.log("[FB] -> klik 'więcej odpowiedzi / X odpowiedzi'");
-    await new Promise((r) =>
-      setTimeout(r, 600 + Math.random() * 600)
-    );
+    await new Promise((r) => setTimeout(r, 600 + Math.random() * 600));
   }
 
   /* === "Zobacz więcej" w treści komentarza === */
@@ -388,9 +512,7 @@ async function expandAllComments(page) {
 
     if (!clicked) break;
 
-    await new Promise((r) =>
-      setTimeout(r, 400 + Math.random() * 500)
-    );
+    await new Promise((r) => setTimeout(r, 400 + Math.random() * 500));
   }
 
   /* === Dodatkowy lazy scroll (full preload komentarzy) === */
@@ -450,9 +572,7 @@ async function expandAllComments(page) {
       return after === before;
     }, 350);
 
-    await new Promise((r) =>
-      setTimeout(r, 300 + Math.random() * 300)
-    );
+    await new Promise((r) => setTimeout(r, 300 + Math.random() * 300));
     if (reached) break;
   }
 
@@ -462,6 +582,10 @@ async function expandAllComments(page) {
     console.log("[FB] Nic nie było ukryte.");
   }
 }
+
+/* ============================================================
+   ================== EXTRACT COMMENTS DATA ====================
+   ============================================================ */
 
 async function extractCommentsData(page) {
   if (!EXPAND_COMMENTS) return [];
@@ -673,9 +797,4 @@ async function extractCommentsData(page) {
   });
 }
 
-export {
-  switchCommentsFilterToAll,
-  getCommentCount,
-  expandAllComments,
-  extractCommentsData,
-};
+export { getCommentCount, expandAllComments, extractCommentsData };

@@ -1,3 +1,4 @@
+// index.js
 import { startWatcher } from "./watcher.js";
 
 startWatcher().catch((err) => {

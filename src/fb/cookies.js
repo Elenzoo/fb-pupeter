@@ -17,11 +17,7 @@ async function loadCookies(page) {
 async function saveCookies(page) {
   try {
     const cookies = await page.cookies();
-    await fs.writeFile(
-      "cookies.json",
-      JSON.stringify(cookies, null, 2),
-      "utf8"
-    );
+    await fs.writeFile("cookies.json", JSON.stringify(cookies, null, 2), "utf8");
     console.log("[FB][cookies] Cookies zapisane.");
   } catch (e) {
     console.error("[FB][cookies] Błąd zapisu cookies:", e.message);
