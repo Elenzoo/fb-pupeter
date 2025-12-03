@@ -160,7 +160,7 @@ async function refreshPostsIfNeeded(force = false) {
 
   const now = Date.now();
   if (!force && now - lastSheetFetch < POSTS_REFRESH_MS) {
-    return; // za wcześnie na kolejne odświeżenie
+    return; // za wcześnie na kolejne odświeżenie (gdy force=false)
   }
 
   lastSheetFetch = now;
@@ -266,8 +266,9 @@ async function startWatcher() {
   );
 
   const loop = async () => {
-    // przy każdej iteracji – sprawdzamy, czy nie minęło POSTS_REFRESH_MS
-    await refreshPostsIfNeeded(false);
+    // 🔁 Przy KAŻDEJ iteracji wymuszamy odświeżenie arkusza,
+    // żeby zmiana URL/active działała od razu w kolejnym cyklu.
+    await refreshPostsIfNeeded(true);
 
     if (!currentPosts.length) {
       console.log(
