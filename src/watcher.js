@@ -215,10 +215,12 @@ async function refreshPostsIfNeeded(force = false) {
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: false,
+    headless: "new", // ważne: musi być headless na serwerze
+    defaultViewport: null, // pełne okno, jak lokalnie
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
       "--disable-notifications",
       "--disable-blink-features=AutomationControlled",
     ],
