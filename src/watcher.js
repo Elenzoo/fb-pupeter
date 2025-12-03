@@ -23,6 +23,10 @@ const lastCounts = new Map();
  * Zestaw znanych ID komentarzy (żeby odróżniać stare od nowych).
  */
 const knownComments = new Set();
+/**
+ * Mapa: postId -> ostatnie maxPos z DOM (do bezpiecznego fallbacku).
+ */
+const lastMaxPos = new Map();
 
 /**
  * Aktualna lista postów (z arkusza).
@@ -38,6 +42,14 @@ let lastSheetFetch = 0;
 async function applyStealth(page) {
   await page.evaluateOnNewDocument(() => {
     // 1) navigator.webdriver = false
+    // // w środku page.evaluateOnNewDocument(() => { ...tu... });
+window.__fb_isElementVisible = function (el) {
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  return true;
+};
     Object.defineProperty(navigator, "webdriver", {
       get: () => false,
     });
@@ -148,7 +160,7 @@ function parseSheetCsv(text) {
 
 /**
  * Odświeża listę postów z Google Sheets co POSTS_REFRESH_MS.
- * Jeśli lista się zmieni → czyścimy lastCounts + knownComments.
+ * Jeśli lista się zmieni → czyścimy lastCounts + knownComments + lastMaxPos.
  */
 async function refreshPostsIfNeeded(force = false) {
   if (!POSTS_SHEET_URL) {
@@ -188,6 +200,7 @@ async function refreshPostsIfNeeded(force = false) {
       currentPosts = [];
       lastCounts.clear();
       knownComments.clear();
+      lastMaxPos.clear();
       return;
     }
 
@@ -201,6 +214,7 @@ async function refreshPostsIfNeeded(force = false) {
       currentPosts = newPosts;
       lastCounts.clear();
       knownComments.clear();
+      lastMaxPos.clear();
     } else {
       console.log("[Sheet] Lista postów bez zmian.");
     }
@@ -215,10 +229,12 @@ async function refreshPostsIfNeeded(force = false) {
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: false,
+    headless: "new", // ważne: musi być headless na serwerze
+    defaultViewport: null, // pełne okno, jak lokalnie
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
       "--disable-notifications",
       "--disable-blink-features=AutomationControlled",
     ],
@@ -237,7 +253,7 @@ async function startWatcher() {
   );
 
   /* ==== LOGOWANIE / COOKIES ==== */
-  await loadCookies(page);
+    await loadCookies(page);
   await page
     .goto("https://www.facebook.com/", {
       waitUntil: "load",
@@ -247,12 +263,22 @@ async function startWatcher() {
 
   const loggedIn = await checkIfLogged(page);
   if (!loggedIn) {
-    console.log("[FB] Brak aktywnej sesji – logowanie...");
-    await fbLogin(page);
-    await saveCookies(page);
+    console.log("[FB] Brak aktywnej sesji – spróbuję się zalogować...");
+    try {
+      await fbLogin(page);
+      await saveCookies(page);
+    } catch (err) {
+      console.error("[FB] Logowanie nie powiodło się:", err.message);
+      console.error(
+        "[FB] Zatrzymuję watcher. Sprawdź dane logowania / 2FA albo zaloguj się ręcznie inną metodą."
+      );
+      await browser.close();
+      return;
+    }
   } else {
     console.log("[FB] Użyto istniejącej sesji FB (cookies).");
   }
+
 
   // Na start – pierwszy odczyt arkusza (wymuszony)
   await refreshPostsIfNeeded(true);
@@ -309,13 +335,19 @@ async function startWatcher() {
               return pa - pb;
             });
 
-            let maxPos = 0;
+            let maxPos = -Infinity;
             for (const c of allComments) {
               if (c.id) knownComments.add(c.id);
               if (typeof c.pos === "number" && c.pos > maxPos) {
                 maxPos = c.pos;
               }
             }
+
+            if (!Number.isFinite(maxPos)) {
+              maxPos = -Infinity;
+            }
+
+            lastMaxPos.set(post.id, maxPos);
 
             console.log(
               `[Watcher] Post ${post.id}: Zapamiętano ${allComments.length} istniejących komentarzy (maxPos=${maxPos}).`
@@ -336,6 +368,8 @@ async function startWatcher() {
               let newComments = [];
 
               if (EXPAND_COMMENTS) {
+                const prevMaxPos = lastMaxPos.get(post.id) ?? -Infinity;
+
                 await expandAllComments(page);
                 let snapshot = await extractCommentsData(page);
 
@@ -350,6 +384,19 @@ async function startWatcher() {
                 );
                 console.dir(snapshot.slice(0, 5), { depth: null });
 
+                // zaktualizuj maxPos na podstawie snapshotu
+                let maxPosNow = prevMaxPos;
+                for (const c of snapshot) {
+                  if (typeof c.pos === "number" && c.pos > maxPosNow) {
+                    maxPosNow = c.pos;
+                  }
+                }
+                if (!Number.isFinite(maxPosNow)) {
+                  maxPosNow = prevMaxPos;
+                }
+                lastMaxPos.set(post.id, maxPosNow);
+
+                // 1) normalna ścieżka – po ID
                 for (const c of snapshot) {
                   if (!c.id) continue;
                   if (!knownComments.has(c.id)) {
@@ -366,6 +413,7 @@ async function startWatcher() {
                   return idOk || textOk || authorOk || linkOk;
                 });
 
+                // 2) fallback, gdy z jakiegoś powodu nie złapaliśmy nowych ID
                 if (newComments.length === 0) {
                   const diff = Math.max(1, count - prev);
 
@@ -376,17 +424,46 @@ async function startWatcher() {
                     return textOk || idOk || linkOk;
                   });
 
-                  const tail = cleaned.slice(-diff);
-
-                  for (const c of tail) {
-                    if (c.id) knownComments.add(c.id);
-                  }
-
-                  newComments = tail;
-
-                  console.log(
-                    `[Watcher] Post ${post.id}: Fallback — brak ID, biorę ostatnie ${diff} komentarzy jako nowe.`
+                  // spróbuj najpierw użyć pos > prevMaxPos (bezpieczniejszy fallback)
+                  const candidatesByPos = cleaned.filter(
+                    (c) =>
+                      typeof c.pos === "number" && c.pos > prevMaxPos
                   );
+
+                  if (candidatesByPos.length >= diff) {
+                    const sortedByPos = candidatesByPos
+                      .slice()
+                      .sort((a, b) => {
+                        const pa =
+                          typeof a.pos === "number" ? a.pos : 999999999;
+                        const pb =
+                          typeof b.pos === "number" ? b.pos : 999999999;
+                        return pa - pb;
+                      });
+
+                    const tailByPos = sortedByPos.slice(-diff);
+                    for (const c of tailByPos) {
+                      if (c.id) knownComments.add(c.id);
+                    }
+                    newComments = tailByPos;
+
+                    console.log(
+                      `[Watcher] Post ${post.id}: Fallback-pos — używam pos > ${prevMaxPos}, kandydatów=${candidatesByPos.length}, wysyłam=${newComments.length}.`
+                    );
+                  } else {
+                    // twardy awaryjny fallback – jak wcześniej
+                    const tail = cleaned.slice(-diff);
+
+                    for (const c of tail) {
+                      if (c.id) knownComments.add(c.id);
+                    }
+
+                    newComments = tail;
+
+                    console.log(
+                      `[Watcher] Post ${post.id}: HARD fallback — brak ID i brak sensownych pos>prevMaxPos (kandydatów=${candidatesByPos.length}), biorę ostatnie ${diff} komentarzy jako nowe.`
+                    );
+                  }
                 }
 
                 console.log(

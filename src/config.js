@@ -85,3 +85,5 @@ export {
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,
 };
+export const FB_EMAIL = process.env.FB_EMAIL || "";
+export const FB_PASSWORD = process.env.FB_PASSWORD || "";
