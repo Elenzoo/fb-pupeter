@@ -213,10 +213,12 @@ async function refreshPostsIfNeeded(force = false) {
    =====================   GŁÓWNY WATCHER   ===================
    ============================================================ */
 
+const isDev = process.env.NODE_ENV !== "production"; // lokalnie będzie true
+
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: "new", // ważne: musi być headless na serwerze
-    defaultViewport: null, // pełne okno, jak lokalnie
+    headless: isDev ? false : "new",
+    defaultViewport: null,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -226,6 +228,10 @@ async function startWatcher() {
     ],
     ignoreDefaultArgs: ["--enable-automation"],
   });
+
+  
+
+
 
   const page = await browser.newPage();
 
