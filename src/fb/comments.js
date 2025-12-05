@@ -140,7 +140,6 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
       break;
     }
 
-    // 🔑 progres to: nowe ID **albo** zmiana pozycji scrolla
     const progressed =
       countAfter > lastCount || scrollInfo.after !== scrollInfo.before;
 
@@ -159,34 +158,24 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
     }
   }
 
-  // ===== Runda kontrolna – GÓRA ↔ DÓŁ w obrębie posta/okna =====
+  // ===== Runda kontrolna – powrót NA SAMĄ GÓRĘ posta/okna =====
   try {
     console.log(
-      "[FB] ensureAllCommentsLoaded – runda kontrolna (scroll góra-dół w obrębie posta)."
+      "[FB] ensureAllCommentsLoaded – runda kontrolna (powrót na górę posta)."
     );
 
-    for (let i = 1; i <= 3; i++) {
-      const idsBefore = await getCurrentCommentAnchorCount(page);
-
-      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.35);
-      await sleepRandom(250, 400);
-
-      const down = await scrollWithinPost(page, `ctrl-down-${i}`, 0.35);
-      await sleepRandom(250, 400);
-
-      const idsAfter = await getCurrentCommentAnchorCount(page);
+    for (let i = 1; i <= 500; i++) {
+      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.6);
+      await sleepRandom(200, 350);
 
       console.log(
-        `[FB] kontrola ${i}: IDs ${idsBefore} -> ${idsAfter}, ` +
-          `scrollUp=${up.before}->${up.after}, scrollDown=${down.before}->${down.after}`
+        `[FB] kontrola ${i}: scrollUp=${up.before}->${up.after} (${up.container})`
       );
 
-      if (
-        idsAfter <= idsBefore &&
-        up.before === up.after &&
-        down.before === down.after
-      ) {
-        console.log("[FB] Runda kontrolna: brak zmian — STOP.");
+      if (up.after === 0 || up.after === up.before) {
+        console.log(
+          "[FB] Runda kontrolna: osiągnięto górę / brak dalszego scrolla — STOP."
+        );
         break;
       }
     }
@@ -199,8 +188,6 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
 
   console.log("[FB] ensureAllCommentsLoaded – koniec.");
 }
-
-
 
 /* ============================================================
    ===== POMOCNICZE: LICZENIE ID I SCROLL W POŚCIE ============
@@ -223,15 +210,12 @@ async function getCurrentCommentAnchorCount(page) {
         let raw = rid || cid;
         if (!raw) continue;
 
-        // dekodowanie "dziwnych" ID z base64, jak w extractCommentsData
         if (!/^\d+$/.test(raw)) {
           try {
             const dec = atob(raw);
             const m = dec.match(/:(\d+)_([0-9]+)/);
             if (m) raw = m[2];
-          } catch (e) {
-            // ignorujemy błędy
-          }
+          } catch (e) {}
         }
 
         if (raw) ids.add(raw);
@@ -246,7 +230,6 @@ async function getCurrentCommentAnchorCount(page) {
   return count || 0;
 }
 
-
 /**
  * Scrolluje w obrębie posta, a jeśli post nie ma własnego scrolla – scrolluje CAŁĄ STRONĘ.
  * factor > 0  → w dół
@@ -254,7 +237,6 @@ async function getCurrentCommentAnchorCount(page) {
  */
 async function scrollWithinPost(page, label, factor = 0.3) {
   const info = await page.evaluate((factor) => {
-    // --------- wykrywamy photo view ----------
     const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
       location.href
     );
@@ -305,18 +287,15 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       const scrollH = el.scrollHeight || 0;
       const delta = scrollH - clientH;
 
-      // musi być realny scroll
       if (clientH > 0 && delta > 10) {
         list.push({ el, label, delta });
       }
     }
 
-    // --------- specjalny tryb: PHOTO VIEW (panel komentarzy po prawej) ----------
     let container = null;
     let containerType = null;
 
     if (isPhotoView) {
-      // szukamy pola wpisywania komentarza
       const commentInput =
         document.querySelector("div[role='textbox'][data-lexical-editor]") ||
         document.querySelector("form textarea[placeholder*='komentarz' i]") ||
@@ -345,14 +324,11 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       }
     }
 
-    // --------- standardowa heurystyka (permalink, watch, fallback) ----------
     if (!container) {
       const candidates = [];
 
-      // 1) root
       pushIfScrollable(candidates, root, "root");
 
-      // 2) dialog jako całość
       const dialog =
         root.closest("div[role='dialog']") ||
         document.querySelector("div[role='dialog']");
@@ -360,7 +336,6 @@ async function scrollWithinPost(page, label, factor = 0.3) {
         pushIfScrollable(candidates, dialog, "dialog");
       }
 
-      // 3) wszystkie sensowne bloki wewnątrz scope
       const scope = dialog || root;
       const blocks = Array.from(
         scope.querySelectorAll("div, section, main, article")
@@ -380,7 +355,6 @@ async function scrollWithinPost(page, label, factor = 0.3) {
         container = best.el;
         containerType = best.label;
       } else {
-        // fallback: globalny scroller strony
         container =
           document.scrollingElement || document.documentElement || document.body;
         const delta =
@@ -393,7 +367,6 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       }
     }
 
-    // --------- sama operacja scrolla ----------
     const isWindowContainer =
       container === document.body ||
       container === document.documentElement ||
@@ -419,7 +392,7 @@ async function scrollWithinPost(page, label, factor = 0.3) {
 
     const baseStep =
       (container.clientHeight || window.innerHeight) * magnitude;
-    const step = Math.max(40, Math.min(baseStep, 200)); // mały, ale zauważalny krok
+    const step = Math.max(40, Math.min(baseStep, 200));
 
     let target;
     if (sign < 0) {
@@ -448,8 +421,6 @@ async function scrollWithinPost(page, label, factor = 0.3) {
   return info;
 }
 
-
-
 /* ============================================================
    ==================== LICZBA KOMENTARZY ======================
    ============================================================ */
@@ -477,11 +448,11 @@ async function getCommentCount(page, postUrl) {
 
   await ensureAllCommentsLoaded(page, null);
 
-  // ========= UI PARSER – TERAZ PATRZY W CAŁY DOCUMENT =========
+  // ========= UI PARSER – patrzymy w CAŁY DOCUMENT =========
   const uiInfo = await page.evaluate(() => {
     const debug = {};
 
-    const root = document; // <== kluczowa zmiana: cały dokument
+    const root = document;
 
     const allEls = Array.from(root.querySelectorAll("span, div, button, a"));
 
@@ -557,6 +528,30 @@ async function getCommentCount(page, postUrl) {
       return null;
     }
 
+    // NOWE: liczba jako osobny przycisk obok "Komentarz"/"Comment"
+    function fromCommentButtonNeighbour(buttonTexts) {
+      const idx = buttonTexts.findIndex((t) => {
+        const low = t.toLowerCase();
+        return low === "komentarz" || low === "comment";
+      });
+      if (idx === -1) return null;
+
+      const numericCandidates = [];
+      for (let i = idx - 3; i <= idx + 3; i++) {
+        if (i < 0 || i >= buttonTexts.length || i === idx) continue;
+        const t = buttonTexts[i];
+        if (!t) continue;
+        const m = t.match(/^\d+$/);
+        if (!m) continue;
+        numericCandidates.push(parseInt(m[0], 10));
+      }
+
+      if (!numericCandidates.length) return null;
+
+      const best = Math.max(...numericCandidates);
+      return { num: best, raw: numericCandidates.join(",") };
+    }
+
     function parsePhrase(texts) {
       let best = null;
       let raw = null;
@@ -630,23 +625,45 @@ async function getCommentCount(page, postUrl) {
 
     const btnRes = fromAllCommentsButton(btnTexts);
     if (btnRes)
-      return { num: btnRes.num, debug: { ...debug, source: "buttonAllComments", raw: btnRes.raw } };
+      return {
+        num: btnRes.num,
+        debug: { ...debug, source: "buttonAllComments", raw: btnRes.raw },
+      };
 
     const filterRes = fromFilterLinkedCount(btnTexts);
     if (filterRes)
-      return { num: filterRes.num, debug: { ...debug, source: "filterLinked", raw: filterRes.raw } };
+      return {
+        num: filterRes.num,
+        debug: { ...debug, source: "filterLinked", raw: filterRes.raw },
+      };
+
+    const neighborRes = fromCommentButtonNeighbour(btnTexts);
+    if (neighborRes)
+      return {
+        num: neighborRes.num,
+        debug: { ...debug, source: "commentNeighbour", raw: neighborRes.raw },
+      };
 
     const phraseRes = parsePhrase([...globalTexts, ...btnTexts]);
     if (phraseRes)
-      return { num: phraseRes.num, debug: { ...debug, source: "phrase", raw: phraseRes.raw } };
+      return {
+        num: phraseRes.num,
+        debug: { ...debug, source: "phrase", raw: phraseRes.raw },
+      };
 
     const xOfY = parseXofY([...globalTexts, ...btnTexts]);
     if (xOfY)
-      return { num: xOfY.num, debug: { ...debug, source: "xOfY", raw: xOfY.raw } };
+      return {
+        num: xOfY.num,
+        debug: { ...debug, source: "xOfY", raw: xOfY.raw },
+      };
 
     const near = digitNearComment(allEls);
     if (near != null)
-      return { num: near, debug: { ...debug, source: "digitNear" } };
+      return {
+        num: near,
+        debug: { ...debug, source: "digitNear" },
+      };
 
     return { num: null, debug: { ...debug, source: "none" } };
   });
@@ -732,10 +749,8 @@ async function expandAllComments(page) {
 
   let expandedSomething = false;
 
-  // Jedno "podejście" – szuka jednego najlepszego przycisku do kliknięcia
   async function clickOnce() {
     const res = await page.evaluate(() => {
-      // --- wykrywamy PHOTO VIEW ---
       const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
         location.href
       );
@@ -775,8 +790,6 @@ async function expandAllComments(page) {
         return document.body;
       }
 
-      // PHOTO → root = cały document (panel komentarzy z boku)
-      // PERMALINK / WATCH → root = drzewo posta, nie całe tło FB
       const root = isPhotoView ? document : getPostRoot() || document;
 
       const buttons = Array.from(
@@ -793,7 +806,6 @@ async function expandAllComments(page) {
 
         let kind = null;
 
-        // 1) Więcej komentarzy
         if (
           text.startsWith("wyświetl więcej komentarzy") ||
           text.startsWith("zobacz więcej komentarzy") ||
@@ -806,7 +818,6 @@ async function expandAllComments(page) {
           kind = "more-comments";
         }
 
-        // 2) Wszystkie / więcej odpowiedzi
         if (!kind) {
           if (
             text.startsWith("wyświetl więcej odpowiedzi") ||
@@ -823,7 +834,6 @@ async function expandAllComments(page) {
           }
         }
 
-        // 3) „Zobacz więcej” w treści komentarza – najniższy priorytet
         if (!kind) {
           if (text === "zobacz więcej" || text === "see more") {
             kind = "see-more-text";
@@ -896,7 +906,6 @@ async function expandAllComments(page) {
     return false;
   }
 
-  // Pętla klikania – dopóki cokolwiek się rozwija
   for (let i = 0; i < 30; i++) {
     const didClick = await clickOnce();
     if (!didClick) break;
@@ -907,7 +916,6 @@ async function expandAllComments(page) {
     console.log("[FB] Nic do rozwinięcia (komentarze).");
   }
 }
-
 
 /* ============================================================
    ================== EXTRACT COMMENTS DATA ====================
