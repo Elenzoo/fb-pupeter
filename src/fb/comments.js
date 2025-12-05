@@ -140,16 +140,20 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
       break;
     }
 
-    if (countAfter > lastCount) {
-      lastCount = countAfter;
+    // 🔑 progres to: nowe ID **albo** zmiana pozycji scrolla
+    const progressed =
+      countAfter > lastCount || scrollInfo.after !== scrollInfo.before;
+
+    if (progressed) {
+      lastCount = Math.max(lastCount, countAfter);
       noProgressRounds = 0;
     } else {
       noProgressRounds++;
     }
 
-    if (!hasTarget && noProgressRounds >= MAX_NO_PROGRESS) {
+    if (noProgressRounds >= MAX_NO_PROGRESS) {
       console.log(
-        "[FB] ensureAllCommentsLoaded – brak progresu (IDs nie rosną), stop (główna pętla)."
+        "[FB] ensureAllCommentsLoaded – brak progresu (IDs + scroll), stop (główna pętla)."
       );
       break;
     }
@@ -196,50 +200,52 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
   console.log("[FB] ensureAllCommentsLoaded – koniec.");
 }
 
+
+
 /* ============================================================
    ===== POMOCNICZE: LICZENIE ID I SCROLL W POŚCIE ============
    ============================================================ */
 
 async function getCurrentCommentAnchorCount(page) {
-  const count = await page.evaluate(
-    new Function(
-      `"use strict";
-       ${postRootScript()}
-       const root = getPostRoot();
-       if (!root) return 0;
+  const count = await page.evaluate(() => {
+    const anchors = Array.from(
+      document.querySelectorAll(
+        "a[href*='comment_id'], a[href*='reply_comment_id']"
+      )
+    );
+    const ids = new Set();
 
-       const anchors = Array.from(
-         root.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
-       );
+    for (const a of anchors) {
+      try {
+        const url = new URL(a.href);
+        const cid = url.searchParams.get("comment_id");
+        const rid = url.searchParams.get("reply_comment_id");
+        let raw = rid || cid;
+        if (!raw) continue;
 
-       const ids = new Set();
+        // dekodowanie "dziwnych" ID z base64, jak w extractCommentsData
+        if (!/^\d+$/.test(raw)) {
+          try {
+            const dec = atob(raw);
+            const m = dec.match(/:(\d+)_([0-9]+)/);
+            if (m) raw = m[2];
+          } catch (e) {
+            // ignorujemy błędy
+          }
+        }
 
-       for (const a of anchors) {
-         try {
-           const url = new URL(a.href);
-           const cid = url.searchParams.get("comment_id");
-           const rid = url.searchParams.get("reply_comment_id");
-           let raw = rid || cid;
-           if (!raw) continue;
+        if (raw) ids.add(raw);
+      } catch (e) {
+        continue;
+      }
+    }
 
-           if (!/^\\d+$/.test(raw)) {
-             try {
-               const dec = atob(raw);
-               const m = dec.match(/:(\\d+)_([0-9]+)/);
-               if (m) raw = m[2];
-             } catch {}
-           }
+    return ids.size;
+  });
 
-           if (raw) ids.add(raw);
-         } catch {}
-       }
-
-       return ids.size;
-      `
-    )
-  );
   return count || 0;
 }
+
 
 /**
  * Scrolluje w obrębie posta, a jeśli post nie ma własnego scrolla – scrolluje CAŁĄ STRONĘ.
@@ -248,7 +254,11 @@ async function getCurrentCommentAnchorCount(page) {
  */
 async function scrollWithinPost(page, label, factor = 0.3) {
   const info = await page.evaluate((factor) => {
-    // Lokalna kopia getPostRoot (nie bawimy się w postRootScript tutaj)
+    // --------- wykrywamy photo view ----------
+    const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+      location.href
+    );
+
     function getPostRoot() {
       const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
 
@@ -256,12 +266,13 @@ async function scrollWithinPost(page, label, factor = 0.3) {
         const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
         if (!text) return false;
 
-        const hasCommentWord = text.includes("komentarz");
+        const hasCommentWord = text.includes("komentarz") || text.includes("comment");
         const hasActions =
           text.includes("lubię to") ||
           text.includes("komentarz") ||
           text.includes("udostępnij") ||
-          text.includes("napisz komentarz");
+          text.includes("napisz komentarz") ||
+          text.includes("comment");
 
         const looksLikeNotifications =
           text.startsWith("powiadomienia") &&
@@ -290,88 +301,125 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       if (!style) return;
 
       const oy = style.overflowY;
-      if (
-        oy !== "auto" &&
-        oy !== "scroll" &&
-        oy !== "overlay" &&
-        oy !== "hidden"
-      ) {
-        // typical FB dialog ma overflow-y: auto/scroll/overlay/hidden na wrapperze
-        // ale hidden + wewnętrzny scroller też się trafi – wtedy i tak złapiemy to wewnętrzne
-      }
-
       const clientH = el.clientHeight || 0;
       const scrollH = el.scrollHeight || 0;
       const delta = scrollH - clientH;
 
+      // musi być realny scroll
       if (clientH > 0 && delta > 10) {
         list.push({ el, label, delta });
       }
     }
 
-    const candidates = [];
+    // --------- specjalny tryb: PHOTO VIEW (panel komentarzy po prawej) ----------
+    let container = null;
+    let containerType = null;
 
-    // 1) root
-    pushIfScrollable(candidates, root, "root");
+    if (isPhotoView) {
+      // szukamy pola wpisywania komentarza
+      const commentInput =
+        document.querySelector("div[role='textbox'][data-lexical-editor]") ||
+        document.querySelector("form textarea[placeholder*='komentarz' i]") ||
+        document.querySelector("form textarea[placeholder*='comment' i]");
 
-    // 2) dialog jako całość
-    const dialog =
-      root.closest("div[role='dialog']") || document.querySelector("div[role='dialog']");
-    if (dialog) {
-      pushIfScrollable(candidates, dialog, "dialog");
-    }
+      if (commentInput) {
+        let p = commentInput.parentElement;
+        while (p && p !== document.body && p !== document.documentElement) {
+          const style = window.getComputedStyle(p);
+          const oy = style.overflowY;
+          const ch = p.clientHeight || 0;
+          const sh = p.scrollHeight || 0;
+          const delta = sh - ch;
 
-    // 3) wszystkie sensowne div/section/main/article w dialogu
-    const scope = dialog || root;
-    const blocks = Array.from(
-      scope.querySelectorAll("div, section, main, article")
-    );
-
-    for (const el of blocks) {
-      pushIfScrollable(candidates, el, "auto");
-    }
-
-    // wybieramy kandydata z największym delta (scrollHeight - clientHeight)
-    let best = null;
-    for (const c of candidates) {
-      if (!best || c.delta > best.delta) {
-        best = c;
+          if (
+            ch > 0 &&
+            delta > 10 &&
+            (oy === "auto" || oy === "scroll" || oy === "overlay" || oy === "hidden")
+          ) {
+            container = p;
+            containerType = "photo-comments";
+            break;
+          }
+          p = p.parentElement;
+        }
       }
     }
 
-    let container;
-    let containerType;
+    // --------- standardowa heurystyka (permalink, watch, fallback) ----------
+    if (!container) {
+      const candidates = [];
 
-    if (best) {
-      container = best.el;
-      containerType = best.label;
-    } else {
-      // fallback: globalny scroller strony
-      container =
-        document.scrollingElement ||
-        document.documentElement ||
-        document.body;
-      const delta =
-        (container.scrollHeight || 0) - (container.clientHeight || 0);
-      if (delta <= 0) {
-        const cur = container.scrollTop || 0;
-        return { before: cur, after: cur, container: "window-no-scroll" };
+      // 1) root
+      pushIfScrollable(candidates, root, "root");
+
+      // 2) dialog jako całość
+      const dialog =
+        root.closest("div[role='dialog']") ||
+        document.querySelector("div[role='dialog']");
+      if (dialog) {
+        pushIfScrollable(candidates, dialog, "dialog");
       }
-      containerType = "window";
+
+      // 3) wszystkie sensowne bloki wewnątrz scope
+      const scope = dialog || root;
+      const blocks = Array.from(
+        scope.querySelectorAll("div, section, main, article")
+      );
+      for (const el of blocks) {
+        pushIfScrollable(candidates, el, "auto");
+      }
+
+      let best = null;
+      for (const c of candidates) {
+        if (!best || c.delta > best.delta) {
+          best = c;
+        }
+      }
+
+      if (best) {
+        container = best.el;
+        containerType = best.label;
+      } else {
+        // fallback: globalny scroller strony
+        container =
+          document.scrollingElement || document.documentElement || document.body;
+        const delta =
+          (container.scrollHeight || 0) - (container.clientHeight || 0);
+        if (delta <= 0) {
+          const cur = container.scrollTop || window.scrollY || 0;
+          return { before: cur, after: cur, container: "window-no-scroll" };
+        }
+        containerType = "window";
+      }
     }
 
-    const before = container.scrollTop || 0;
-    const maxScroll = (container.scrollHeight || 0) - (container.clientHeight || 0);
+    // --------- sama operacja scrolla ----------
+    const isWindowContainer =
+      container === document.body ||
+      container === document.documentElement ||
+      container === document.scrollingElement;
+
+    const before = isWindowContainer
+      ? window.scrollY || 0
+      : container.scrollTop || 0;
+
+    const maxScroll =
+      (container.scrollHeight || 0) - (container.clientHeight || 0);
 
     if (maxScroll <= 0) {
-      return { before, after: before, container: containerType + "-no-scroll" };
+      return {
+        before,
+        after: before,
+        container: (containerType || "unknown") + "-no-scroll",
+      };
     }
 
     const sign = (factor || 0.3) < 0 ? -1 : 1;
     const magnitude = Math.abs(factor || 0.3);
 
-    const baseStep = container.clientHeight * magnitude;
-    const step = Math.max(40, Math.min(baseStep, 180)); // mały krok
+    const baseStep =
+      (container.clientHeight || window.innerHeight) * magnitude;
+    const step = Math.max(40, Math.min(baseStep, 200)); // mały, ale zauważalny krok
 
     let target;
     if (sign < 0) {
@@ -380,10 +428,17 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       target = Math.min(maxScroll, before + step);
     }
 
-    container.scrollTop = target;
-    const after = container.scrollTop || 0;
+    if (isWindowContainer) {
+      window.scrollTo(0, target);
+    } else {
+      container.scrollTop = target;
+    }
 
-    return { before, after, container: containerType };
+    const after = isWindowContainer
+      ? window.scrollY || 0
+      : container.scrollTop || 0;
+
+    return { before, after, container: containerType || "unknown" };
   }, factor);
 
   console.log(
@@ -392,6 +447,7 @@ async function scrollWithinPost(page, label, factor = 0.3) {
 
   return info;
 }
+
 
 
 /* ============================================================
@@ -421,42 +477,11 @@ async function getCommentCount(page, postUrl) {
 
   await ensureAllCommentsLoaded(page, null);
 
+  // ========= UI PARSER – TERAZ PATRZY W CAŁY DOCUMENT =========
   const uiInfo = await page.evaluate(() => {
     const debug = {};
 
-    function getPostRoot() {
-      const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
-      const postDialog = dialogs.find((dlg) => {
-        const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
-        if (!text) return false;
-
-        const hasCommentWord = text.includes("komentarz");
-        const hasActions =
-          text.includes("lubię to") ||
-          text.includes("komentarz") ||
-          text.includes("udostępnij") ||
-          text.includes("napisz komentarz");
-
-        const looksLikeNotifications =
-          text.startsWith("powiadomienia") &&
-          text.includes("wszystkie") &&
-          text.includes("nieprzeczytane");
-
-        return !looksLikeNotifications && hasCommentWord && hasActions;
-      });
-
-      if (postDialog) return postDialog;
-
-      const main = document.querySelector("div[role='main']");
-      if (main) {
-        const article = main.querySelector("article");
-        return article || main;
-      }
-
-      return document.body;
-    }
-
-    const root = getPostRoot();
+    const root = document; // <== kluczowa zmiana: cały dokument
 
     const allEls = Array.from(root.querySelectorAll("span, div, button, a"));
 
@@ -633,16 +658,10 @@ async function getCommentCount(page, postUrl) {
     globalSampleCount: uiInfo.debug?.globalSample?.length,
   });
 
+  // ========= FALLBACK ANCHORÓW – TEŻ CAŁY DOCUMENT =========
   const fallback = await page.evaluate(() => {
-    function getPostRoot() {
-      const dialog = document.querySelector("div[role='dialog']");
-      if (dialog) return dialog;
-      const article = document.querySelector("div[role='article']");
-      if (article) return article;
-      return document;
-    }
+    const root = document;
 
-    const root = getPostRoot();
     const anchors = Array.from(
       root.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
     );
@@ -711,124 +730,184 @@ async function expandAllComments(page) {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  let expanded = false;
+  let expandedSomething = false;
 
-  async function clickLoop(label, evalFn, maxClicks = 20) {
-    let guard = 0;
-    while (guard++ < maxClicks) {
-      const clicked = await page.evaluate(evalFn);
-      if (!clicked) break;
-      expanded = true;
-      console.log(label);
-      await delay(800 + Math.random() * 700);
+  // Jedno "podejście" – szuka jednego najlepszego przycisku do kliknięcia
+  async function clickOnce() {
+    const res = await page.evaluate(() => {
+      // --- wykrywamy PHOTO VIEW ---
+      const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+        location.href
+      );
+
+      function getPostRoot() {
+        const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
+
+        const postDialog = dialogs.find((dlg) => {
+          const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
+          if (!text) return false;
+
+          const hasCommentWord =
+            text.includes("komentarz") || text.includes("comment");
+          const hasActions =
+            text.includes("lubię to") ||
+            text.includes("komentarz") ||
+            text.includes("udostępnij") ||
+            text.includes("napisz komentarz") ||
+            text.includes("comment");
+
+          const looksLikeNotifications =
+            text.startsWith("powiadomienia") &&
+            text.includes("wszystkie") &&
+            text.includes("nieprzeczytane");
+
+          return !looksLikeNotifications && hasCommentWord && hasActions;
+        });
+
+        if (postDialog) return postDialog;
+
+        const main = document.querySelector("div[role='main']");
+        if (main) {
+          const article = main.querySelector("article");
+          return article || main;
+        }
+
+        return document.body;
+      }
+
+      // PHOTO → root = cały document (panel komentarzy z boku)
+      // PERMALINK / WATCH → root = drzewo posta, nie całe tło FB
+      const root = isPhotoView ? document : getPostRoot() || document;
+
+      const buttons = Array.from(
+        root.querySelectorAll("button, div[role='button'], span[role='button']")
+      );
+
+      const candidates = [];
+
+      for (const el of buttons) {
+        const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!raw) continue;
+
+        const text = raw.toLowerCase();
+
+        let kind = null;
+
+        // 1) Więcej komentarzy
+        if (
+          text.startsWith("wyświetl więcej komentarzy") ||
+          text.startsWith("zobacz więcej komentarzy") ||
+          text.startsWith("pokaż komentarze") ||
+          text.startsWith("pokaż wcześniejsze komentarze") ||
+          text.startsWith("show comments") ||
+          text.startsWith("view more comments") ||
+          text.startsWith("view previous comments")
+        ) {
+          kind = "more-comments";
+        }
+
+        // 2) Wszystkie / więcej odpowiedzi
+        if (!kind) {
+          if (
+            text.startsWith("wyświetl więcej odpowiedzi") ||
+            text.startsWith("zobacz więcej odpowiedzi") ||
+            (text.startsWith("wyświetl wszystkie") && text.includes("odpowiedzi")) ||
+            text.startsWith("wyświetl wszystkie odpowiedzi") ||
+            text.startsWith("wyświetl 1 odpowiedź") ||
+            text.startsWith("view more replies") ||
+            text.startsWith("view previous replies") ||
+            (text.includes("odpowiedzi") && /\d/.test(text)) ||
+            (text.includes("repl") && /\d/.test(text))
+          ) {
+            kind = "more-replies";
+          }
+        }
+
+        // 3) „Zobacz więcej” w treści komentarza – najniższy priorytet
+        if (!kind) {
+          if (text === "zobacz więcej" || text === "see more") {
+            kind = "see-more-text";
+          }
+        }
+
+        if (!kind) continue;
+
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width === 0 || rect.height === 0) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+
+        candidates.push({
+          kind,
+          top: rect.top,
+          text: raw,
+        });
+      }
+
+      if (!candidates.length) {
+        return { clicked: false };
+      }
+
+      const priority = { "more-comments": 3, "more-replies": 2, "see-more-text": 1 };
+
+      candidates.sort((a, b) => {
+        const pa = priority[a.kind] || 0;
+        const pb = priority[b.kind] || 0;
+        if (pa !== pb) return pb - pa;
+        return a.top - b.top;
+      });
+
+      const chosenInfo = candidates[0];
+
+      const allButtons = Array.from(
+        root.querySelectorAll("button, div[role='button'], span[role='button']")
+      );
+
+      let chosenEl = null;
+      for (const el of allButtons) {
+        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (t !== chosenInfo.text) continue;
+        const r = el.getBoundingClientRect();
+        if (!r || r.width === 0 || r.height === 0) continue;
+        if (Math.abs(r.top - chosenInfo.top) > 2) continue;
+        chosenEl = el;
+        break;
+      }
+
+      if (!chosenEl) {
+        return { clicked: false };
+      }
+
+      chosenEl.click();
+      return {
+        clicked: true,
+        kind: chosenInfo.kind,
+        text: chosenInfo.text,
+      };
+    });
+
+    if (res.clicked) {
+      expandedSomething = true;
+      console.log(
+        `[FB] -> klik '${res.text}' (typ=${res.kind || "?"})`
+      );
+      return true;
     }
+
+    return false;
   }
 
-  const makeRootFn = () => postRootScript();
+  // Pętla klikania – dopóki cokolwiek się rozwija
+  for (let i = 0; i < 30; i++) {
+    const didClick = await clickOnce();
+    if (!didClick) break;
+    await delay(900 + Math.random() * 700);
+  }
 
-  await clickLoop(
-    "[FB] -> klik 'więcej komentarzy'",
-    new Function(
-      "\"use strict\";" +
-        makeRootFn() +
-        `
-        const root = getPostRoot();
-        const els = Array.from(
-          root.querySelectorAll("button, div[role='button'], span[role='button']")
-        );
-
-        for (const el of els) {
-          const t = (el.textContent || "").trim().toLowerCase();
-          if (!t) continue;
-
-          if (
-            t.startsWith("wyświetl więcej komentarzy") ||
-            t.startsWith("zobacz więcej komentarzy") ||
-            t.startsWith("pokaż komentarze") ||
-            t.startsWith("pokaż wcześniejsze komentarze") ||
-            t.startsWith("show comments") ||
-            t.startsWith("view more comments") ||
-            t.startsWith("wyświetl wcześniejsze komentarze") ||
-            t.startsWith("view previous comments") ||
-            (t.includes("zobacz jeszcze") && t.includes("komentarz"))
-          ) {
-            const rect = el.getBoundingClientRect();
-            if (!rect || rect.width === 0 || rect.height === 0) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      `
-    )
-  );
-
-  await clickLoop(
-    "[FB] -> klik 'więcej odpowiedzi / X odpowiedzi'",
-    new Function(
-      "\"use strict\";" +
-        makeRootFn() +
-        `
-        const root = getPostRoot();
-        const els = Array.from(
-          root.querySelectorAll("button, div[role='button'], span[role='button']")
-        );
-
-        for (const el of els) {
-          const t = (el.textContent || "").trim().toLowerCase();
-          if (!t) continue;
-
-          if (
-            t.startsWith("wyświetl więcej odpowiedzi") ||
-            t.startsWith("zobacz więcej odpowiedzi") ||
-            t.startsWith("view more replies") ||
-            t.startsWith("wyświetl wcześniejsze odpowiedzi") ||
-            t.startsWith("view previous replies") ||
-            (t.includes("odpowiedzi") && /\\d/.test(t))
-          ) {
-            const rect = el.getBoundingClientRect();
-            if (!rect || rect.width === 0 || rect.height === 0) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      `
-    )
-  );
-
-  await clickLoop(
-    "[FB] -> klik 'Zobacz więcej (treść komentarza)'",
-    new Function(
-      "\"use strict\";" +
-        makeRootFn() +
-        `
-        const root = getPostRoot();
-        const els = Array.from(
-          root.querySelectorAll("span[role='button'], div[role='button']")
-        );
-
-        for (const el of els) {
-          const t = (el.textContent || "").trim();
-          if (t === "Zobacz więcej" || t === "See more") {
-            const rect = el.getBoundingClientRect();
-            if (!rect || rect.width === 0 || rect.height === 0) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      `
-    )
-  );
-
-  if (!expanded) {
+  if (!expandedSomething) {
     console.log("[FB] Nic do rozwinięcia (komentarze).");
   }
 }
+
 
 /* ============================================================
    ================== EXTRACT COMMENTS DATA ====================
