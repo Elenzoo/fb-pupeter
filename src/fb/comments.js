@@ -1,6 +1,7 @@
+// src/fb/comments.js
 import { EXPAND_COMMENTS } from "../config.js";
 import { sleepRandom } from "../utils/sleep.js";
-import { scrollPost } from "./scroll.js";
+import { scrollWithinPost, detectCommentsScrollContainer } from "./scroll.js";
 import { acceptCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay } from "./login.js";
 
@@ -16,101 +17,127 @@ async function switchCommentsFilterToAll(page) {
       document.querySelectorAll("div[role='button'], span[role='button']")
     );
 
-    const btn = els.find((el) => {
-      const t = (el.textContent || "").trim();
-      return (
-        t === "Najtrafniejsze" ||
-        t === "Most relevant" ||
-        t === "Wszystkie komentarze" ||
-        t === "All comments"
-      );
+    const candidates = els.filter((el) => {
+      const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
+      if (!txt) return false;
+
+      const isDropdown =
+        txt.includes("najtrafniejsze") ||
+        txt.includes("all comments") ||
+        txt.includes("most relevant") ||
+        txt.includes("wszystkie komentarze") ||
+        txt.includes("autor") ||
+        txt.includes("author");
+
+      if (!isDropdown) return false;
+
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") {
+        return false;
+      }
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) return false;
+
+      if (rect.bottom < 0) return false;
+      if (rect.top > window.innerHeight) return false;
+
+      return true;
     });
 
-    if (!btn) return { found: false };
-    btn.click();
-    return { found: true };
+    if (!candidates.length) return false;
+
+    let target = candidates[0];
+    let bestY = Infinity;
+    for (const el of candidates) {
+      const r = el.getBoundingClientRect();
+      const centerY = Math.abs(r.top + r.height / 2 - window.innerHeight / 2);
+      if (centerY < bestY) {
+        bestY = centerY;
+        target = el;
+      }
+    }
+
+    target.click();
+    return true;
   });
 
-  if (!opened.found) {
-    console.log("[FB] Nie znaleziono przycisku filtra komentarzy.");
+  if (!opened) {
+    console.log("[FB] Nie znaleziono przełącznika filtra komentarzy.");
     return false;
   }
 
-  await sleepRandom(400, 800);
+  await sleepRandom(600, 1000);
 
-  const clicked = await page.evaluate(() => {
-    const nodes = Array.from(
-      document.querySelectorAll(
-        "div[role='menuitem'], div[role='menuitemradio'], span, div"
-      )
-    );
+  const switched = await page.evaluate(() => {
+    const items = Array.from(document.querySelectorAll("div[role='menuitem']"));
+    if (!items.length) return false;
 
-    const opt = nodes.find((el) => {
-      const t = (el.textContent || "").trim();
-      return t.startsWith("Wszystkie komentarze") || t.startsWith("All comments");
-    });
+    let best = null;
+    let bestScore = -1;
 
-    if (!opt) return { clicked: false };
-    opt.click();
-    return { clicked: true };
+    for (const el of items) {
+      const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
+      if (!txt) continue;
+
+      let score = 0;
+
+      if (txt.includes("wszystkie komentarze") || txt.includes("all comments")) {
+        score += 100;
+      }
+      if (txt.includes("najtrafniejsze") || txt.includes("most relevant")) {
+        score -= 20;
+      }
+      if (txt.includes("autor") || txt.includes("author")) {
+        score += 10;
+      }
+
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) continue;
+      if (rect.bottom < 0) continue;
+      if (rect.top > window.innerHeight) continue;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+
+    if (!best) return false;
+
+    best.click();
+    return true;
   });
 
-  if (!clicked.clicked) {
-    console.log("[FB] Nie ma opcji 'Wszystkie komentarze' w menu drop-down.");
+  if (!switched) {
+    console.log("[FB] Nie udało się wybrać opcji „Wszystkie komentarze”.");
     return false;
   }
 
   console.log("[FB] Filtr komentarzy ustawiony na: Wszystkie komentarze.");
+  await sleepRandom(800, 1400);
   return true;
 }
 
-/* ============================================================
-   =========== POST ROOT (DIALOG / MAIN / FALLBACK) ============
-   ============================================================ */
-
-function postRootScript() {
-  return `
-    function getPostRoot() {
-      const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
-
-      const postDialog = dialogs.find((dlg) => {
-        const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
-        if (!text) return false;
-
-        const hasCommentWord = text.includes("komentarz");
-        const hasActions =
-          text.includes("lubię to") ||
-          text.includes("komentarz") ||
-          text.includes("udostępnij") ||
-          text.includes("napisz komentarz");
-
-        const looksLikeNotifications =
-          text.startsWith("powiadomienia") &&
-          text.includes("wszystkie") &&
-          text.includes("nieprzeczytane");
-
-        return !looksLikeNotifications && hasCommentWord && hasActions;
-      });
-
-      if (postDialog) return postDialog;
-
-      const main = document.querySelector("div[role='main']");
-      if (main) {
-        const article = main.querySelector("article");
-        return article || main;
-      }
-
-      return document.body;
-    }
-  `;
-}
-
-/* ============================================================
-   ======= AGRESYWNE DOŁADOWANIE WSZYSTKICH KOMENTARZY =========
-   ============================================================ */
+/* ==================================
+   =======  ŁADOWANIE KOMENTARZY ====
+   ================================== */
 
 async function ensureAllCommentsLoaded(page, expectedTotal = null) {
   console.log("[FB] ensureAllCommentsLoaded – start");
+
+  try {
+    const info = await detectCommentsScrollContainer(page);
+    console.log("[FB] detectCommentsScrollContainer:", info);
+  } catch (e) {
+    console.log(
+      "[FB] detectCommentsScrollContainer – błąd (ignoruję):",
+      e?.message || e
+    );
+  }
 
   const MAX_ROUNDS = 300;
   const MAX_NO_PROGRESS = 10;
@@ -130,7 +157,7 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
     const countAfter = await getCurrentCommentAnchorCount(page);
 
     console.log(
-      `[FB] ensureAllCommentsLoaded – runda ${round}, IDs=${countAfter}, scroll=${scrollInfo.before}/${scrollInfo.after}`
+      `[FB] ensureAllCommentsLoaded – runda ${round}, IDs=${countAfter}, scroll=${scrollInfo.before}/${scrollInfo.after} (${scrollInfo.container})`
     );
 
     if (hasTarget && countAfter >= expectedTotal) {
@@ -155,7 +182,6 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
     }
   }
 
-  // ===== Runda kontrolna – GÓRA ↔ DÓŁ w obrębie posta/okna =====
   try {
     console.log(
       "[FB] ensureAllCommentsLoaded – runda kontrolna (scroll góra-dół w obrębie posta)."
@@ -174,7 +200,8 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
 
       console.log(
         `[FB] kontrola ${i}: IDs ${idsBefore} -> ${idsAfter}, ` +
-          `scrollUp=${up.before}->${up.after}, scrollDown=${down.before}->${down.after}`
+          `scrollUp=${up.before}->${up.after} (${up.container}), ` +
+          `scrollDown=${down.before}->${down.after} (${down.container})`
       );
 
       if (
@@ -196,811 +223,384 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
   console.log("[FB] ensureAllCommentsLoaded – koniec.");
 }
 
-/* ============================================================
-   ===== POMOCNICZE: LICZENIE ID I SCROLL W POŚCIE ============
-   ============================================================ */
+/* =============
+   =====  UX ===
+   ============= */
 
-async function getCurrentCommentAnchorCount(page) {
-  const count = await page.evaluate(
-    new Function(
-      `"use strict";
-       ${postRootScript()}
-       const root = getPostRoot();
-       if (!root) return 0;
+async function clickIfExists(page, xpath, label) {
+  const didClick = await page.evaluate((xp) => {
+    try {
+      const doc = document;
+      const res = doc.evaluate(
+        xp,
+        doc,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null
+      );
+      const node = res.singleNodeValue;
+      if (!node || !(node instanceof HTMLElement)) return false;
+      node.click();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }, xpath);
 
-       const anchors = Array.from(
-         root.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
-       );
+  if (!didClick) return false;
 
-       const ids = new Set();
-
-       for (const a of anchors) {
-         try {
-           const url = new URL(a.href);
-           const cid = url.searchParams.get("comment_id");
-           const rid = url.searchParams.get("reply_comment_id");
-           let raw = rid || cid;
-           if (!raw) continue;
-
-           if (!/^\\d+$/.test(raw)) {
-             try {
-               const dec = atob(raw);
-               const m = dec.match(/:(\\d+)_([0-9]+)/);
-               if (m) raw = m[2];
-             } catch {}
-           }
-
-           if (raw) ids.add(raw);
-         } catch {}
-       }
-
-       return ids.size;
-      `
-    )
-  );
-  return count || 0;
+  console.log(`[FB] -> klik ${label}`);
+  await sleepRandom(600, 1000);
+  return true;
 }
 
-/**
- * Scrolluje w obrębie posta, a jeśli post nie ma własnego scrolla – scrolluje CAŁĄ STRONĘ.
- * factor > 0  → w dół
- * factor < 0  → w górę
- */
-async function scrollWithinPost(page, label, factor = 0.3) {
-  const info = await page.evaluate((factor) => {
-    // Lokalna kopia getPostRoot (nie bawimy się w postRootScript tutaj)
-    function getPostRoot() {
-      const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
+/* ======================================
+   =====  ROZWIJANIE KOMENTARZY  ========
+   ====================================== */
 
-      const postDialog = dialogs.find((dlg) => {
-        const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
-        if (!text) return false;
-
-        const hasCommentWord = text.includes("komentarz");
-        const hasActions =
-          text.includes("lubię to") ||
-          text.includes("komentarz") ||
-          text.includes("udostępnij") ||
-          text.includes("napisz komentarz");
-
-        const looksLikeNotifications =
-          text.startsWith("powiadomienia") &&
-          text.includes("wszystkie") &&
-          text.includes("nieprzeczytane");
-
-        return !looksLikeNotifications && hasCommentWord && hasActions;
-      });
-
-      if (postDialog) return postDialog;
-
-      const main = document.querySelector("div[role='main']");
-      if (main) {
-        const article = main.querySelector("article");
-        return article || main;
-      }
-
-      return document.body;
-    }
-
-    const root = getPostRoot() || document.body;
-
-    function pushIfScrollable(list, el, label) {
-      if (!el) return;
-      const style = window.getComputedStyle(el);
-      if (!style) return;
-
-      const oy = style.overflowY;
-      if (
-        oy !== "auto" &&
-        oy !== "scroll" &&
-        oy !== "overlay" &&
-        oy !== "hidden"
-      ) {
-        // typical FB dialog ma overflow-y: auto/scroll/overlay/hidden na wrapperze
-        // ale hidden + wewnętrzny scroller też się trafi – wtedy i tak złapiemy to wewnętrzne
-      }
-
-      const clientH = el.clientHeight || 0;
-      const scrollH = el.scrollHeight || 0;
-      const delta = scrollH - clientH;
-
-      if (clientH > 0 && delta > 10) {
-        list.push({ el, label, delta });
-      }
-    }
-
-    const candidates = [];
-
-    // 1) root
-    pushIfScrollable(candidates, root, "root");
-
-    // 2) dialog jako całość
-    const dialog =
-      root.closest("div[role='dialog']") || document.querySelector("div[role='dialog']");
-    if (dialog) {
-      pushIfScrollable(candidates, dialog, "dialog");
-    }
-
-    // 3) wszystkie sensowne div/section/main/article w dialogu
-    const scope = dialog || root;
-    const blocks = Array.from(
-      scope.querySelectorAll("div, section, main, article")
-    );
-
-    for (const el of blocks) {
-      pushIfScrollable(candidates, el, "auto");
-    }
-
-    // wybieramy kandydata z największym delta (scrollHeight - clientHeight)
-    let best = null;
-    for (const c of candidates) {
-      if (!best || c.delta > best.delta) {
-        best = c;
-      }
-    }
-
-    let container;
-    let containerType;
-
-    if (best) {
-      container = best.el;
-      containerType = best.label;
-    } else {
-      // fallback: globalny scroller strony
-      container =
-        document.scrollingElement ||
-        document.documentElement ||
-        document.body;
-      const delta =
-        (container.scrollHeight || 0) - (container.clientHeight || 0);
-      if (delta <= 0) {
-        const cur = container.scrollTop || 0;
-        return { before: cur, after: cur, container: "window-no-scroll" };
-      }
-      containerType = "window";
-    }
-
-    const before = container.scrollTop || 0;
-    const maxScroll = (container.scrollHeight || 0) - (container.clientHeight || 0);
-
-    if (maxScroll <= 0) {
-      return { before, after: before, container: containerType + "-no-scroll" };
-    }
-
-    const sign = (factor || 0.3) < 0 ? -1 : 1;
-    const magnitude = Math.abs(factor || 0.3);
-
-    const baseStep = container.clientHeight * magnitude;
-    const step = Math.max(40, Math.min(baseStep, 180)); // mały krok
-
-    let target;
-    if (sign < 0) {
-      target = Math.max(0, before - step);
-    } else {
-      target = Math.min(maxScroll, before + step);
-    }
-
-    container.scrollTop = target;
-    const after = container.scrollTop || 0;
-
-    return { before, after, container: containerType };
-  }, factor);
-
-  console.log(
-    `[FB] scrollWithinPost[${label}] – ${info.before} -> ${info.after} (${info.container})`
-  );
-
-  return info;
-}
-
-
-/* ============================================================
-   ==================== LICZBA KOMENTARZY ======================
-   ============================================================ */
-
-async function getCommentCount(page, postUrl) {
-  console.log(`[FB] Otwieranie posta: ${postUrl}`);
-
-  await page.goto(postUrl, { waitUntil: "networkidle2", timeout: 60000 });
-  await sleepRandom(3000, 4500);
-
-  await acceptCookies(page, "post-initial");
-  await ensureLoggedInOnPostOverlay(page);
-  await acceptCookies(page, "post");
-  await sleepRandom(1500, 2500);
-
-  await scrollPost(page, 200);
-  await sleepRandom(800, 1200);
-
-  try {
-    const ok = await switchCommentsFilterToAll(page);
-    if (ok) await sleepRandom(1200, 2000);
-  } catch (e) {
-    console.log("[FB] Błąd switchCommentsFilterToAll:", e.message);
+async function expandAllComments(page) {
+  if (!EXPAND_COMMENTS) {
+    console.log("[FB] EXPAND_COMMENTS=false – pomijam rozwijanie komentarzy.");
+    return;
   }
 
-  await ensureAllCommentsLoaded(page, null);
+  let clickedSomething = false;
 
-  const uiInfo = await page.evaluate(() => {
-    const debug = {};
+  const patterns = [
+    {
+      xpath:
+        "//div[contains(@role,'button')][.//span[contains(text(),'Wyświetl więcej komentarzy') or contains(text(),'View more comments') or contains(text(),'View previous comments')]]",
+      label: "'więcej komentarzy / view more comments'",
+    },
+    {
+      xpath:
+        "//div[contains(@role,'button')][.//span[contains(text(),'Zobacz więcej komentarzy') or contains(text(),'See more comments')]]",
+      label: "'zobacz więcej komentarzy / see more comments'",
+    },
+    {
+      xpath:
+        "//div[contains(@role,'button')][.//span[contains(text(),'X odpowiedzi') or contains(text(),'replies') or contains(text(),'See previous replies') or contains(text(),'View more replies')]]",
+      label: "'więcej odpowiedzi / X odpowiedzi'",
+    },
+    {
+      xpath:
+        "//div[contains(@role,'button')][.//span[contains(text(),'Wyświetl więcej odpowiedzi') or contains(text(),'View more replies') or contains(text(),'View previous replies')]]",
+      label: "'więcej odpowiedzi / view more replies'",
+    },
+  ];
 
-    function getPostRoot() {
-      const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
-      const postDialog = dialogs.find((dlg) => {
-        const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
-        if (!text) return false;
+  for (const { xpath, label } of patterns) {
+    const didClick = await clickIfExists(page, xpath, label);
+    if (didClick) clickedSomething = true;
+  }
 
-        const hasCommentWord = text.includes("komentarz");
-        const hasActions =
-          text.includes("lubię to") ||
-          text.includes("komentarz") ||
-          text.includes("udostępnij") ||
-          text.includes("napisz komentarz");
+  if (!clickedSomething) {
+    console.log("[FB] Nic do rozwinięcia (komentarze).");
+  }
 
-        const looksLikeNotifications =
-          text.startsWith("powiadomienia") &&
-          text.includes("wszystkie") &&
-          text.includes("nieprzeczytane");
+  await sleepRandom(500, 900);
+}
 
-        return !looksLikeNotifications && hasCommentWord && hasActions;
-      });
+/* ======================================
+   =====  LICZENIE ANCHORÓW  ============
+   ====================================== */
 
-      if (postDialog) return postDialog;
-
-      const main = document.querySelector("div[role='main']");
-      if (main) {
-        const article = main.querySelector("article");
-        return article || main;
-      }
-
-      return document.body;
-    }
-
-    const root = getPostRoot();
-
-    const allEls = Array.from(root.querySelectorAll("span, div, button, a"));
-
-    const globalTexts = allEls
-      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    const btnEls = Array.from(
-      root.querySelectorAll("button, div[role='button'], span[role='button']")
-    );
-
-    const btnTexts = btnEls
-      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    debug.globalSample = globalTexts.slice(0, 30);
-    debug.buttonTextsSample = btnTexts.slice(0, 20);
-
-    function fromAllCommentsButton(buttonTexts) {
-      const idx = buttonTexts.findIndex((t) => {
-        const low = t.toLowerCase();
-        return low === "wszystkie komentarze" || low === "all comments";
-      });
-      if (idx === -1) return null;
-
-      const numericCandidates = [];
-      for (let i = idx - 3; i <= idx + 3; i++) {
-        if (i < 0 || i >= buttonTexts.length || i === idx) continue;
-        const t = buttonTexts[i];
-        if (!t) continue;
-        const m = t.match(/^\d+$/);
-        if (m) numericCandidates.push(parseInt(m[0], 10));
-      }
-      if (!numericCandidates.length) return null;
-      const best = Math.max(...numericCandidates);
-      return { num: best, raw: numericCandidates.join(",") };
-    }
-
-    function fromFilterLinkedCount(buttonTexts) {
-      const filterIdx = buttonTexts.findIndex((t) => {
-        const low = t.toLowerCase();
-        return (
-          low === "najtrafniejsze" ||
-          low === "most relevant" ||
-          low === "wszystkie komentarze" ||
-          low === "all comments"
-        );
-      });
-
-      if (filterIdx === -1) return null;
-
-      for (let i = filterIdx - 1; i >= 0; i--) {
-        const txt = buttonTexts[i];
-        if (!txt) continue;
-        const lower = txt.toLowerCase();
-
-        if (!lower.includes("komentarz") && !lower.includes("comment")) {
-          continue;
-        }
-
-        const m = lower.match(
-          /(\d+(?:[.,]\d+)?)(?:\s*(tys\.|k))?\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (!m) continue;
-
-        let n = parseFloat(m[1].replace(",", "."));
-        if (m[2]) n *= 1000;
-        n = Math.round(n);
-
-        return { num: n, raw: txt };
-      }
-
-      return null;
-    }
-
-    function parsePhrase(texts) {
-      let best = null;
-      let raw = null;
-
-      for (const t of texts) {
-        const lower = t.toLowerCase();
-
-        if (lower.includes("wszystkie reakcje") || lower.includes("all reactions")) {
-          continue;
-        }
-        if (!lower.includes("komentarz") && !lower.includes("comment")) continue;
-        if (
-          lower.startsWith("zobacz jeszcze") ||
-          lower.startsWith("wyświetl jeszcze") ||
-          lower.startsWith("view more")
-        )
-          continue;
-
-        const m = lower.match(
-          /(\d+(?:[.,]\d+)?)(?:\s*(tys\.|k))?\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (!m) continue;
-
-        let n = parseFloat(m[1].replace(",", "."));
-        if (m[2]) n *= 1000;
-        n = Math.round(n);
-
-        best = n;
-        raw = t;
-      }
-
-      return best != null ? { num: best, raw } : null;
-    }
-
-    function parseXofY(texts) {
-      let best = null;
-      let raw = null;
-      for (const t of texts) {
-        const lower = t.toLowerCase();
-        const m = lower.match(
-          /(\d+)\s*z\s*(\d+)\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (!m) continue;
-
-        const total = parseInt(m[2], 10);
-        if (!Number.isFinite(total) || total <= 0) continue;
-
-        if (best === null || total > best) {
-          best = total;
-          raw = t;
-        }
-      }
-      return best != null && best > 0 ? { num: best, raw } : null;
-    }
-
-    function digitNearComment(allElements) {
-      let near = null;
-      for (const el of allElements) {
-        const txt = (el.textContent || "").trim();
-        if (!/^\d+$/.test(txt)) continue;
-        const parent = el.parentElement;
-        if (!parent) continue;
-        const block = (parent.innerText || "").toLowerCase();
-        if (block.includes("komentarz") || block.includes("comment")) {
-          const n = parseInt(txt, 10);
-          if (!near || n > near) near = n;
-        }
-      }
-      return near;
-    }
-
-    const btnRes = fromAllCommentsButton(btnTexts);
-    if (btnRes)
-      return { num: btnRes.num, debug: { ...debug, source: "buttonAllComments", raw: btnRes.raw } };
-
-    const filterRes = fromFilterLinkedCount(btnTexts);
-    if (filterRes)
-      return { num: filterRes.num, debug: { ...debug, source: "filterLinked", raw: filterRes.raw } };
-
-    const phraseRes = parsePhrase([...globalTexts, ...btnTexts]);
-    if (phraseRes)
-      return { num: phraseRes.num, debug: { ...debug, source: "phrase", raw: phraseRes.raw } };
-
-    const xOfY = parseXofY([...globalTexts, ...btnTexts]);
-    if (xOfY)
-      return { num: xOfY.num, debug: { ...debug, source: "xOfY", raw: xOfY.raw } };
-
-    const near = digitNearComment(allEls);
-    if (near != null)
-      return { num: near, debug: { ...debug, source: "digitNear" } };
-
-    return { num: null, debug: { ...debug, source: "none" } };
-  });
-
-  console.log("[DBG] Comments debug:", {
-    source: uiInfo.debug?.source,
-    raw: uiInfo.debug?.raw,
-    buttonTextsSample: uiInfo.debug?.buttonTextsSample?.slice(0, 5),
-    globalSampleCount: uiInfo.debug?.globalSample?.length,
-  });
-
-  const fallback = await page.evaluate(() => {
-    function getPostRoot() {
-      const dialog = document.querySelector("div[role='dialog']");
-      if (dialog) return dialog;
-      const article = document.querySelector("div[role='article']");
-      if (article) return article;
-      return document;
-    }
-
-    const root = getPostRoot();
+async function getCurrentCommentAnchorCount(page) {
+  const count = await page.evaluate(() => {
     const anchors = Array.from(
-      root.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
+      document.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
     );
-
     const ids = new Set();
 
     for (const a of anchors) {
       try {
         const url = new URL(a.href);
         const cid = url.searchParams.get("comment_id");
-        const rid = url.searchParams.get("reply_comment_id");
-        let raw = rid || cid;
-        if (!raw) continue;
-
-        if (!/^\d+$/.test(raw)) {
-          try {
-            const dec = atob(raw);
-            const m = dec.match(/:(\d+)_([0-9]+)/);
-            if (m) raw = m[2];
-          } catch {}
+        const rcid = url.searchParams.get("reply_comment_id");
+        if (cid) ids.add(cid);
+        if (rcid) ids.add(rcid);
+      } catch (e) {
+        const href = a.href || "";
+        const m = href.match(/(comment_id|reply_comment_id)=(\d+)/);
+        if (m) {
+          ids.add(m[2]);
         }
-
-        if (raw) ids.add(raw);
-      } catch {}
+      }
     }
-
-    return { count: ids.size };
+    return ids.size;
   });
-
-  console.log("[FB] Fallback – anchor IDs:", fallback.count);
-
-  let finalNum = uiInfo.num;
-
-  if ((finalNum == null || finalNum === 0) && fallback.count > 0) {
-    finalNum = fallback.count;
-    console.log(
-      `[FB] Liczba komentarzy z anchorów (UI puste/0): ${finalNum}`
-    );
-  } else {
-    console.log("[FB] UI ma priorytet, anchory tylko jako debug:", {
-      ui: finalNum,
-      anchor: fallback.count,
-    });
-  }
-
-  if (finalNum != null) {
-    console.log("[FB] Liczba komentarzy (final):", finalNum);
-    return finalNum;
-  }
-
-  console.log("[FB] Brak liczby komentarzy w UI i brak anchorów, zwracam 0.");
-  return 0;
+  return count || 0;
 }
 
-/* ============================================================
-   ================= ROZWIJANIE KOMENTARZY ====================
-   ============================================================ */
+/* ============ PARSOWANIE LICZBY KOMENTARZY ============ */
 
-async function expandAllComments(page) {
-  if (!EXPAND_COMMENTS) {
-    console.log("[FB] EXPAND_COMMENTS=false → pomijam rozwijanie.");
-    return;
-  }
+async function getCommentCount(page) {
+  const debug = {
+    source: "none",
+    raw: undefined,
+    buttonTextsSample: [],
+    globalSampleCount: 0,
+  };
 
-  function delay(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
+  const res = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const result = { num: null, debug: {} };
 
-  let expanded = false;
-
-  async function clickLoop(label, evalFn, maxClicks = 20) {
-    let guard = 0;
-    while (guard++ < maxClicks) {
-      const clicked = await page.evaluate(evalFn);
-      if (!clicked) break;
-      expanded = true;
-      console.log(label);
-      await delay(800 + Math.random() * 700);
-    }
-  }
-
-  const makeRootFn = () => postRootScript();
-
-  await clickLoop(
-    "[FB] -> klik 'więcej komentarzy'",
-    new Function(
-      "\"use strict\";" +
-        makeRootFn() +
-        `
-        const root = getPostRoot();
-        const els = Array.from(
-          root.querySelectorAll("button, div[role='button'], span[role='button']")
-        );
-
-        for (const el of els) {
-          const t = (el.textContent || "").trim().toLowerCase();
-          if (!t) continue;
-
-          if (
-            t.startsWith("wyświetl więcej komentarzy") ||
-            t.startsWith("zobacz więcej komentarzy") ||
-            t.startsWith("pokaż komentarze") ||
-            t.startsWith("pokaż wcześniejsze komentarze") ||
-            t.startsWith("show comments") ||
-            t.startsWith("view more comments") ||
-            t.startsWith("wyświetl wcześniejsze komentarze") ||
-            t.startsWith("view previous comments") ||
-            (t.includes("zobacz jeszcze") && t.includes("komentarz"))
-          ) {
-            const rect = el.getBoundingClientRect();
-            if (!rect || rect.width === 0 || rect.height === 0) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-            el.click();
-            return true;
-          }
+        function parsePolishLike(text) {
+          const m = text.match(/(\d[\d\s]*)\s*komentarz/i);
+          if (!m) return null;
+          return parseInt(m[1].replace(/\s/g, ""), 10);
         }
-        return false;
-      `
-    )
+
+        function parseEnglishLike(text) {
+          const m = text.match(/(\d[\d\s]*)\s*comment/i);
+          if (!m) return null;
+          return parseInt(m[1].replace(/\s/g, ""), 10);
+        }
+
+        const allButtons = Array.from(
+          document.querySelectorAll("div[role='button'], span[role='button']")
+        );
+        const btnTexts = allButtons
+          .map((el) => (el.innerText || el.textContent || "").trim())
+          .filter((t) => !!t);
+
+        const debugLocal = {
+          buttonTextsSample: btnTexts.slice(0, 30),
+          globalSampleCount: btnTexts.length,
+        };
+
+        function fromAllCommentsButton(btns) {
+          for (const raw of btns) {
+            const t = raw.toLowerCase();
+            if (
+              t.includes("komentarze") ||
+              t.includes("comments") ||
+              t.includes("replies")
+            ) {
+              const n =
+                parsePolishLike(raw) ??
+                parseEnglishLike(raw) ??
+                parseInt(raw.replace(/[^\d]/g, ""), 10);
+              if (!Number.isNaN(n) && n > 0) {
+                return { num: n, raw };
+              }
+            }
+          }
+          return null;
+        }
+
+        function fromFilterButtonArea() {
+          const filterBtn = allButtons.find((el) => {
+            const t = (el.innerText || el.textContent || "")
+              .trim()
+              .toLowerCase();
+            return (
+              t === "najtrafniejsze" ||
+              t === "most relevant" ||
+              t === "wszystkie komentarze" ||
+              t === "all comments" ||
+              t === "autor" ||
+              t === "author"
+            );
+          });
+
+          if (!filterBtn) return null;
+
+          const root =
+            filterBtn.closest("div[role='dialog']") ||
+            filterBtn.closest("article") ||
+            document;
+
+          const nearbyTexts = Array.from(
+            root.querySelectorAll("div, span, a, h2, h3")
+          )
+            .map((el) => (el.innerText || el.textContent || "").trim())
+            .filter((t) => !!t);
+
+          let bestNum = null;
+          let bestRaw = null;
+
+          for (const raw of nearbyTexts) {
+            const n =
+              parsePolishLike(raw) ??
+              parseEnglishLike(raw) ??
+              parseInt(raw.replace(/[^\d]/g, ""), 10);
+            if (Number.isNaN(n) || n <= 0) continue;
+
+            const lower = raw.toLowerCase();
+            if (
+              lower.includes("komentarz") ||
+              lower.includes("comment") ||
+              lower.includes("odpowiedzi") ||
+              lower.includes("replies")
+            ) {
+              if (bestNum == null || n > bestNum) {
+                bestNum = n;
+                bestRaw = raw;
+              }
+            }
+          }
+
+          if (bestNum != null) {
+            return { num: bestNum, raw: bestRaw };
+          }
+
+          return null;
+        }
+
+        function fromGlobalTextScan() {
+          const allTextNodes = Array.from(
+            document.querySelectorAll("div, span, a, h2, h3")
+          );
+          let bestNum = null;
+          let bestRaw = null;
+
+          for (const el of allTextNodes) {
+            const raw = (el.innerText || el.textContent || "").trim();
+            if (!raw) continue;
+
+            const lower = raw.toLowerCase();
+            if (
+              !lower.includes("komentarz") &&
+              !lower.includes("comment") &&
+              !lower.includes("odpowiedzi") &&
+              !lower.includes("replies")
+            ) {
+              continue;
+            }
+
+            const n =
+              parsePolishLike(raw) ??
+              parseEnglishLike(raw) ??
+              parseInt(raw.replace(/[^\d]/g, ""), 10);
+            if (Number.isNaN(n) || n <= 0) continue;
+
+            if (bestNum == null || n > bestNum) {
+              bestNum = n;
+              bestRaw = raw;
+            }
+          }
+
+          if (bestNum != null) {
+            return { num: bestNum, raw: bestRaw };
+          }
+
+          return null;
+        }
+
+        let finalRes =
+          fromAllCommentsButton(btnTexts) ||
+          fromFilterButtonArea() ||
+          fromGlobalTextScan();
+
+        if (finalRes) {
+          result.num = finalRes.num;
+          result.debug = {
+            ...debugLocal,
+            source: "filterLinked",
+            raw: finalRes.raw,
+          };
+        } else {
+          result.num = null;
+          result.debug = { ...debugLocal, source: "none", raw: undefined };
+        }
+
+        resolve(result);
+      })
   );
 
-  await clickLoop(
-    "[FB] -> klik 'więcej odpowiedzi / X odpowiedzi'",
-    new Function(
-      "\"use strict\";" +
-        makeRootFn() +
-        `
-        const root = getPostRoot();
-        const els = Array.from(
-          root.querySelectorAll("button, div[role='button'], span[role='button']")
-        );
+  const num = res?.num ?? null;
+  const mergedDebug = { ...debug, ...res?.debug };
 
-        for (const el of els) {
-          const t = (el.textContent || "").trim().toLowerCase();
-          if (!t) continue;
+  console.log("[DBG] Comments debug:", mergedDebug);
 
-          if (
-            t.startsWith("wyświetl więcej odpowiedzi") ||
-            t.startsWith("zobacz więcej odpowiedzi") ||
-            t.startsWith("view more replies") ||
-            t.startsWith("wyświetl wcześniejsze odpowiedzi") ||
-            t.startsWith("view previous replies") ||
-            (t.includes("odpowiedzi") && /\\d/.test(t))
-          ) {
-            const rect = el.getBoundingClientRect();
-            if (!rect || rect.width === 0 || rect.height === 0) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      `
-    )
-  );
-
-  await clickLoop(
-    "[FB] -> klik 'Zobacz więcej (treść komentarza)'",
-    new Function(
-      "\"use strict\";" +
-        makeRootFn() +
-        `
-        const root = getPostRoot();
-        const els = Array.from(
-          root.querySelectorAll("span[role='button'], div[role='button']")
-        );
-
-        for (const el of els) {
-          const t = (el.textContent || "").trim();
-          if (t === "Zobacz więcej" || t === "See more") {
-            const rect = el.getBoundingClientRect();
-            if (!rect || rect.width === 0 || rect.height === 0) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      `
-    )
-  );
-
-  if (!expanded) {
-    console.log("[FB] Nic do rozwinięcia (komentarze).");
-  }
+  return { num, debug: mergedDebug };
 }
 
-/* ============================================================
-   ================== EXTRACT COMMENTS DATA ====================
-   ============================================================ */
+/* ======================================
+   =====  EKSTRAKCJA KOMENTARZY  ========
+   ====================================== */
 
 async function extractCommentsData(page) {
-  if (!EXPAND_COMMENTS) return [];
-
-  return page.evaluate(() => {
-    function looksLikeTime(t) {
-      const lower = t.toLowerCase();
-      if (!lower) return false;
-
-      if (
-        /\b(min|minut|godz|h|hr|dni|day|days|tyg|week|weeks|sek|s ago|m ago|h ago|d ago)\b/.test(
-          lower
-        )
-      )
-        return true;
-
-      if (/\b(wczoraj|yesterday)\b/.test(lower)) return true;
-      if (/^\d+\s*(s|min|h|d)\b/.test(lower)) return true;
-
-      return false;
-    }
-
-    function stripUiWords(str, timeText, author) {
-      if (!str) return "";
-
-      let out = str;
-
-      if (author) {
-        const escaped = author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        out = out.replace(new RegExp(escaped, "g"), "");
-      }
-
-      if (timeText) {
-        const escapedTime = timeText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        out = out.replace(new RegExp(escapedTime, "g"), "");
-      }
-
-      out = out.replace(
-        /\b(\d+\s*(s|min|minut|godz|h|hr|dni|day|days|tyg|week|weeks)\b|wczoraj|yesterday)\b/gi,
-        ""
-      );
-
-      out = out.replace(/lubię to!?/gi, "");
-      out = out.replace(/(like|odpowiedz|reply)/gi, "");
-      out = out.replace(/(komentarz|komentarze|udostępnij|share)/gi, "");
-
-      out = out.replace(/\s+/g, " ").trim();
-      return out;
-    }
-
+  return await page.evaluate(() => {
     const anchors = Array.from(
-      document.querySelectorAll(
-        "a[href*='comment_id'], a[href*='reply_comment_id']"
-      )
+      document.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
     );
 
     const byId = new Map();
 
     for (const a of anchors) {
-      const href = a.href;
-      let rawId = null;
+      let href = a.href;
+      let commentId = null;
 
       try {
         const url = new URL(href);
-        const c = url.searchParams.get("comment_id");
-        const r = url.searchParams.get("reply_comment_id");
-        rawId = r || c;
-      } catch {
-        continue;
+        commentId =
+          url.searchParams.get("comment_id") ||
+          url.searchParams.get("reply_comment_id");
+      } catch (e) {
+        const m = href.match(/(comment_id|reply_comment_id)=(\d+)/);
+        if (m) {
+          commentId = m[2];
+        }
       }
 
-      if (!rawId) continue;
+      if (!commentId) continue;
 
-      let commentId = rawId;
-
-      if (!/^\d+$/.test(commentId)) {
-        try {
-          const decoded = atob(commentId);
-          const m = decoded.match(/_(\d+)$/);
-          if (m) commentId = m[1];
-        } catch {}
-      }
-
-      let block =
+      const root =
         a.closest("div[aria-label*='Komentarz']") ||
         a.closest("div[aria-label*='comment']") ||
         a.closest("li") ||
-        a.closest("[role='article']") ||
-        a.parentElement;
+        a.closest("article") ||
+        a.closest("div");
 
-      if (!block) block = a.parentElement;
+      if (!root) continue;
 
-      const rawTime = (a.innerText || a.textContent || "").trim();
-      let timeText = looksLikeTime(rawTime) ? rawTime : "";
-
-      if (!timeText && block) {
-        const t = Array.from(block.querySelectorAll("a, span, time"))
-          .map((el) => (el.textContent || "").trim())
-          .find((txt) => looksLikeTime(txt));
-        if (t) timeText = t;
-      }
+      const rect = root.getBoundingClientRect();
+      const pos = rect.top + rect.height / 2;
 
       let author = null;
-      if (block) {
-        const links = Array.from(block.querySelectorAll("a"));
-        for (const l of links) {
-          const t = (l.innerText || l.textContent || "").trim();
-          if (!t) continue;
-
-          const low = t.toLowerCase();
-          if (
-            low === "lubię to!" ||
-            low === "lubię to" ||
-            low === "like" ||
-            low === "odpowiedz" ||
-            low === "reply"
-          )
-            continue;
-          if (looksLikeTime(t)) continue;
-
-          author = t;
-          break;
-        }
+      let authorLink = root.querySelector(
+        "a[role='link'][tabindex='0'], strong a[role='link'], span a[role='link']"
+      );
+      if (authorLink) {
+        author = (authorLink.innerText || authorLink.textContent || "").trim();
       }
 
-      let finalText = "";
-      let pos = null;
+      let timeText = null;
+      const timeEl =
+        root.querySelector("a[role='link'] abbr") ||
+        root.querySelector("a[role='link'] span");
+      if (timeEl) {
+        timeText = (timeEl.innerText || timeEl.textContent || "").trim();
+      }
 
-      if (block) {
-        try {
-          const rect = block.getBoundingClientRect();
-          pos = Math.round(rect.top + window.scrollY);
-        } catch {}
+      let commentBody =
+        root.querySelector("div[dir='auto']") ||
+        root.querySelector("span[dir='auto']") ||
+        root;
 
-        const candidates = [];
+      let text = (commentBody.innerText || commentBody.textContent || "").trim();
 
-        const divs = Array.from(
-          block.querySelectorAll("div[dir='auto'], span[dir='auto'], p")
-        );
-
-        for (const el of divs) {
-          let raw = (el.textContent || "").trim();
-          if (!raw) continue;
-
-          if (raw === author) continue;
-          if (raw === timeText) continue;
-          if (looksLikeTime(raw)) continue;
-
-          const txt = stripUiWords(raw, timeText, author);
-          if (!txt) continue;
-
-          const isBtn = el.closest("button,[role='button']");
-          if (isBtn) continue;
-
-          candidates.push(txt);
-        }
-
-        if (candidates.length > 0) {
-          finalText = candidates.reduce(
-            (acc, cur) => (cur.length > acc.length ? cur : acc),
-            ""
-          );
-        }
-
-        if (!finalText) {
-          let fallback = (block.innerText || "").trim();
-          fallback = stripUiWords(fallback, timeText, author);
-          finalText = fallback;
+      let finalText = text;
+      const seeMore = root.querySelector(
+        "div[role='button'] span, span[role='button'] span"
+      );
+      if (seeMore) {
+        const moreTxt = (seeMore.innerText || seeMore.textContent || "").trim();
+        if (
+          /zobacz więcej|see more|więcej/i.test(moreTxt) &&
+          !/\.\.\.$/.test(text)
+        ) {
+          const fallback =
+            (root.innerText || root.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim();
+          if (fallback && fallback.length > text.length) {
+            finalText = fallback;
+          }
         }
       }
 
@@ -1020,4 +620,11 @@ async function extractCommentsData(page) {
   });
 }
 
-export { getCommentCount, expandAllComments, extractCommentsData };
+export {
+  switchCommentsFilterToAll,
+  ensureAllCommentsLoaded,
+  expandAllComments,
+  getCurrentCommentAnchorCount,
+  getCommentCount,
+  extractCommentsData,
+};
