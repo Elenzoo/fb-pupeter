@@ -112,138 +112,286 @@ function postRootScript() {
 async function ensureAllCommentsLoaded(page, expectedTotal = null) {
   console.log("[FB] ensureAllCommentsLoaded – start");
 
-  const MAX_ROUNDS = 200;      // maks. liczba rund
-  let lastCount = 0;           // ile ID mieliśmy ostatnio
-  let noProgressRounds = 0;    // ile rund bez progresu z rzędu
+  const MAX_ROUNDS = 300;
+  const MAX_NO_PROGRESS = 10;
+  let lastCount = 0;
+  let noProgressRounds = 0;
+
+  const hasTarget = typeof expectedTotal === "number" && expectedTotal > 0;
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    // Ten kawałek odpala się w przeglądarce
-    const info = await page.evaluate(
-      new Function(
-        `"use strict";
-        ${postRootScript()}
-        const root = getPostRoot();
+    const countBefore = await getCurrentCommentAnchorCount(page);
 
-        // 1) liczymy UNIKALNE ID komentarzy z anchorów
-        const anchors = Array.from(
-          root.querySelectorAll(
-            "a[href*='comment_id'], a[href*='reply_comment_id']"
-          )
-        );
+    await expandAllComments(page);
 
-        const ids = new Set();
+    const scrollInfo = await scrollWithinPost(page, `round-${round}`, 0.25);
+    await sleepRandom(250, 450);
 
-        for (const a of anchors) {
-          try {
-            const url = new URL(a.href);
-            const cid = url.searchParams.get("comment_id");
-            const rid = url.searchParams.get("reply_comment_id");
-            let raw = rid || cid;
-            if (!raw) continue;
-
-            // czasem ID jest zakodowane base64
-            if (!/^\\d+$/.test(raw)) {
-              try {
-                const dec = atob(raw);             // np. "comment:xyz_123456789"
-                const m = dec.match(/:(\\d+)_([0-9]+)/);
-                if (m) raw = m[2];
-              } catch {}
-            }
-
-            if (raw) ids.add(raw);
-          } catch {}
-        }
-
-        const count = ids.size;
-
-        // 2) scroll – ZAWSZE z okna, żeby log był sensowny
-        const scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
-        const scrollMax =
-          (document.documentElement.scrollHeight || document.body.scrollHeight || 0)
-          - window.innerHeight;
-
-        return { count, scrollTop, scrollMax };
-      `
-      )
-    );
-
-    const { count, scrollTop, scrollMax } = info;
+    const countAfter = await getCurrentCommentAnchorCount(page);
 
     console.log(
-      `[FB] ensureAllCommentsLoaded – runda ${round}, IDs=${count}, scroll=${scrollTop}/${scrollMax}`
+      `[FB] ensureAllCommentsLoaded – runda ${round}, IDs=${countAfter}, scroll=${scrollInfo.before}/${scrollInfo.after}`
     );
 
-    // jeśli znamy expectedTotal i już dojechaliśmy – wychodzimy
-    if (expectedTotal && count >= expectedTotal) {
+    if (hasTarget && countAfter >= expectedTotal) {
       console.log(
-        `[FB] ensureAllCommentsLoaded – osiągnięto expectedTotal=${expectedTotal} (IDs=${count})`
+        `[FB] ensureAllCommentsLoaded – osiągnięto expectedTotal=${expectedTotal} (IDs=${countAfter})`
       );
       break;
     }
 
-    // progres / brak progresu
-    if (count <= lastCount) {
-      noProgressRounds++;
-    } else {
+    if (countAfter > lastCount) {
+      lastCount = countAfter;
       noProgressRounds = 0;
-      lastCount = count;
+    } else {
+      noProgressRounds++;
     }
 
-    // 3 rundy bez żadnego wzrostu ID → koniec głównej pętli
-    if (noProgressRounds >= 3) {
+    if (!hasTarget && noProgressRounds >= MAX_NO_PROGRESS) {
       console.log(
         "[FB] ensureAllCommentsLoaded – brak progresu (IDs nie rosną), stop (główna pętla)."
       );
       break;
     }
-
-    // klikamy "więcej komentarzy / odpowiedzi / zobacz więcej"
-    await expandAllComments(page);
-
-    // i dopiero potem scrollujemy dół posta
-    await scrollPost(page, 900);
-    await sleepRandom(700, 1100);
   }
 
-  // ===================== RUNDA KONTROLNA =====================
-  console.log("[FB] ensureAllCommentsLoaded – runda kontrolna (agresywny scroll).");
+  // ===== Runda kontrolna – GÓRA ↔ DÓŁ w obrębie posta/okna =====
+  try {
+    console.log(
+      "[FB] ensureAllCommentsLoaded – runda kontrolna (scroll góra-dół w obrębie posta)."
+    );
 
-  await page.evaluate(async () => {
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    for (let i = 1; i <= 3; i++) {
+      const idsBefore = await getCurrentCommentAnchorCount(page);
 
-    for (let i = 0; i < 10; i++) {
-      // mocny scroll w dół
-      window.scrollBy(0, window.innerHeight * 0.9);
+      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.35);
+      await sleepRandom(250, 400);
 
-      // szukamy wszystkich przycisków typu „więcej komentarzy / odpowiedzi”
-      const btns = Array.from(
-        document.querySelectorAll('div[role="button"], span')
+      const down = await scrollWithinPost(page, `ctrl-down-${i}`, 0.35);
+      await sleepRandom(250, 400);
+
+      const idsAfter = await getCurrentCommentAnchorCount(page);
+
+      console.log(
+        `[FB] kontrola ${i}: IDs ${idsBefore} -> ${idsAfter}, ` +
+          `scrollUp=${up.before}->${up.after}, scrollDown=${down.before}->${down.after}`
       );
 
-      for (const el of btns) {
-        const txt = (el.innerText || "").trim();
-
-        if (
-          /Wyświetl więcej komentarzy/i.test(txt) ||
-          /więcej odpowiedzi/i.test(txt) ||
-          /\d+\s+odpowiedzi/i.test(txt)
-        ) {
-          if (typeof el.click === "function") {
-            el.click();
-          }
-        }
+      if (
+        idsAfter <= idsBefore &&
+        up.before === up.after &&
+        down.before === down.after
+      ) {
+        console.log("[FB] Runda kontrolna: brak zmian — STOP.");
+        break;
       }
-
-      await sleep(400);
     }
-
-    // opcjonalnie wracamy na górę posta/strony
-    window.scrollTo(0, 0);
-  });
+  } catch (e) {
+    console.log(
+      "[FB] ensureAllCommentsLoaded – runda kontrolna zakończona błędem (ignoruję):",
+      e?.message || e
+    );
+  }
 
   console.log("[FB] ensureAllCommentsLoaded – koniec.");
 }
 
+/* ============================================================
+   ===== POMOCNICZE: LICZENIE ID I SCROLL W POŚCIE ============
+   ============================================================ */
+
+async function getCurrentCommentAnchorCount(page) {
+  const count = await page.evaluate(
+    new Function(
+      `"use strict";
+       ${postRootScript()}
+       const root = getPostRoot();
+       if (!root) return 0;
+
+       const anchors = Array.from(
+         root.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
+       );
+
+       const ids = new Set();
+
+       for (const a of anchors) {
+         try {
+           const url = new URL(a.href);
+           const cid = url.searchParams.get("comment_id");
+           const rid = url.searchParams.get("reply_comment_id");
+           let raw = rid || cid;
+           if (!raw) continue;
+
+           if (!/^\\d+$/.test(raw)) {
+             try {
+               const dec = atob(raw);
+               const m = dec.match(/:(\\d+)_([0-9]+)/);
+               if (m) raw = m[2];
+             } catch {}
+           }
+
+           if (raw) ids.add(raw);
+         } catch {}
+       }
+
+       return ids.size;
+      `
+    )
+  );
+  return count || 0;
+}
+
+/**
+ * Scrolluje w obrębie posta, a jeśli post nie ma własnego scrolla – scrolluje CAŁĄ STRONĘ.
+ * factor > 0  → w dół
+ * factor < 0  → w górę
+ */
+async function scrollWithinPost(page, label, factor = 0.3) {
+  const info = await page.evaluate((factor) => {
+    // Lokalna kopia getPostRoot (nie bawimy się w postRootScript tutaj)
+    function getPostRoot() {
+      const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
+
+      const postDialog = dialogs.find((dlg) => {
+        const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
+        if (!text) return false;
+
+        const hasCommentWord = text.includes("komentarz");
+        const hasActions =
+          text.includes("lubię to") ||
+          text.includes("komentarz") ||
+          text.includes("udostępnij") ||
+          text.includes("napisz komentarz");
+
+        const looksLikeNotifications =
+          text.startsWith("powiadomienia") &&
+          text.includes("wszystkie") &&
+          text.includes("nieprzeczytane");
+
+        return !looksLikeNotifications && hasCommentWord && hasActions;
+      });
+
+      if (postDialog) return postDialog;
+
+      const main = document.querySelector("div[role='main']");
+      if (main) {
+        const article = main.querySelector("article");
+        return article || main;
+      }
+
+      return document.body;
+    }
+
+    const root = getPostRoot() || document.body;
+
+    function pushIfScrollable(list, el, label) {
+      if (!el) return;
+      const style = window.getComputedStyle(el);
+      if (!style) return;
+
+      const oy = style.overflowY;
+      if (
+        oy !== "auto" &&
+        oy !== "scroll" &&
+        oy !== "overlay" &&
+        oy !== "hidden"
+      ) {
+        // typical FB dialog ma overflow-y: auto/scroll/overlay/hidden na wrapperze
+        // ale hidden + wewnętrzny scroller też się trafi – wtedy i tak złapiemy to wewnętrzne
+      }
+
+      const clientH = el.clientHeight || 0;
+      const scrollH = el.scrollHeight || 0;
+      const delta = scrollH - clientH;
+
+      if (clientH > 0 && delta > 10) {
+        list.push({ el, label, delta });
+      }
+    }
+
+    const candidates = [];
+
+    // 1) root
+    pushIfScrollable(candidates, root, "root");
+
+    // 2) dialog jako całość
+    const dialog =
+      root.closest("div[role='dialog']") || document.querySelector("div[role='dialog']");
+    if (dialog) {
+      pushIfScrollable(candidates, dialog, "dialog");
+    }
+
+    // 3) wszystkie sensowne div/section/main/article w dialogu
+    const scope = dialog || root;
+    const blocks = Array.from(
+      scope.querySelectorAll("div, section, main, article")
+    );
+
+    for (const el of blocks) {
+      pushIfScrollable(candidates, el, "auto");
+    }
+
+    // wybieramy kandydata z największym delta (scrollHeight - clientHeight)
+    let best = null;
+    for (const c of candidates) {
+      if (!best || c.delta > best.delta) {
+        best = c;
+      }
+    }
+
+    let container;
+    let containerType;
+
+    if (best) {
+      container = best.el;
+      containerType = best.label;
+    } else {
+      // fallback: globalny scroller strony
+      container =
+        document.scrollingElement ||
+        document.documentElement ||
+        document.body;
+      const delta =
+        (container.scrollHeight || 0) - (container.clientHeight || 0);
+      if (delta <= 0) {
+        const cur = container.scrollTop || 0;
+        return { before: cur, after: cur, container: "window-no-scroll" };
+      }
+      containerType = "window";
+    }
+
+    const before = container.scrollTop || 0;
+    const maxScroll = (container.scrollHeight || 0) - (container.clientHeight || 0);
+
+    if (maxScroll <= 0) {
+      return { before, after: before, container: containerType + "-no-scroll" };
+    }
+
+    const sign = (factor || 0.3) < 0 ? -1 : 1;
+    const magnitude = Math.abs(factor || 0.3);
+
+    const baseStep = container.clientHeight * magnitude;
+    const step = Math.max(40, Math.min(baseStep, 180)); // mały krok
+
+    let target;
+    if (sign < 0) {
+      target = Math.max(0, before - step);
+    } else {
+      target = Math.min(maxScroll, before + step);
+    }
+
+    container.scrollTop = target;
+    const after = container.scrollTop || 0;
+
+    return { before, after, container: containerType };
+  }, factor);
+
+  console.log(
+    `[FB] scrollWithinPost[${label}] – ${info.before} -> ${info.after} (${info.container})`
+  );
+
+  return info;
+}
 
 
 /* ============================================================
@@ -271,7 +419,6 @@ async function getCommentCount(page, postUrl) {
     console.log("[FB] Błąd switchCommentsFilterToAll:", e.message);
   }
 
-  // Spróbuj doładować komentarze (scroll + kliknięcia)
   await ensureAllCommentsLoaded(page, null);
 
   const uiInfo = await page.evaluate(() => {
@@ -480,12 +627,11 @@ async function getCommentCount(page, postUrl) {
   });
 
   console.log("[DBG] Comments debug:", {
-  source: uiInfo.debug?.source,
-  raw: uiInfo.debug?.raw,
-  buttonTextsSample: uiInfo.debug?.buttonTextsSample?.slice(0, 5),
-  globalSampleCount: uiInfo.debug?.globalSample?.length,
-});
-
+    source: uiInfo.debug?.source,
+    raw: uiInfo.debug?.raw,
+    buttonTextsSample: uiInfo.debug?.buttonTextsSample?.slice(0, 5),
+    globalSampleCount: uiInfo.debug?.globalSample?.length,
+  });
 
   const fallback = await page.evaluate(() => {
     function getPostRoot() {
@@ -639,7 +785,7 @@ async function expandAllComments(page) {
             t.startsWith("view more replies") ||
             t.startsWith("wyświetl wcześniejsze odpowiedzi") ||
             t.startsWith("view previous replies") ||
-            (t.includes("odpowiedzi") && /\d/.test(t))
+            (t.includes("odpowiedzi") && /\\d/.test(t))
           ) {
             const rect = el.getBoundingClientRect();
             if (!rect || rect.width === 0 || rect.height === 0) continue;
