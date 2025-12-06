@@ -1,6 +1,6 @@
 # katalogi
 node_modules/
-
+export_fb_watcher/
 # pliki z sekretami
 .env
 cookies.json
@@ -9,3 +9,4 @@ config/links.json
 # pliki, które mogą się generować same
 npm-debug.log*
 dist/
+export_files.js*

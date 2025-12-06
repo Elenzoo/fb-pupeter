@@ -1,67 +1,191 @@
+// src/fb/comments.js
 import { EXPAND_COMMENTS } from "../config.js";
 import { sleepRandom } from "../utils/sleep.js";
 import { scrollPost } from "./scroll.js";
 import { acceptCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay } from "./login.js";
+import { clickOneExpandButton } from "./expandButtons.js";
 
 /* ============================================================
    =======  PRZEŁĄCZANIE FILTRA „WSZYSTKIE KOMENTARZE”  ========
    ============================================================ */
 
+/**
+ * Próbuje ustawić filtr komentarzy na "Wszystkie komentarze".
+ * Zasada:
+ *  - jeśli już jest "Wszystkie komentarze" → zwraca true, nic nie klika
+ *  - jeśli znajdzie filtr → otwiera menu i wybiera "Wszystkie komentarze"
+ *  - jeśli nie znajdzie ani filtra, ani opcji → false
+ */
 async function switchCommentsFilterToAll(page) {
-  console.log("[FB] Próba przełączenia filtra komentarzy…");
+  console.log("[FB][filter] Próba przełączenia filtra komentarzy…");
 
-  const opened = await page.evaluate(() => {
+  // 1) jeśli menu już jest otwarte – nie klikamy ponownie, tylko próbujemy
+  //    wybrać opcję "Wszystkie komentarze" z istniejącego menu
+  const menuAlreadyOpen = await page.evaluate(() => {
+    return !!document.querySelector("div[role='menu']");
+  });
+
+  if (menuAlreadyOpen) {
+    console.log("[FB][filter] Menu filtra już otwarte – próbuję wybrać opcję.");
+    const menuResult = await clickAllCommentsInMenu(page);
+    if (menuResult.clicked) {
+      console.log("[FB][filter] Wybrano 'Wszystkie komentarze' z otwartego menu.");
+      return true;
+    }
+    console.log("[FB][filter] Menu otwarte, ale nie ma opcji 'Wszystkie komentarze'.");
+    return false;
+  }
+
+  // 2) spróbuj znaleźć bieżący przycisk filtra i sprawdzić, co jest ustawione
+  const pre = await page.evaluate(() => {
     const els = Array.from(
       document.querySelectorAll("div[role='button'], span[role='button']")
     );
 
-    const btn = els.find((el) => {
+    let filterEl = null;
+    let labelText = "";
+
+    for (const el of els) {
       const t = (el.textContent || "").trim();
+      if (!t) continue;
+      const low = t.toLowerCase();
+
+      if (
+        low === "najtrafniejsze" ||
+        low === "most relevant" ||
+        low === "wszystkie komentarze" ||
+        low === "all comments"
+      ) {
+        filterEl = el;
+        labelText = low;
+        break;
+      }
+    }
+
+    if (!filterEl) {
+      return { state: "not-found" };
+    }
+
+    // Jeśli label już jest "wszystkie komentarze" → nic nie robimy
+    if (labelText === "wszystkie komentarze" || labelText === "all comments") {
+      return { state: "already-all" };
+    }
+
+    // W innym wypadku klikamy w filtr, żeby otworzyć menu
+    filterEl.click();
+    return { state: "clicked-filter" };
+  });
+
+  if (pre.state === "not-found") {
+    console.log("[FB][filter] Nie znaleziono przycisku filtra komentarzy.");
+    return false;
+  }
+
+  if (pre.state === "already-all") {
+    console.log("[FB][filter] Filtr już ustawiony na 'Wszystkie komentarze' – pomijam.");
+    return true;
+  }
+
+  // 3) po kliknięciu filtra – czekamy aż pojawi się menu
+  if (pre.state === "clicked-filter") {
+    await sleepRandom(400, 800);
+
+    const menuResult = await clickAllCommentsInMenu(page);
+
+    if (!menuResult.clicked && menuResult.noMenu) {
+      // fallback: może filtr przełącza się bez menu – sprawdzamy label jeszcze raz
+      const afterLabelIsAll = await page.evaluate(() => {
+        const els = Array.from(
+          document.querySelectorAll("div[role='button'], span[role='button']")
+        );
+        const btn = els.find((el) => {
+          const t = (el.textContent || "").trim().toLowerCase();
+          return t === "wszystkie komentarze" || t === "all comments";
+        });
+        return !!btn;
+      });
+
+      if (afterLabelIsAll) {
+        console.log(
+          "[FB][filter] Po kliknięciu filtr przełączył się bez menu na 'Wszystkie komentarze'."
+        );
+        return true;
+      }
+
+      console.log(
+        "[FB][filter] Kliknięto filtr, ale nie pojawiło się menu i label nie jest 'Wszystkie komentarze'."
+      );
+      return false;
+    }
+
+    if (!menuResult.clicked && !menuResult.noMenu) {
+      console.log("[FB][filter] Menu filtra jest, ale brak opcji 'Wszystkie komentarze'.");
+      return false;
+    }
+
+    console.log("[FB][filter] Filtr komentarzy ustawiony na: 'Wszystkie komentarze'.");
+    return true;
+  }
+
+  // Fallback – nie powinno się zdarzyć, ale niech będzie jawnie
+  console.log("[FB][filter] Nieoczekiwany stan w switchCommentsFilterToAll:", pre);
+  return false;
+}
+
+/**
+ * Próbuje kliknąć opcję "Wszystkie komentarze / All comments" w otwartym menu.
+ * Zwraca: { clicked: boolean, noMenu: boolean }
+ */
+async function clickAllCommentsInMenu(page) {
+  const result = await page.evaluate(() => {
+    const menu =
+      document.querySelector("div[role='menu']") ||
+      document.querySelector("div[role='dialog']");
+
+    if (!menu) {
+      return { clicked: false, noMenu: true };
+    }
+
+    const items = Array.from(
+      menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio']")
+    );
+
+    const opt = items.find((el) => {
+      const t = (el.textContent || "").trim().toLowerCase();
       return (
-        t === "Najtrafniejsze" ||
-        t === "Most relevant" ||
-        t === "Wszystkie komentarze" ||
-        t === "All comments"
+        t.startsWith("wszystkie komentarze") ||
+        t.startsWith("all comments")
       );
     });
 
-    if (!btn) return { found: false };
-    btn.click();
-    return { found: true };
-  });
+    if (!opt) {
+      return { clicked: false, noMenu: false };
+    }
 
-  if (!opened.found) {
-    console.log("[FB] Nie znaleziono przycisku filtra komentarzy.");
-    return false;
-  }
-
-  await sleepRandom(400, 800);
-
-  const clicked = await page.evaluate(() => {
-    const nodes = Array.from(
-      document.querySelectorAll(
-        "div[role='menuitem'], div[role='menuitemradio'], span, div"
-      )
-    );
-
-    const opt = nodes.find((el) => {
-      const t = (el.textContent || "").trim();
-      return t.startsWith("Wszystkie komentarze") || t.startsWith("All comments");
-    });
-
-    if (!opt) return { clicked: false };
     opt.click();
-    return { clicked: true };
+
+    // wymuszamy zamknięcie dropdownu kliknięciem w body
+    setTimeout(() => {
+      try {
+        document.body.click();
+      } catch {}
+    }, 50);
+
+    return { clicked: true, noMenu: false };
   });
 
-  if (!clicked.clicked) {
-    console.log("[FB] Nie ma opcji 'Wszystkie komentarze' w menu drop-down.");
-    return false;
+  if (result.clicked) {
+    await sleepRandom(300, 600);
+    // czekamy aż dropdown zniknie, ale bez rzucania błędem
+    await page
+      .waitForFunction(() => !document.querySelector("div[role='menu']"), {
+        timeout: 2000,
+      })
+      .catch(() => {});
   }
 
-  console.log("[FB] Filtr komentarzy ustawiony na: Wszystkie komentarze.");
-  return true;
+  return result;
 }
 
 /* ============================================================
@@ -77,12 +201,14 @@ function postRootScript() {
         const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
         if (!text) return false;
 
-        const hasCommentWord = text.includes("komentarz");
+        const hasCommentWord =
+          text.includes("komentarz") || text.includes("comment");
         const hasActions =
           text.includes("lubię to") ||
           text.includes("komentarz") ||
           text.includes("udostępnij") ||
-          text.includes("napisz komentarz");
+          text.includes("napisz komentarz") ||
+          text.includes("comment");
 
         const looksLikeNotifications =
           text.startsWith("powiadomienia") &&
@@ -110,87 +236,139 @@ function postRootScript() {
    ============================================================ */
 
 async function ensureAllCommentsLoaded(page, expectedTotal = null) {
-  console.log("[FB] ensureAllCommentsLoaded – start");
-
-  const MAX_ROUNDS = 300;
-  const MAX_NO_PROGRESS = 10;
-  let lastCount = 0;
-  let noProgressRounds = 0;
-
   const hasTarget = typeof expectedTotal === "number" && expectedTotal > 0;
 
+  // Rozpoznaj widok po aktualnym URL (wewnątrz strony)
+  const view = await page.evaluate(() => {
+    const href = location.href;
+    const isVideo = /\/watch\/|[\?&]v=/i.test(href);
+    const isPhoto = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(href);
+    return { href, isVideo, isPhoto };
+  });
+
+  console.log(
+    "[FB] ensureAllCommentsLoaded – start",
+    hasTarget ? `(target=${expectedTotal})` : "(bez targetu)",
+    "| view:",
+    view
+  );
+
+  // dla VIDEO zwiększamy limit rund, bo potrafi ładować po kawałku
+  const MAX_ROUNDS = view.isVideo ? 1200 : 800;
+  const MAX_NO_PROGRESS = 12;
+
+  let lastCount = 0;
+  let noProgressRounds = 0;
+  let breakReason = "max-rounds";
+  let roundsDone = 0;
+  let targetHitRound = null;
+
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const countBefore = await getCurrentCommentAnchorCount(page);
+    const beforeCount = await getCurrentCommentAnchorCount(page);
 
-    await expandAllComments(page);
-
-    const scrollInfo = await scrollWithinPost(page, `round-${round}`, 0.25);
-    await sleepRandom(250, 450);
-
-    const countAfter = await getCurrentCommentAnchorCount(page);
-
-    console.log(
-      `[FB] ensureAllCommentsLoaded – runda ${round}, IDs=${countAfter}, scroll=${scrollInfo.before}/${scrollInfo.after}`
+    const scrollInfo = await scrollWithinPost(
+      page,
+      `round-${round}`,
+      view.isVideo ? 0.18 : 0.25
     );
 
-    if (hasTarget && countAfter >= expectedTotal) {
-      console.log(
-        `[FB] ensureAllCommentsLoaded – osiągnięto expectedTotal=${expectedTotal} (IDs=${countAfter})`
-      );
-      break;
-    }
+    // lekkie odsapnięcie żeby FB zdążył dociągnąć kontent
+    await sleepRandom(180, 320);
+
+    // rozwijamy przyciski "Wyświetl więcej komentarzy / odpowiedzi"
+    await expandAllComments(page);
+
+    const afterCount = await getCurrentCommentAnchorCount(page);
 
     const progressed =
-      countAfter > lastCount || scrollInfo.after !== scrollInfo.before;
+      afterCount > lastCount ||
+      afterCount > beforeCount ||
+      (scrollInfo.after !== scrollInfo.before &&
+        !String(scrollInfo.container || "").includes("no-scroll"));
 
     if (progressed) {
-      lastCount = Math.max(lastCount, countAfter);
+      lastCount = Math.max(lastCount, afterCount);
       noProgressRounds = 0;
     } else {
       noProgressRounds++;
     }
 
-    if (noProgressRounds >= MAX_NO_PROGRESS) {
+    roundsDone = round;
+
+    if (hasTarget && afterCount >= expectedTotal && targetHitRound === null) {
+      targetHitRound = round;
+    }
+
+    // log co kilka rund + zawsze ostatnie 5
+    if (round % 25 === 0 || round > MAX_ROUNDS - 5) {
       console.log(
-        "[FB] ensureAllCommentsLoaded – brak progresu (IDs + scroll), stop (główna pętla)."
+        `[FB] ensureAllCommentsLoaded – round ${round} container: ${scrollInfo.container} before/after: ${scrollInfo.before} → ${scrollInfo.after} anchors: ${beforeCount} → ${afterCount} noProgress: ${noProgressRounds}`
       );
+    }
+
+    // jeśli przez X rund nic się realnie nie zmienia – wychodzimy
+    if (noProgressRounds >= MAX_NO_PROGRESS) {
+      breakReason = "no-progress";
       break;
     }
   }
 
-  // ===== Runda kontrolna – powrót NA SAMĄ GÓRĘ posta/okna =====
+  console.log(
+    "[FB] ensureAllCommentsLoaded – główna pętla:",
+    `reason=${breakReason}, rounds=${roundsDone}, anchors=${lastCount}${
+      hasTarget
+        ? `/target=${expectedTotal}, targetHitRound=${targetHitRound || "never"}`
+        : ""
+    }`
+  );
+
+  // Runda kontrolna – jazda w górę, szukanie "Wyświetl X odpowiedzi"
   try {
-    console.log(
-      "[FB] ensureAllCommentsLoaded – runda kontrolna (powrót na górę posta)."
-    );
+    let ctrlReason = "max-ctrl-rounds";
+    for (let i = 1; i <= 400; i++) {
+      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.55);
+      const clicked = await clickOneExpandButton(page);
+      await sleepRandom(160, 320);
 
-    for (let i = 1; i <= 500; i++) {
-      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.6);
-      await sleepRandom(200, 350);
+      if (up.after === 0) {
+        ctrlReason = "top-reached";
+        break;
+      }
 
-      console.log(
-        `[FB] kontrola ${i}: scrollUp=${up.before}->${up.after} (${up.container})`
-      );
-
-      if (up.after === 0 || up.after === up.before) {
-        console.log(
-          "[FB] Runda kontrolna: osiągnięto górę / brak dalszego scrolla — STOP."
-        );
+      if (up.after === up.before && !clicked) {
+        ctrlReason = "no-move-no-click";
         break;
       }
     }
+    console.log("[FB] ensureAllCommentsLoaded – runda kontrolna:", ctrlReason);
   } catch (e) {
     console.log(
-      "[FB] ensureAllCommentsLoaded – runda kontrolna zakończona błędem (ignoruję):",
+      "[FB] ensureAllCommentsLoaded – błąd w rundzie kontrolnej:",
       e?.message || e
     );
   }
 
-  console.log("[FB] ensureAllCommentsLoaded – koniec.");
+  // Finał – dociągnięcie do absolutnego dołu panelu komentarzy
+  try {
+    const bottom = await scrollToAbsoluteBottom(page, "final-bottom");
+    console.log("[FB] ensureAllCommentsLoaded – final bottom:", bottom);
+  } catch (e) {
+    console.log(
+      "[FB] ensureAllCommentsLoaded – błąd przy final bottom:",
+      e?.message || e
+    );
+  }
+
+  const finalCount = await getCurrentCommentAnchorCount(page);
+
+  console.log(
+    "[FB] ensureAllCommentsLoaded – koniec.",
+    `reason=${breakReason}, anchors=${finalCount}`
+  );
 }
 
 /* ============================================================
-   ===== POMOCNICZE: LICZENIE ID I SCROLL W POŚCIE ============
+   ===== POMOCNICZE: LICZENIE ID KOMENTARZY ====================
    ============================================================ */
 
 async function getCurrentCommentAnchorCount(page) {
@@ -215,13 +393,11 @@ async function getCurrentCommentAnchorCount(page) {
             const dec = atob(raw);
             const m = dec.match(/:(\d+)_([0-9]+)/);
             if (m) raw = m[2];
-          } catch (e) {}
+          } catch {}
         }
 
         if (raw) ids.add(raw);
-      } catch (e) {
-        continue;
-      }
+      } catch {}
     }
 
     return ids.size;
@@ -230,195 +406,628 @@ async function getCurrentCommentAnchorCount(page) {
   return count || 0;
 }
 
+/* ============================================================
+   ===== POMOCNICZE: SCROLL W OBRĘBIE POSTA ====================
+   ============================================================ */
+
 /**
- * Scrolluje w obrębie posta, a jeśli post nie ma własnego scrolla – scrolluje CAŁĄ STRONĘ.
+ * Scrolluje w obrębie posta (panel komentarzy, dialog, itp.).
+ * Jeśli nie znajdzie sensownego kontenera – może zwrócić xxx-no-scroll.
+ *
  * factor > 0  → w dół
  * factor < 0  → w górę
  */
 async function scrollWithinPost(page, label, factor = 0.3) {
-  const info = await page.evaluate((factor) => {
-    const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
-      location.href
-    );
-
-    function getPostRoot() {
-      const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
-
-      const postDialog = dialogs.find((dlg) => {
-        const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
-        if (!text) return false;
-
-        const hasCommentWord = text.includes("komentarz") || text.includes("comment");
-        const hasActions =
-          text.includes("lubię to") ||
-          text.includes("komentarz") ||
-          text.includes("udostępnij") ||
-          text.includes("napisz komentarz") ||
-          text.includes("comment");
-
-        const looksLikeNotifications =
-          text.startsWith("powiadomienia") &&
-          text.includes("wszystkie") &&
-          text.includes("nieprzeczytane");
-
-        return !looksLikeNotifications && hasCommentWord && hasActions;
-      });
-
-      if (postDialog) return postDialog;
-
-      const main = document.querySelector("div[role='main']");
-      if (main) {
-        const article = main.querySelector("article");
-        return article || main;
-      }
-
-      return document.body;
-    }
-
-    const root = getPostRoot() || document.body;
-
-    function pushIfScrollable(list, el, label) {
-      if (!el) return;
-      const style = window.getComputedStyle(el);
-      if (!style) return;
-
-      const oy = style.overflowY;
-      const clientH = el.clientHeight || 0;
-      const scrollH = el.scrollHeight || 0;
-      const delta = scrollH - clientH;
-
-      if (clientH > 0 && delta > 10) {
-        list.push({ el, label, delta });
-      }
-    }
-
-    let container = null;
-    let containerType = null;
-
-    if (isPhotoView) {
-      const commentInput =
-        document.querySelector("div[role='textbox'][data-lexical-editor]") ||
-        document.querySelector("form textarea[placeholder*='komentarz' i]") ||
-        document.querySelector("form textarea[placeholder*='comment' i]");
-
-      if (commentInput) {
-        let p = commentInput.parentElement;
-        while (p && p !== document.body && p !== document.documentElement) {
-          const style = window.getComputedStyle(p);
-          const oy = style.overflowY;
-          const ch = p.clientHeight || 0;
-          const sh = p.scrollHeight || 0;
-          const delta = sh - ch;
-
-          if (
-            ch > 0 &&
-            delta > 10 &&
-            (oy === "auto" || oy === "scroll" || oy === "overlay" || oy === "hidden")
-          ) {
-            container = p;
-            containerType = "photo-comments";
-            break;
-          }
-          p = p.parentElement;
-        }
-      }
-    }
-
-    if (!container) {
-      const candidates = [];
-
-      pushIfScrollable(candidates, root, "root");
-
-      const dialog =
-        root.closest("div[role='dialog']") ||
-        document.querySelector("div[role='dialog']");
-      if (dialog) {
-        pushIfScrollable(candidates, dialog, "dialog");
-      }
-
-      const scope = dialog || root;
-      const blocks = Array.from(
-        scope.querySelectorAll("div, section, main, article")
+  const info = await page.evaluate(
+    (factorArg, labelArg, postRootCode) => {
+      const href = location.href;
+      const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+        href
       );
-      for (const el of blocks) {
-        pushIfScrollable(candidates, el, "auto");
-      }
+      const isVideoView = /\/watch\/|[\?&]v=/i.test(href);
 
-      let best = null;
-      for (const c of candidates) {
-        if (!best || c.delta > best.delta) {
-          best = c;
+      // wstrzykujemy funkcję getPostRoot
+      // eslint-disable-next-line no-eval
+      eval(postRootCode);
+      // @ts-ignore
+      const rootFn =
+        typeof getPostRoot === "function" ? getPostRoot : () => document.body;
+
+      function pushIfScrollable(list, el, labelName) {
+        if (!el) return;
+        const style = window.getComputedStyle(el);
+        if (!style) return;
+
+        const oy = style.overflowY;
+        const clientH = el.clientHeight || 0;
+        const scrollH = el.scrollHeight || 0;
+        const delta = scrollH - clientH;
+
+        if (
+          clientH > 0 &&
+          delta > 10 &&
+          (oy === "auto" ||
+            oy === "scroll" ||
+            oy === "overlay" ||
+            oy === "hidden")
+        ) {
+          list.push({ el, label: labelName, delta });
         }
       }
 
-      if (best) {
-        container = best.el;
-        containerType = best.label;
+      let container = null;
+      let containerType = null;
+
+      // ===== PHOTO / VIDEO – najpierw próbujemy "oficjalny" panel komentarzy =====
+      if (isPhotoView || isVideoView) {
+        const moreCommentsBtn = Array.from(
+          document.querySelectorAll(
+            "button, div[role='button'], span[role='button']"
+          )
+        ).find((el) => {
+          const t = (el.textContent || "").toLowerCase();
+          return (
+            t.includes("wyświetl więcej komentarzy") ||
+            t.includes("zobacz więcej komentarzy") ||
+            t.includes("view more comments") ||
+            t.includes("view previous comments")
+          );
+        });
+
+        if (moreCommentsBtn) {
+          let p = moreCommentsBtn.parentElement;
+          while (p && p !== document.body && p !== document.documentElement) {
+            const style = window.getComputedStyle(p);
+            const oy = style.overflowY;
+            const ch = p.clientHeight || 0;
+            const sh = p.scrollHeight || 0;
+            const delta = sh - ch;
+
+            if (
+              ch > 0 &&
+              delta > 10 &&
+              (oy === "auto" ||
+                oy === "scroll" ||
+                oy === "overlay" ||
+                oy === "hidden")
+            ) {
+              container = p;
+              containerType = isPhotoView ? "photo-comments" : "video-comments";
+              break;
+            }
+            p = p.parentElement;
+          }
+        }
+
+        // VIDEO – dodatkowa próba: po nagłówku "Komentarze / Najtrafniejsze"
+        if (!container && isVideoView) {
+          const commentsHeader = Array.from(
+            document.querySelectorAll("div, span")
+          ).find((el) => {
+            const t = (el.textContent || "").toLowerCase();
+            return (
+              (t.includes("komentarze") && t.includes("najtrafniejsze")) ||
+              (t.includes("comments") && t.includes("most relevant")) ||
+              t.trim() === "komentarze" ||
+              t.trim() === "comments"
+            );
+          });
+
+          if (commentsHeader) {
+            let p = commentsHeader.parentElement;
+            while (p && p !== document.body && p !== document.documentElement) {
+              const style = window.getComputedStyle(p);
+              const oy = style.overflowY;
+              const ch = p.clientHeight || 0;
+              const sh = p.scrollHeight || 0;
+              const delta = sh - ch;
+
+              if (
+                ch > 0 &&
+                delta > 10 &&
+                (oy === "auto" ||
+                  oy === "scroll" ||
+                  oy === "overlay" ||
+                  oy === "hidden")
+              ) {
+                container = p;
+                containerType = "video-comments-header";
+                break;
+              }
+              p = p.parentElement;
+            }
+          }
+        }
+
+        // jeśli na watch nic sensownego nie znaleźliśmy – nie ruszamy okna
+        if (isVideoView && !container) {
+          const cur = window.scrollY || 0;
+          return {
+            before: cur,
+            after: cur,
+            container: "video-no-scroll",
+            label: labelArg,
+          };
+        }
+      }
+
+      // ===== Standardowa heurystyka (permalink / photo fallback) =====
+      if (!container) {
+        const root = rootFn() || document.body;
+        const candidates = [];
+
+        pushIfScrollable(candidates, root, "root");
+
+        const dialog =
+          root.closest("div[role='dialog']") ||
+          document.querySelector("div[role='dialog']");
+        if (dialog) {
+          pushIfScrollable(candidates, dialog, "dialog");
+        }
+
+        const scope = dialog || root;
+        const blocks = Array.from(
+          scope.querySelectorAll("div, section, main, article")
+        );
+        for (const el of blocks) {
+          pushIfScrollable(candidates, el, "auto");
+        }
+
+        let best = null;
+        for (const c of candidates) {
+          if (!best || c.delta > best.delta) best = c;
+        }
+
+        if (best) {
+          container = best.el;
+          containerType = best.label;
+        } else {
+          container =
+            document.scrollingElement ||
+            document.documentElement ||
+            document.body;
+          const delta =
+            (container.scrollHeight || 0) - (container.clientHeight || 0);
+          if (delta <= 0) {
+            const cur = container.scrollTop || window.scrollY || 0;
+            return {
+              before: cur,
+              after: cur,
+              container: "window-no-scroll",
+              label: labelArg,
+            };
+          }
+          containerType = "window";
+        }
+      }
+
+      const isWindowContainer =
+        container === document.body ||
+        container === document.documentElement ||
+        container === document.scrollingElement;
+
+      // na watch nie scrollujemy okna, tylko panel komentarzy
+      if (isVideoView && isWindowContainer) {
+        const cur = window.scrollY || 0;
+        return {
+          before: cur,
+          after: cur,
+          container: "video-window-blocked",
+          label: labelArg,
+        };
+      }
+
+      const before = isWindowContainer
+        ? window.scrollY || 0
+        : container.scrollTop || 0;
+
+      const maxScroll =
+        (container.scrollHeight || 0) - (container.clientHeight || 0);
+
+      if (maxScroll <= 0) {
+        return {
+          before,
+          after: before,
+          container: (containerType || "unknown") + "-no-scroll",
+          label: labelArg,
+        };
+      }
+
+      const factor = factorArg || 0.3;
+      const sign = factor < 0 ? -1 : 1;
+      const magnitude = Math.min(Math.abs(factor), 1);
+
+      const baseStep =
+        (container.clientHeight || window.innerHeight || 600) * magnitude;
+
+      // na VIDEO robimy mniejszy krok, żeby nie przeskakiwać przycisków
+      let step = Math.max(30, Math.min(baseStep, isVideoView ? 180 : 220));
+
+      let target;
+      if (sign < 0) {
+        target = Math.max(0, before - step);
       } else {
-        container =
-          document.scrollingElement || document.documentElement || document.body;
-        const delta =
-          (container.scrollHeight || 0) - (container.clientHeight || 0);
-        if (delta <= 0) {
-          const cur = container.scrollTop || window.scrollY || 0;
-          return { before: cur, after: cur, container: "window-no-scroll" };
-        }
-        containerType = "window";
+        target = Math.min(maxScroll, before + step);
       }
-    }
 
-    const isWindowContainer =
-      container === document.body ||
-      container === document.documentElement ||
-      container === document.scrollingElement;
+      if (isWindowContainer) {
+        window.scrollTo(0, target);
+      } else {
+        container.scrollTop = target;
+      }
 
-    const before = isWindowContainer
-      ? window.scrollY || 0
-      : container.scrollTop || 0;
+      const after = isWindowContainer
+        ? window.scrollY || 0
+        : container.scrollTop || 0;
 
-    const maxScroll =
-      (container.scrollHeight || 0) - (container.clientHeight || 0);
-
-    if (maxScroll <= 0) {
       return {
         before,
-        after: before,
-        container: (containerType || "unknown") + "-no-scroll",
+        after,
+        container: containerType || "unknown",
+        label: labelArg,
       };
-    }
-
-    const sign = (factor || 0.3) < 0 ? -1 : 1;
-    const magnitude = Math.abs(factor || 0.3);
-
-    const baseStep =
-      (container.clientHeight || window.innerHeight) * magnitude;
-    const step = Math.max(40, Math.min(baseStep, 200));
-
-    let target;
-    if (sign < 0) {
-      target = Math.max(0, before - step);
-    } else {
-      target = Math.min(maxScroll, before + step);
-    }
-
-    if (isWindowContainer) {
-      window.scrollTo(0, target);
-    } else {
-      container.scrollTop = target;
-    }
-
-    const after = isWindowContainer
-      ? window.scrollY || 0
-      : container.scrollTop || 0;
-
-    return { before, after, container: containerType || "unknown" };
-  }, factor);
-
-  console.log(
-    `[FB] scrollWithinPost[${label}] – ${info.before} -> ${info.after} (${info.container})`
+    },
+    factor,
+    label,
+    postRootScript()
   );
 
   return info;
+}
+
+/**
+ * Dociągnięcie do ABSOLUTNEGO dołu panelu komentarzy.
+ * Robi wewnętrzną pętlę w przeglądarce aż scroll przestanie się zmieniać.
+ */
+async function scrollToAbsoluteBottom(page, label = "bottom") {
+  const info = await page.evaluate(
+    (labelArg, postRootCode) => {
+      const href = location.href;
+      const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+        href
+      );
+      const isVideoView = /\/watch\/|[\?&]v=/i.test(href);
+
+      // wstrzykujemy funkcję getPostRoot
+      // eslint-disable-next-line no-eval
+      eval(postRootCode);
+      // @ts-ignore
+      const rootFn =
+        typeof getPostRoot === "function" ? getPostRoot : () => document.body;
+
+      function pushIfScrollable(list, el, labelName) {
+        if (!el) return;
+        const style = window.getComputedStyle(el);
+        if (!style) return;
+
+        const oy = style.overflowY;
+        const clientH = el.clientHeight || 0;
+        const scrollH = el.scrollHeight || 0;
+        const delta = scrollH - clientH;
+
+        if (
+          clientH > 0 &&
+          delta > 10 &&
+          (oy === "auto" ||
+            oy === "scroll" ||
+            oy === "overlay" ||
+            oy === "hidden")
+        ) {
+          list.push({ el, label: labelName, delta });
+        }
+      }
+
+      let container = null;
+      let containerType = null;
+
+      // PHOTO / VIDEO – najpierw próbujemy znaleźć panel komentarzy
+      if (isPhotoView || isVideoView) {
+        const moreCommentsBtn = Array.from(
+          document.querySelectorAll(
+            "button, div[role='button'], span[role='button']"
+          )
+        ).find((el) => {
+          const t = (el.textContent || "").toLowerCase();
+          return (
+            t.includes("wyświetl więcej komentarzy") ||
+            t.includes("zobacz więcej komentarzy") ||
+            t.includes("view more comments") ||
+            t.includes("view previous comments")
+          );
+        });
+
+        if (moreCommentsBtn) {
+          let p = moreCommentsBtn.parentElement;
+          while (p && p !== document.body && p !== document.documentElement) {
+            const style = window.getComputedStyle(p);
+            const oy = style.overflowY;
+            const ch = p.clientHeight || 0;
+            const sh = p.scrollHeight || 0;
+            const delta = sh - ch;
+
+            if (
+              ch > 0 &&
+              delta > 10 &&
+              (oy === "auto" ||
+                oy === "scroll" ||
+                oy === "overlay" ||
+                oy === "hidden")
+            ) {
+              container = p;
+              containerType = isPhotoView ? "photo-comments" : "video-comments";
+              break;
+            }
+            p = p.parentElement;
+          }
+        }
+
+        // dodatkowa próba po nagłówku "Komentarze / Najtrafniejsze"
+        if (!container && isVideoView) {
+          const commentsHeader = Array.from(
+            document.querySelectorAll("div, span")
+          ).find((el) => {
+            const t = (el.textContent || "").toLowerCase();
+            return (
+              (t.includes("komentarze") && t.includes("najtrafniejsze")) ||
+              (t.includes("comments") && t.includes("most relevant")) ||
+              t.trim() === "komentarze" ||
+              t.trim() === "comments"
+            );
+          });
+
+          if (commentsHeader) {
+            let p = commentsHeader.parentElement;
+            while (p && p !== document.body && p !== document.documentElement) {
+              const style = window.getComputedStyle(p);
+              const oy = style.overflowY;
+              const ch = p.clientHeight || 0;
+              const sh = p.scrollHeight || 0;
+              const delta = sh - ch;
+
+              if (
+                ch > 0 &&
+                delta > 10 &&
+                (oy === "auto" ||
+                  oy === "scroll" ||
+                  oy === "overlay" ||
+                  oy === "hidden")
+              ) {
+                container = p;
+                containerType = "video-comments-header";
+                break;
+              }
+              p = p.parentElement;
+            }
+          }
+        }
+
+        // NOWY FALLBACK – po polu "Napisz komentarz..."
+        if (!container) {
+          const commentBox = Array.from(
+            document.querySelectorAll("div[role='textbox'], textarea")
+          ).find((el) => {
+            const label = (el.getAttribute("aria-label") || "").toLowerCase();
+            const ph = (el.getAttribute("placeholder") || "").toLowerCase();
+            const txt = (el.textContent || "").toLowerCase();
+
+            const needles = [
+              "napisz komentarz",
+              "write a comment",
+              "escribe un comentario",
+              "schreibe einen kommentar",
+            ];
+
+            return needles.some((n) =>
+              label.includes(n) || ph.includes(n) || txt.includes(n)
+            );
+          });
+
+          if (commentBox) {
+            let p = commentBox.parentElement;
+            while (p && p !== document.body && p !== document.documentElement) {
+              const style = window.getComputedStyle(p);
+              const oy = style.overflowY;
+              const ch = p.clientHeight || 0;
+              const sh = p.scrollHeight || 0;
+              const delta = sh - ch;
+
+              if (
+                ch > 0 &&
+                delta > 10 &&
+                (oy === "auto" ||
+                  oy === "scroll" ||
+                  oy === "overlay" ||
+                  oy === "hidden")
+              ) {
+                container = p;
+                containerType = isPhotoView
+                  ? "photo-comments-textbox"
+                  : "video-comments-textbox";
+                break;
+              }
+              p = p.parentElement;
+            }
+          }
+        }
+
+        // jeśli na watch nic sensownego nie znaleźliśmy – dajemy spokój
+        if (isVideoView && !container) {
+          const cur = window.scrollY || 0;
+          return {
+            label: labelArg,
+            container: "video-no-scroll",
+            steps: 0,
+            final: cur,
+            maxScroll: 0,
+            atBottom: true,
+          };
+        }
+      }
+
+      // Standardowa heurystyka (permalink / photo fallback)
+      if (!container) {
+        const root = rootFn() || document.body;
+        const candidates = [];
+
+        pushIfScrollable(candidates, root, "root");
+
+        const dialog =
+          root.closest("div[role='dialog']") ||
+          document.querySelector("div[role='dialog']");
+        if (dialog) {
+          pushIfScrollable(candidates, dialog, "dialog");
+        }
+
+        const scope = dialog || root;
+        const blocks = Array.from(
+          scope.querySelectorAll("div, section, main, article")
+        );
+        for (const el of blocks) {
+          pushIfScrollable(candidates, el, "auto");
+        }
+
+        let best = null;
+        for (const c of candidates) {
+          if (!best || c.delta > best.delta) {
+            best = c;
+          }
+        }
+
+        if (best) {
+          container = best.el;
+          containerType = best.label;
+        } else {
+          container =
+            document.scrollingElement ||
+            document.documentElement ||
+            document.body;
+          containerType = "window";
+        }
+      }
+
+      const isWindowContainer =
+        container === document.body ||
+        container === document.documentElement ||
+        container === document.scrollingElement;
+
+      // na watch nie ruszamy globalnego scrolla jeśli nie mamy innego kontenera
+      if (isVideoView && isWindowContainer) {
+        const cur = window.scrollY || 0;
+        return {
+          label: labelArg,
+          container: "video-window-blocked",
+          steps: 0,
+          final: cur,
+          maxScroll: 0,
+          atBottom: true,
+        };
+      }
+
+      let steps = 0;
+      const maxSteps = 160;
+      let lastPos = isWindowContainer
+        ? window.scrollY || 0
+        : container.scrollTop || 0;
+
+      while (steps < maxSteps) {
+        steps++;
+
+        const maxScroll =
+          (container.scrollHeight || 0) - (container.clientHeight || 0);
+        const pos = isWindowContainer
+          ? window.scrollY || 0
+          : container.scrollTop || 0;
+
+        // już na dole
+        if (maxScroll <= 0 || pos >= maxScroll - 2) {
+          return {
+            label: labelArg,
+            container: containerType || "unknown",
+            steps,
+            final: pos,
+            maxScroll,
+            atBottom: true,
+          };
+        }
+
+        const baseStep =
+          (container.clientHeight || window.innerHeight || 600) * 0.9;
+        const step = Math.max(60, Math.min(baseStep, maxScroll - pos));
+
+        if (isWindowContainer) {
+          window.scrollTo(0, pos + step);
+        } else {
+          container.scrollTop = pos + step;
+        }
+
+        const afterPos = isWindowContainer
+          ? window.scrollY || 0
+          : container.scrollTop || 0;
+
+        // brak ruchu mimo próby – uznajemy że jesteśmy na dole
+        if (afterPos === lastPos) {
+          return {
+            label: labelArg,
+            container: containerType || "unknown",
+            steps,
+            final: afterPos,
+            maxScroll,
+            atBottom: true,
+          };
+        }
+
+        lastPos = afterPos;
+      }
+
+      const maxScrollFinal =
+        (container.scrollHeight || 0) - (container.clientHeight || 0);
+      const finalPos = isWindowContainer
+        ? window.scrollY || 0
+        : container.scrollTop || 0;
+
+      return {
+        label: labelArg,
+        container: containerType || "unknown",
+        steps,
+        final: finalPos,
+        maxScroll: maxScrollFinal,
+        atBottom: finalPos >= maxScrollFinal - 2,
+      };
+    },
+    label,
+    postRootScript()
+  );
+
+  return info;
+}
+
+/* ============================================================
+   ===================== VIDEO – AUTO PAUSE ====================
+   ============================================================ */
+
+async function pauseVideoIfAny(page) {
+  try {
+    await page.evaluate(() => {
+      const vids = Array.from(document.querySelectorAll("video"));
+
+      for (const v of vids) {
+        try {
+          v.autoplay = false;
+          v.removeAttribute("autoplay");
+
+          v.muted = true;
+          v.pause();
+
+          if (!isNaN(v.currentTime) && v.currentTime === 0) {
+            v.currentTime = 0.01;
+          }
+        } catch (e) {}
+      }
+    });
+    console.log("[FB] Video pause: zatrzymano wszystkie <video>.");
+  } catch (e) {
+    console.log("[FB] Video pause – błąd:", e?.message || e);
+  }
 }
 
 /* ============================================================
@@ -436,23 +1045,54 @@ async function getCommentCount(page, postUrl) {
   await acceptCookies(page, "post");
   await sleepRandom(1500, 2500);
 
-  await scrollPost(page, 200);
-  await sleepRandom(800, 1200);
+  const isVideoView = /\/watch\/|[\?&]v=/i.test(postUrl);
+  const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+    postUrl
+  );
+  console.log(
+    "[FB] getCommentCount – view type:",
+    isVideoView ? "VIDEO" : isPhotoView ? "PHOTO" : "POST"
+  );
 
-  try {
-    const ok = await switchCommentsFilterToAll(page);
-    if (ok) await sleepRandom(1200, 2000);
-  } catch (e) {
-    console.log("[FB] Błąd switchCommentsFilterToAll:", e.message);
+  if (isVideoView) {
+    await pauseVideoIfAny(page);
   }
 
-  await ensureAllCommentsLoaded(page, null);
+  if (!isVideoView) {
+    await scrollPost(page, 200);
+    await sleepRandom(800, 1200);
+  }
 
-  // ========= UI PARSER – patrzymy w CAŁY DOCUMENT =========
+  // 1) Pierwsza próba ustawienia filtra
+  try {
+    const ok = await switchCommentsFilterToAll(page);
+    console.log(
+      "[FB] Pierwsza próba ustawienia filtra na 'Wszystkie komentarze':",
+      ok
+    );
+    if (ok) await sleepRandom(1200, 2000);
+  } catch (e) {
+    console.log("[FB] Błąd switchCommentsFilterToAll (pierwsza próba):", e.message);
+  }
+
+  if (isVideoView) {
+    await pauseVideoIfAny(page);
+  }
+
+  // ========= UI PARSER – liczymy z całego dokumentu (przed doładowaniem) =========
   const uiInfo = await page.evaluate(() => {
     const debug = {};
 
+    const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+      location.href
+    );
+    const isVideoView = /\/watch\/|[\?&]v=/i.test(location.href);
+
+    debug.isPhotoView = isPhotoView;
+    debug.isVideoView = isVideoView;
+
     const root = document;
+    debug.rootTag = root.tagName || "DOCUMENT";
 
     const allEls = Array.from(root.querySelectorAll("span, div, button, a"));
 
@@ -470,6 +1110,29 @@ async function getCommentCount(page, postUrl) {
 
     debug.globalSample = globalTexts.slice(0, 30);
     debug.buttonTextsSample = btnTexts.slice(0, 20);
+
+    // PHOTO – heurystyka: po "Wszystkie reakcje" pierwszy numerek to liczba komentarzy
+    function fromPhotoTopBlock(buttonTexts) {
+      if (!isPhotoView) return null;
+
+      const idx = buttonTexts.findIndex((t) => {
+        const low = t.toLowerCase();
+        return (
+          low.includes("wszystkie reakcje") ||
+          low.includes("all reactions")
+        );
+      });
+      if (idx === -1) return null;
+
+      const tail = buttonTexts.slice(idx + 1, idx + 8);
+      const firstNum = tail.find((t) => /^\d+$/.test(t));
+      if (!firstNum) return null;
+
+      const num = parseInt(firstNum, 10);
+      if (!Number.isFinite(num) || num <= 0) return null;
+
+      return { num, raw: tail.join(",") };
+    }
 
     function fromAllCommentsButton(buttonTexts) {
       const idx = buttonTexts.findIndex((t) => {
@@ -528,28 +1191,44 @@ async function getCommentCount(page, postUrl) {
       return null;
     }
 
-    // NOWE: liczba jako osobny przycisk obok "Komentarz"/"Comment"
-    function fromCommentButtonNeighbour(buttonTexts) {
-      const idx = buttonTexts.findIndex((t) => {
-        const low = t.toLowerCase();
-        return low === "komentarz" || low === "comment";
+    function fromReactionsBlock(allTexts) {
+      const idx = allTexts.findIndex((t) => {
+        const lower = t.toLowerCase();
+        return (
+          lower.includes("wszystkie reakcje") ||
+          lower.includes("all reactions")
+        );
       });
       if (idx === -1) return null;
 
-      const numericCandidates = [];
-      for (let i = idx - 3; i <= idx + 3; i++) {
-        if (i < 0 || i >= buttonTexts.length || i === idx) continue;
-        const t = buttonTexts[i];
-        if (!t) continue;
-        const m = t.match(/^\d+$/);
-        if (!m) continue;
-        numericCandidates.push(parseInt(m[0], 10));
+      const tail = allTexts.slice(idx + 1, idx + 10);
+
+      const likeIdx = tail.findIndex((t) => {
+        const lower = t.toLowerCase();
+        return (
+          lower.includes("lubię to") ||
+          lower.includes("like") ||
+          lower.includes("polub")
+        );
+      });
+      const segment = likeIdx === -1 ? tail : tail.slice(0, likeIdx);
+
+      const nums = segment
+        .map((t) => t.trim())
+        .filter((t) => /^\d+$/.test(t))
+        .map((t) => parseInt(t, 10))
+        .filter((n) => Number.isFinite(n) && n >= 0);
+
+      if (!nums.length) return null;
+
+      let chosen = null;
+      if (nums.length >= 2) {
+        chosen = nums[1];
+      } else {
+        chosen = nums[0];
       }
 
-      if (!numericCandidates.length) return null;
-
-      const best = Math.max(...numericCandidates);
-      return { num: best, raw: numericCandidates.join(",") };
+      return { num: chosen, raw: nums.join(",") };
     }
 
     function parsePhrase(texts) {
@@ -559,7 +1238,10 @@ async function getCommentCount(page, postUrl) {
       for (const t of texts) {
         const lower = t.toLowerCase();
 
-        if (lower.includes("wszystkie reakcje") || lower.includes("all reactions")) {
+        if (
+          lower.includes("wszystkie reakcje") ||
+          lower.includes("all reactions")
+        ) {
           continue;
         }
         if (!lower.includes("komentarz") && !lower.includes("comment")) continue;
@@ -623,7 +1305,18 @@ async function getCommentCount(page, postUrl) {
       return near;
     }
 
-    const btnRes = fromAllCommentsButton(btnTexts);
+    const allTexts = [...globalTexts, ...btnTexts];
+
+    // 1) PHOTO – najpierw próbujemy topowy blok po "Wszystkie reakcje"
+    const photoRes = fromPhotoTopBlock(btnTexts);
+    if (photoRes)
+      return {
+        num: photoRes.num,
+        debug: { ...debug, source: "photoTopBlock", raw: photoRes.raw },
+      };
+
+    // 2) standardowe heurystyki
+    const btnRes = !isPhotoView ? fromAllCommentsButton(btnTexts) : null;
     if (btnRes)
       return {
         num: btnRes.num,
@@ -637,21 +1330,21 @@ async function getCommentCount(page, postUrl) {
         debug: { ...debug, source: "filterLinked", raw: filterRes.raw },
       };
 
-    const neighborRes = fromCommentButtonNeighbour(btnTexts);
-    if (neighborRes)
+    const reactRes = fromReactionsBlock(allTexts);
+    if (reactRes)
       return {
-        num: neighborRes.num,
-        debug: { ...debug, source: "commentNeighbour", raw: neighborRes.raw },
+        num: reactRes.num,
+        debug: { ...debug, source: "reactionsBlock", raw: reactRes.raw },
       };
 
-    const phraseRes = parsePhrase([...globalTexts, ...btnTexts]);
+    const phraseRes = parsePhrase(allTexts);
     if (phraseRes)
       return {
         num: phraseRes.num,
         debug: { ...debug, source: "phrase", raw: phraseRes.raw },
       };
 
-    const xOfY = parseXofY([...globalTexts, ...btnTexts]);
+    const xOfY = parseXofY(allTexts);
     if (xOfY)
       return {
         num: xOfY.num,
@@ -668,12 +1361,32 @@ async function getCommentCount(page, postUrl) {
     return { num: null, debug: { ...debug, source: "none" } };
   });
 
-  console.log("[DBG] Comments debug:", {
+  console.log("[DBG] Comments debug (skrócone):", {
     source: uiInfo.debug?.source,
     raw: uiInfo.debug?.raw,
-    buttonTextsSample: uiInfo.debug?.buttonTextsSample?.slice(0, 5),
-    globalSampleCount: uiInfo.debug?.globalSample?.length,
+    isPhotoView: uiInfo.debug?.isPhotoView,
+    isVideoView: uiInfo.debug?.isVideoView,
   });
+
+  let expectedTotal = null;
+  if (typeof uiInfo.num === "number" && uiInfo.num > 0) {
+    expectedTotal = uiInfo.num;
+  }
+
+  // 2) Doładowanie komentarzy – target z UI tylko jako orientacja, nie stop
+  await ensureAllCommentsLoaded(page, expectedTotal);
+
+  // 3) Druga próba filtra – gdyby FB przełączył layout w międzyczasie
+  try {
+    const ok2 = await switchCommentsFilterToAll(page);
+    console.log(
+      "[FB] Druga próba ustawienia filtra na 'Wszystkie komentarze':",
+      ok2
+    );
+    if (ok2) await sleepRandom(800, 1500);
+  } catch (e) {
+    console.log("[FB] Błąd switchCommentsFilterToAll (druga próba):", e.message);
+  }
 
   // ========= FALLBACK ANCHORÓW – TEŻ CAŁY DOCUMENT =========
   const fallback = await page.evaluate(() => {
@@ -712,16 +1425,38 @@ async function getCommentCount(page, postUrl) {
 
   let finalNum = uiInfo.num;
 
-  if ((finalNum == null || finalNum === 0) && fallback.count > 0) {
-    finalNum = fallback.count;
-    console.log(
-      `[FB] Liczba komentarzy z anchorów (UI puste/0): ${finalNum}`
-    );
+  if (fallback.count > 0) {
+    if (finalNum == null || finalNum === 0) {
+      finalNum = fallback.count;
+      console.log(
+        "[FB] UI puste/0 – używam anchorów jako źródła.",
+        `anchor=${fallback.count}`
+      );
+    } else {
+      const diff = finalNum - fallback.count;
+
+      if (diff > 5) {
+        // UI pokazuje dużo więcej niż realnie widzimy – ufamy temu, co faktycznie jest w anchorach
+        console.log(
+          "[FB] UI >> anchory – część komentarzy niedostępna, używam anchorów.",
+          `ui=${finalNum}, anchor=${fallback.count}`
+        );
+        finalNum = fallback.count;
+      } else if (fallback.count > finalNum) {
+        console.log(
+          "[FB] Anchory > UI – używam anchorów jako bazowej liczby.",
+          `ui=${finalNum}, anchor=${fallback.count}`
+        );
+        finalNum = fallback.count;
+      } else {
+        console.log(
+          "[FB] UI ~= anchory – zostawiam UI jako źródło.",
+          `ui=${finalNum}, anchor=${fallback.count}`
+        );
+      }
+    }
   } else {
-    console.log("[FB] UI ma priorytet, anchory tylko jako debug:", {
-      ui: finalNum,
-      anchor: fallback.count,
-    });
+    console.log("[FB] Anchory=0 – opieram się wyłącznie na UI:", finalNum);
   }
 
   if (finalNum != null) {
@@ -740,181 +1475,19 @@ async function getCommentCount(page, postUrl) {
 async function expandAllComments(page) {
   if (!EXPAND_COMMENTS) {
     console.log("[FB] EXPAND_COMMENTS=false → pomijam rozwijanie.");
-    return;
+    return 0;
   }
 
-  function delay(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  let expandedSomething = false;
-
-  async function clickOnce() {
-    const res = await page.evaluate(() => {
-      const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
-        location.href
-      );
-
-      function getPostRoot() {
-        const dialogs = Array.from(document.querySelectorAll("div[role='dialog']"));
-
-        const postDialog = dialogs.find((dlg) => {
-          const text = (dlg.innerText || dlg.textContent || "").toLowerCase();
-          if (!text) return false;
-
-          const hasCommentWord =
-            text.includes("komentarz") || text.includes("comment");
-          const hasActions =
-            text.includes("lubię to") ||
-            text.includes("komentarz") ||
-            text.includes("udostępnij") ||
-            text.includes("napisz komentarz") ||
-            text.includes("comment");
-
-          const looksLikeNotifications =
-            text.startsWith("powiadomienia") &&
-            text.includes("wszystkie") &&
-            text.includes("nieprzeczytane");
-
-          return !looksLikeNotifications && hasCommentWord && hasActions;
-        });
-
-        if (postDialog) return postDialog;
-
-        const main = document.querySelector("div[role='main']");
-        if (main) {
-          const article = main.querySelector("article");
-          return article || main;
-        }
-
-        return document.body;
-      }
-
-      const root = isPhotoView ? document : getPostRoot() || document;
-
-      const buttons = Array.from(
-        root.querySelectorAll("button, div[role='button'], span[role='button']")
-      );
-
-      const candidates = [];
-
-      for (const el of buttons) {
-        const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (!raw) continue;
-
-        const text = raw.toLowerCase();
-
-        let kind = null;
-
-        if (
-          text.startsWith("wyświetl więcej komentarzy") ||
-          text.startsWith("zobacz więcej komentarzy") ||
-          text.startsWith("pokaż komentarze") ||
-          text.startsWith("pokaż wcześniejsze komentarze") ||
-          text.startsWith("show comments") ||
-          text.startsWith("view more comments") ||
-          text.startsWith("view previous comments")
-        ) {
-          kind = "more-comments";
-        }
-
-        if (!kind) {
-          if (
-            text.startsWith("wyświetl więcej odpowiedzi") ||
-            text.startsWith("zobacz więcej odpowiedzi") ||
-            (text.startsWith("wyświetl wszystkie") && text.includes("odpowiedzi")) ||
-            text.startsWith("wyświetl wszystkie odpowiedzi") ||
-            text.startsWith("wyświetl 1 odpowiedź") ||
-            text.startsWith("view more replies") ||
-            text.startsWith("view previous replies") ||
-            (text.includes("odpowiedzi") && /\d/.test(text)) ||
-            (text.includes("repl") && /\d/.test(text))
-          ) {
-            kind = "more-replies";
-          }
-        }
-
-        if (!kind) {
-          if (text === "zobacz więcej" || text === "see more") {
-            kind = "see-more-text";
-          }
-        }
-
-        if (!kind) continue;
-
-        const rect = el.getBoundingClientRect();
-        if (!rect || rect.width === 0 || rect.height === 0) continue;
-        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-
-        candidates.push({
-          kind,
-          top: rect.top,
-          text: raw,
-        });
-      }
-
-      if (!candidates.length) {
-        return { clicked: false };
-      }
-
-      const priority = { "more-comments": 3, "more-replies": 2, "see-more-text": 1 };
-
-      candidates.sort((a, b) => {
-        const pa = priority[a.kind] || 0;
-        const pb = priority[b.kind] || 0;
-        if (pa !== pb) return pb - pa;
-        return a.top - b.top;
-      });
-
-      const chosenInfo = candidates[0];
-
-      const allButtons = Array.from(
-        root.querySelectorAll("button, div[role='button'], span[role='button']")
-      );
-
-      let chosenEl = null;
-      for (const el of allButtons) {
-        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (t !== chosenInfo.text) continue;
-        const r = el.getBoundingClientRect();
-        if (!r || r.width === 0 || r.height === 0) continue;
-        if (Math.abs(r.top - chosenInfo.top) > 2) continue;
-        chosenEl = el;
-        break;
-      }
-
-      if (!chosenEl) {
-        return { clicked: false };
-      }
-
-      chosenEl.click();
-      return {
-        clicked: true,
-        kind: chosenInfo.kind,
-        text: chosenInfo.text,
-      };
-    });
-
-    if (res.clicked) {
-      expandedSomething = true;
-      console.log(
-        `[FB] -> klik '${res.text}' (typ=${res.kind || "?"})`
-      );
-      return true;
-    }
-
-    return false;
-  }
+  let clicks = 0;
 
   for (let i = 0; i < 30; i++) {
-    const didClick = await clickOnce();
+    const didClick = await clickOneExpandButton(page);
     if (!didClick) break;
-    await delay(900 + Math.random() * 700);
+    clicks++;
+    await sleepRandom(900, 1600);
   }
 
-  if (!expandedSomething) {
-    console.log("[FB] Nic do rozwinięcia (komentarze).");
-  }
+  return clicks;
 }
 
 /* ============================================================
@@ -924,7 +1497,7 @@ async function expandAllComments(page) {
 async function extractCommentsData(page) {
   if (!EXPAND_COMMENTS) return [];
 
-  return page.evaluate(() => {
+  const data = await page.evaluate(() => {
     function looksLikeTime(t) {
       const lower = t.toLowerCase();
       if (!lower) return false;
@@ -1105,6 +1678,9 @@ async function extractCommentsData(page) {
 
     return Array.from(byId.values());
   });
+
+  console.log("[FB] extractCommentsData – wyciągnięto komentarzy:", data.length);
+  return data;
 }
 
 export { getCommentCount, expandAllComments, extractCommentsData };
