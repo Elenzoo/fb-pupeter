@@ -232,142 +232,6 @@ function postRootScript() {
 }
 
 /* ============================================================
-   ======= AGRESYWNE DOŁADOWANIE WSZYSTKICH KOMENTARZY =========
-   ============================================================ */
-
-async function ensureAllCommentsLoaded(page, expectedTotal = null) {
-  const hasTarget = typeof expectedTotal === "number" && expectedTotal > 0;
-
-  // Rozpoznaj widok po aktualnym URL (wewnątrz strony)
-  const view = await page.evaluate(() => {
-    const href = location.href;
-    const isVideo = /\/watch\/|[\?&]v=/i.test(href);
-    const isPhoto = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(href);
-    return { href, isVideo, isPhoto };
-  });
-
-  console.log(
-    "[FB] ensureAllCommentsLoaded – start",
-    hasTarget ? `(target=${expectedTotal})` : "(bez targetu)",
-    "| view:",
-    view
-  );
-
-  // dla VIDEO zwiększamy limit rund, bo potrafi ładować po kawałku
-  const MAX_ROUNDS = view.isVideo ? 1200 : 800;
-  const MAX_NO_PROGRESS = 12;
-
-  let lastCount = 0;
-  let noProgressRounds = 0;
-  let breakReason = "max-rounds";
-  let roundsDone = 0;
-  let targetHitRound = null;
-
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const beforeCount = await getCurrentCommentAnchorCount(page);
-
-    const scrollInfo = await scrollWithinPost(
-      page,
-      `round-${round}`,
-      view.isVideo ? 0.18 : 0.25
-    );
-
-    // lekkie odsapnięcie żeby FB zdążył dociągnąć kontent
-    await sleepRandom(180, 320);
-
-    // rozwijamy przyciski "Wyświetl więcej komentarzy / odpowiedzi"
-    await expandAllComments(page);
-
-    const afterCount = await getCurrentCommentAnchorCount(page);
-
-    const progressed =
-      afterCount > lastCount ||
-      afterCount > beforeCount ||
-      (scrollInfo.after !== scrollInfo.before &&
-        !String(scrollInfo.container || "").includes("no-scroll"));
-
-    if (progressed) {
-      lastCount = Math.max(lastCount, afterCount);
-      noProgressRounds = 0;
-    } else {
-      noProgressRounds++;
-    }
-
-    roundsDone = round;
-
-    if (hasTarget && afterCount >= expectedTotal && targetHitRound === null) {
-      targetHitRound = round;
-    }
-
-    // log co kilka rund + zawsze ostatnie 5
-    if (round % 25 === 0 || round > MAX_ROUNDS - 5) {
-      console.log(
-        `[FB] ensureAllCommentsLoaded – round ${round} container: ${scrollInfo.container} before/after: ${scrollInfo.before} → ${scrollInfo.after} anchors: ${beforeCount} → ${afterCount} noProgress: ${noProgressRounds}`
-      );
-    }
-
-    // jeśli przez X rund nic się realnie nie zmienia – wychodzimy
-    if (noProgressRounds >= MAX_NO_PROGRESS) {
-      breakReason = "no-progress";
-      break;
-    }
-  }
-
-  console.log(
-    "[FB] ensureAllCommentsLoaded – główna pętla:",
-    `reason=${breakReason}, rounds=${roundsDone}, anchors=${lastCount}${
-      hasTarget
-        ? `/target=${expectedTotal}, targetHitRound=${targetHitRound || "never"}`
-        : ""
-    }`
-  );
-
-  // Runda kontrolna – jazda w górę, szukanie "Wyświetl X odpowiedzi"
-  try {
-    let ctrlReason = "max-ctrl-rounds";
-    for (let i = 1; i <= 400; i++) {
-      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.55);
-      const clicked = await clickOneExpandButton(page);
-      await sleepRandom(160, 320);
-
-      if (up.after === 0) {
-        ctrlReason = "top-reached";
-        break;
-      }
-
-      if (up.after === up.before && !clicked) {
-        ctrlReason = "no-move-no-click";
-        break;
-      }
-    }
-    console.log("[FB] ensureAllCommentsLoaded – runda kontrolna:", ctrlReason);
-  } catch (e) {
-    console.log(
-      "[FB] ensureAllCommentsLoaded – błąd w rundzie kontrolnej:",
-      e?.message || e
-    );
-  }
-
-  // Finał – dociągnięcie do absolutnego dołu panelu komentarzy
-  try {
-    const bottom = await scrollToAbsoluteBottom(page, "final-bottom");
-    console.log("[FB] ensureAllCommentsLoaded – final bottom:", bottom);
-  } catch (e) {
-    console.log(
-      "[FB] ensureAllCommentsLoaded – błąd przy final bottom:",
-      e?.message || e
-    );
-  }
-
-  const finalCount = await getCurrentCommentAnchorCount(page);
-
-  console.log(
-    "[FB] ensureAllCommentsLoaded – koniec.",
-    `reason=${breakReason}, anchors=${finalCount}`
-  );
-}
-
-/* ============================================================
    ===== POMOCNICZE: LICZENIE ID KOMENTARZY ====================
    ============================================================ */
 
@@ -1031,6 +895,287 @@ async function pauseVideoIfAny(page) {
 }
 
 /* ============================================================
+   ======= BRUTALNA DOŻYNKA – LOAD MORE NA DOLE ================
+   ============================================================ */
+
+async function clickAllLoadMoreAtBottom(page, view, maxClicks = 300) {
+  // Brutalna dożynka na dole – bez scrolla, tylko to, co widać
+  return await page.evaluate(({ isVideo, max }) => {
+    function normalize(text) {
+      return (text || "").toLowerCase().replace(/\s+/g, " ").trim();
+    }
+
+    // Szukamy sensownego roota z komentarzami
+    function findCommentsRoot() {
+      // Dla watch/reel FB często siedzi w głównej kolumnie
+      const main = document.querySelector("div[role='main']");
+      if (!main) return document.body;
+
+      // Artykuł z komentarzami (photo/permalink) albo główna kolumna (video)
+      const article = main.querySelector("article");
+      if (article) return article;
+
+      return main;
+    }
+
+    const root = findCommentsRoot();
+    if (!root) return 0;
+
+    let clicks = 0;
+
+    for (let i = 0; i < max; i++) {
+      const candidates = Array.from(
+        root.querySelectorAll(
+          "button,div[role='button'],span[role='button'],a[role='button']"
+        )
+      );
+
+      const btn = candidates.find((el) => {
+        const t = normalize(el.textContent);
+        if (!t) return false;
+
+        // Wszystkie nasze typy "load more"
+        if (t.startsWith("wyświetl więcej komentarzy")) return true;
+        if (t === "pokaż więcej odpowiedzi") return true;
+        if (/^wyświetl wszystkie \d+ odpowiedzi$/.test(t)) return true;
+        if (t === "wyświetl 1 odpowiedź") return true;
+
+        // Dziwny format na watch/reel: "Bandyci drogowi odpowiedział(a) · 27 odpowiedzi"
+        if (/odpowiedzi$/.test(t) && /odpowiedzi/.test(t) && t.includes("odpowiedział")) {
+          return true;
+        }
+
+        return false;
+      });
+
+      if (!btn) break;
+
+      const rect = btn.getBoundingClientRect();
+
+      // Pilnujemy, żeby nie klikać czegoś poza ekranem
+      if (rect.bottom < 0 || rect.top > window.innerHeight) break;
+
+      btn.click();
+      clicks++;
+    }
+
+    return clicks;
+  }, { isVideo: !!view.isVideo, max: maxClicks });
+}
+
+/* ============================================================
+   ======= AGRESYWNE DOŁADOWANIE WSZYSTKICH KOMENTARZY =========
+   ============================================================ */
+
+async function ensureAllCommentsLoaded(page, expectedTotal = null) {
+  // expectedTotal tylko do logów – NIE jest twardym warunkiem stopu
+  const hasTarget = typeof expectedTotal === "number" && expectedTotal > 0;
+
+  const view = await page.evaluate(() => {
+    const href = location.href;
+    const isVideo = /\/watch\/|[\?&]v=/i.test(href);
+    const isPhoto = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+      href
+    );
+    return { href, isVideo, isPhoto };
+  });
+
+  console.log(
+    "[FB] ensureAllCommentsLoaded – start",
+    hasTarget ? `(target=${expectedTotal})` : "(bez targetu)",
+    "| view:",
+    view
+  );
+
+  const MAX_ROUNDS = view.isVideo ? 1500 : 2500;
+  const MAX_NO_PROGRESS = 10; // ile rund bez progresu zanim uznamy, że koniec
+
+  let noProgressRounds = 0;
+  let roundsDone = 0;
+  let lastAnchors = 0;
+  let breakReason = "max-rounds";
+
+  // helper – czy na stronie są jeszcze przyciski load-more/replies
+  async function hasLoadMoreButtons() {
+    return await page.evaluate(() => {
+      const phrases = [
+        "wyświetl więcej komentarzy",
+        "wyświetl wszystkie",
+        "wyświetl wszystkie odpowiedzi",
+        "wyświetl odpowiedzi",
+        "zobacz więcej komentarzy",
+        "view more comments",
+        "view more replies",
+        "see more comments",
+        "see more replies",
+      ];
+
+      const btns = Array.from(
+        document.querySelectorAll("button, div[role='button'], span[role='button'], a")
+      );
+
+      return btns.some((el) => {
+        const txt = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+        if (!txt) return false;
+        return phrases.some((p) => txt.includes(p));
+      });
+    });
+  }
+
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    const beforeAnchors = await getCurrentCommentAnchorCount(page);
+
+    // scrollujemy TYLKO przez scrollWithinPost – on ogarnia kontener komentarzy
+    const scrollInfo = await scrollWithinPost(
+      page,
+      `round-${round}`,
+      view.isVideo ? 0.18 : 0.25
+    );
+
+    const clicks = await expandAllComments(page);
+    const afterAnchors = await getCurrentCommentAnchorCount(page);
+    const moreButtons = await hasLoadMoreButtons();
+
+    const scrolled = scrollInfo.after !== scrollInfo.before;
+    const progressed =
+      scrolled || clicks > 0 || afterAnchors > beforeAnchors;
+
+    if (progressed) {
+      noProgressRounds = 0;
+      lastAnchors = afterAnchors;
+    } else {
+      noProgressRounds++;
+    }
+
+    roundsDone = round;
+
+    if (round === 1 || round % 25 === 0 || round > MAX_ROUNDS - 5) {
+      console.log(
+        `[FB] ensureAllCommentsLoaded – round ${round} ` +
+          `container=${scrollInfo.container} ` +
+          `scrollTop: ${scrollInfo.before} → ${scrollInfo.after} ` +
+          `anchors: ${beforeAnchors} → ${afterAnchors} ` +
+          `clicks=${clicks} noProgress=${noProgressRounds} moreButtons=${moreButtons}`
+      );
+    }
+
+    // 1) jeśli mamy target i go osiągnęliśmy ORAZ nie ma przycisków – kończymy
+    if (hasTarget && afterAnchors >= expectedTotal && !moreButtons) {
+      breakReason = "target-reached-no-buttons";
+      break;
+    }
+
+    // 2) jeśli nie ma przycisków i stoi w miejscu X rund – kończymy
+    if (!moreButtons && noProgressRounds >= MAX_NO_PROGRESS) {
+      breakReason = "no-buttons-no-progress";
+      break;
+    }
+
+    // 3) twardy bez-progresu (na wszelki wypadek, gdyby FB coś odwalił)
+    if (noProgressRounds >= MAX_NO_PROGRESS * 2) {
+      breakReason = "hard-no-progress";
+      break;
+    }
+
+    await sleepRandom(250, 600);
+  }
+
+  console.log(
+    "[FB] ensureAllCommentsLoaded – główna pętla:",
+    `reason=${breakReason}, rounds=${roundsDone}, anchors=${lastAnchors}${
+      hasTarget ? `/target=${expectedTotal}` : ""
+    }`
+  );
+
+  // Runda kontrolna w górę – domykamy expandy „u góry”
+  try {
+    let ctrlReason = "max-ctrl-rounds";
+    for (let i = 1; i <= 200; i++) {
+      const up = await scrollWithinPost(page, `ctrl-up-${i}`, -0.55);
+      const clicked = await clickOneExpandButton(page);
+      await sleepRandom(160, 320);
+
+      if (up.after === 0) {
+        ctrlReason = "top-reached";
+        break;
+      }
+
+      if (up.after === up.before && !clicked) {
+        ctrlReason = "no-move-no-click";
+        break;
+      }
+    }
+    console.log("[FB] ensureAllCommentsLoaded – runda kontrolna:", ctrlReason);
+  } catch (e) {
+    console.log(
+      "[FB] ensureAllCommentsLoaded – błąd w rundzie kontrolnej:",
+      e?.message || e
+    );
+  }
+
+  // FINAŁ: dociągnięcie do dna używając TYLKO scrollWithinPost
+  // – zero scrollowania document.scrollingElement
+  let bottomClicks = 0;
+  let lastBottomPos = null;
+  let stableRounds = 0;
+
+  try {
+    for (let i = 1; i <= 400; i++) {
+      const info = await scrollWithinPost(
+        page,
+        `final-bottom-${i}`,
+        view.isVideo ? 0.6 : 0.8
+      );
+
+      if (lastBottomPos === info.after) {
+        stableRounds++;
+      } else {
+        stableRounds = 0;
+      }
+
+      lastBottomPos = info.after;
+
+      if (i === 1 || i % 50 === 0) {
+        console.log(
+          `[FB] ensureAllCommentsLoaded – final-bottom step ${i}: container=${info.container}, ` +
+            `scrollTop: ${info.before} → ${info.after}`
+        );
+      }
+
+      // 3 rundy z rzędu bez zmiany pozycji = prawdopodobnie dół kontenera komentarzy
+      if (stableRounds >= 3) break;
+
+      await sleepRandom(120, 260);
+    }
+
+    // jak już jesteśmy „na dole” kontenera, robimy ostatnią dożynkę przycisków
+    const bottomExpand = await expandAllComments(page);
+    const extraClicks = await clickAllLoadMoreAtBottom(page, view, 300);
+    bottomClicks = bottomExpand + extraClicks;
+
+    if (bottomClicks > 0) {
+      console.log(
+        `[FB] ensureAllCommentsLoaded – bottom pass: expand=${bottomExpand}, extra=${extraClicks}, total=${bottomClicks}`
+      );
+      await sleepRandom(700, 1300);
+    }
+  } catch (e) {
+    console.log(
+      "[FB] ensureAllCommentsLoaded – błąd przy final bottom:",
+      e?.message || e
+    );
+  }
+
+  const finalAnchors = await getCurrentCommentAnchorCount(page);
+  console.log(
+    "[FB] ensureAllCommentsLoaded – koniec. anchors=",
+    finalAnchors,
+    "bottomClicks=",
+    bottomClicks
+  );
+}
+
+/* ============================================================
    ==================== LICZBA KOMENTARZY ======================
    ============================================================ */
 
@@ -1373,10 +1518,10 @@ async function getCommentCount(page, postUrl) {
     expectedTotal = uiInfo.num;
   }
 
-  // 2) Doładowanie komentarzy – target z UI tylko jako orientacja, nie stop
+  // 2) Doładowanie komentarzy – target z UI tylko jako orientacja
   await ensureAllCommentsLoaded(page, expectedTotal);
 
-  // 3) Druga próba filtra – gdyby FB przełączył layout w międzyczasie
+  // 3) Druga próba filtra – na wypadek zmiany layoutu
   try {
     const ok2 = await switchCommentsFilterToAll(page);
     console.log(
@@ -1436,7 +1581,6 @@ async function getCommentCount(page, postUrl) {
       const diff = finalNum - fallback.count;
 
       if (diff > 5) {
-        // UI pokazuje dużo więcej niż realnie widzimy – ufamy temu, co faktycznie jest w anchorach
         console.log(
           "[FB] UI >> anchory – część komentarzy niedostępna, używam anchorów.",
           `ui=${finalNum}, anchor=${fallback.count}`
@@ -1499,21 +1643,21 @@ async function extractCommentsData(page) {
 
   const data = await page.evaluate(() => {
     function looksLikeTime(t) {
-      const lower = t.toLowerCase();
-      if (!lower) return false;
+  const lower = t.toLowerCase();
+  if (!lower) return false;
 
-      if (
-        /\b(min|minut|godz|h|hr|dni|day|days|tyg|week|weeks|sek|s ago|m ago|h ago|d ago)\b/.test(
-          lower
-        )
-      )
-        return true;
+  if (
+    /\b(min|minut|godz|h|hr|dzień|dni|day|days|tyg|week|weeks|sek|s ago|m ago|h ago|d ago)\b/.test(
+      lower
+    )
+  ) return true;
 
-      if (/\b(wczoraj|yesterday)\b/.test(lower)) return true;
-      if (/^\d+\s*(s|min|h|d)\b/.test(lower)) return true;
+  if (/\b(wczoraj|yesterday)\b/.test(lower)) return true;
+  if (/^\d+\s*(s|min|h|d)\b/.test(lower)) return true;
 
-      return false;
-    }
+  return false;
+}
+
 
     function stripUiWords(str, timeText, author) {
       if (!str) return "";

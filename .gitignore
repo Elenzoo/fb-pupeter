@@ -10,3 +10,4 @@ config/links.json
 npm-debug.log*
 dist/
 export_files.js*
+debug.js*

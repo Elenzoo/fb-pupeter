@@ -20,9 +20,9 @@ import { sendWebhook } from "./webhook.js";
  */
 const lastCounts = new Map();
 /**
- * Zestaw znanych ID komentarzy (żeby odróżniać stare od nowych).
+ * Mapa: postId -> zestaw znanych ID komentarzy (żeby odróżniać stare od nowych).
  */
-const knownComments = new Set();
+const knownCommentsPerPost = new Map();
 
 /**
  * Aktualna lista postów (z arkusza).
@@ -148,7 +148,7 @@ function parseSheetCsv(text) {
 
 /**
  * Odświeża listę postów z Google Sheets co POSTS_REFRESH_MS.
- * Jeśli lista się zmieni → czyścimy lastCounts + knownComments.
+ * Jeśli lista się zmieni → czyścimy lastCounts + knownCommentsPerPost.
  */
 async function refreshPostsIfNeeded(force = false) {
   if (!POSTS_SHEET_URL) {
@@ -187,7 +187,7 @@ async function refreshPostsIfNeeded(force = false) {
       );
       currentPosts = [];
       lastCounts.clear();
-      knownComments.clear();
+      knownCommentsPerPost.clear();
       return;
     }
 
@@ -200,13 +200,29 @@ async function refreshPostsIfNeeded(force = false) {
       );
       currentPosts = newPosts;
       lastCounts.clear();
-      knownComments.clear();
+      knownCommentsPerPost.clear();
     } else {
       console.log("[Sheet] Lista postów bez zmian.");
     }
   } catch (err) {
     console.error("[Sheet] Błąd przy pobieraniu/parsowaniu CSV:", err.message);
   }
+}
+
+/* ============================================================
+   =====================   POMOCNICZE MAPY   ==================
+   ============================================================ */
+
+/**
+ * Zwraca (i ewentualnie tworzy) Set znanych komentarzy dla danego posta.
+ */
+function getKnownSetForPost(postId) {
+  let set = knownCommentsPerPost.get(postId);
+  if (!set) {
+    set = new Set();
+    knownCommentsPerPost.set(postId, set);
+  }
+  return set;
 }
 
 /* ============================================================
@@ -228,10 +244,6 @@ async function startWatcher() {
     ],
     ignoreDefaultArgs: ["--enable-automation"],
   });
-
-  
-
-
 
   const page = await browser.newPage();
 
@@ -284,7 +296,6 @@ async function startWatcher() {
       for (const post of currentPosts) {
         try {
           const count = await getCommentCount(page, post.url);
-
           if (count == null) {
             console.log(
               `[Watcher] Post ${post.id}: Nie udało się odczytać licznika.`
@@ -292,7 +303,10 @@ async function startWatcher() {
             continue;
           }
 
-          const prev = lastCounts.get(post.id) ?? null;
+          const prev = lastCounts.has(post.id)
+            ? lastCounts.get(post.id)
+            : null;
+          const knownSet = getKnownSetForPost(post.id);
 
           /* ------------------ PIERWSZE ODCZYTANIE ------------------ */
           if (prev === null) {
@@ -320,7 +334,7 @@ async function startWatcher() {
 
             let maxPos = 0;
             for (const c of allComments) {
-              if (c.id) knownComments.add(c.id);
+              if (c.id) knownSet.add(c.id);
               if (typeof c.pos === "number" && c.pos > maxPos) {
                 maxPos = c.pos;
               }
@@ -333,85 +347,85 @@ async function startWatcher() {
             continue;
           }
 
-          /* ------------------ ZMIANA LICZNIKA ------------------ */
+          /* ------------------ KOLEJNE ODCZYTY ------------------ */
+
           if (count !== prev) {
             console.log(
               `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
             );
-
             lastCounts.set(post.id, count);
-
-            if (count > prev) {
-              let newComments = [];
-
-              if (EXPAND_COMMENTS) {
-                await expandAllComments(page);
-                let snapshot = await extractCommentsData(page);
-
-                snapshot = snapshot.sort((a, b) => {
-                  const pa = typeof a.pos === "number" ? a.pos : 999999999;
-                  const pb = typeof b.pos === "number" ? b.pos : 999999999;
-                  return pa - pb;
-                });
-
-                console.log(
-                  `[DBG] extractCommentsData – snapshot = ${snapshot.length}`
-                );
-                console.dir(snapshot.slice(0, 5), { depth: null });
-
-                for (const c of snapshot) {
-                  if (!c.id) continue;
-                  if (!knownComments.has(c.id)) {
-                    knownComments.add(c.id);
-                    newComments.push(c);
-                  }
-                }
-
-                newComments = newComments.filter((c) => {
-                  const idOk = c.id && c.id.trim();
-                  const textOk = c.text && c.text.trim();
-                  const authorOk = c.author && c.author.trim();
-                  const linkOk = c.permalink && c.permalink.trim();
-                  return idOk || textOk || authorOk || linkOk;
-                });
-
-                if (newComments.length === 0) {
-                  const diff = Math.max(1, count - prev);
-
-                  const cleaned = snapshot.filter((c) => {
-                    const textOk = c.text && c.text.trim();
-                    const idOk = c.id && c.id.trim();
-                    const linkOk = c.permalink && c.permalink.trim();
-                    return textOk || idOk || linkOk;
-                  });
-
-                  const tail = cleaned.slice(-diff);
-
-                  for (const c of tail) {
-                    if (c.id) knownComments.add(c.id);
-                  }
-
-                  newComments = tail;
-
-                  console.log(
-                    `[Watcher] Post ${post.id}: Fallback — brak ID, biorę ostatnie ${diff} komentarzy jako nowe.`
-                  );
-                }
-
-                console.log(
-                  `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
-                );
-              }
-
-              await sendWebhook(post, newComments, count, prev);
-            } else {
-              console.log(
-                `[Watcher] Post ${post.id}: Komentarzy mniej (${prev} -> ${count}).`
-              );
-            }
           } else {
             console.log(
               `[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`
+            );
+          }
+
+          if (!EXPAND_COMMENTS) {
+            // Tryb "tylko licznik" – nic nie grzebiemy w DOM
+            continue;
+          }
+
+          // 🔎 ZAWSZE robimy expand + snapshot, żeby łapać nowe ID
+          await expandAllComments(page);
+          let snapshot = await extractCommentsData(page);
+
+          snapshot = snapshot.sort((a, b) => {
+            const pa = typeof a.pos === "number" ? a.pos : 999999999;
+            const pb = typeof b.pos === "number" ? b.pos : 999999999;
+            return pa - pb;
+          });
+
+          console.log(
+            `[DBG] extractCommentsData – snapshot = ${snapshot.length}`
+          );
+          console.dir(snapshot.slice(0, 5), { depth: null });
+
+          let newComments = [];
+
+          // 1) standardowo: nowe ID względem knownSet
+          for (const c of snapshot) {
+            if (!c.id) continue;
+            if (!knownSet.has(c.id)) {
+              knownSet.add(c.id);
+              newComments.push(c);
+            }
+          }
+
+          // 2) Fallback – tylko gdy licznik FB wzrósł (count > prev),
+          //    a po ID nic nie znaleźliśmy (np. brak ID / niestabilny DOM).
+          if (newComments.length === 0 && count > prev) {
+            const diff = Math.max(1, count - prev);
+
+            const cleaned = snapshot.filter((c) => {
+              const textOk = c.text && c.text.trim();
+              const idOk = c.id && c.id.trim();
+              const linkOk = c.permalink && c.permalink.trim();
+              return textOk || idOk || linkOk;
+            });
+
+            const tail = cleaned.slice(-diff);
+
+            for (const c of tail) {
+              if (c.id) knownSet.add(c.id);
+            }
+
+            newComments = tail;
+
+            console.log(
+              `[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} komentarzy jako nowe.`
+            );
+          }
+
+          if (newComments.length > 0) {
+            console.log(
+              `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
+            );
+
+            // sendWebhook sam sobie odfiltruje "stare" po fb_time_iso
+            await sendWebhook(post, newComments, count, prev);
+          } else {
+            console.log(
+              `[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`
             );
           }
         } catch (err) {
