@@ -233,7 +233,7 @@ const isDev = process.env.NODE_ENV !== "production"; // lokalnie będzie true
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: isDev ? false : "new",
+    headless: isDev ? true : "new",
     defaultViewport: null,
     args: [
       "--no-sandbox",

@@ -270,10 +270,6 @@ async function getCurrentCommentAnchorCount(page) {
   return count || 0;
 }
 
-/* ============================================================
-   ===== POMOCNICZE: SCROLL W OBRĘBIE POSTA ====================
-   ============================================================ */
-
 /**
  * Scrolluje w obrębie posta (panel komentarzy, dialog, itp.).
  * Jeśli nie znajdzie sensownego kontenera – może zwrócić xxx-no-scroll.
@@ -322,8 +318,15 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       let container = null;
       let containerType = null;
 
+      // 0) Najpierw spróbuj użyć zapamiętanego kontenera komentarzy
+      const cached = document.querySelector("[data-fbwatcher-comments='1']");
+      if (cached) {
+        container = cached;
+        containerType = "cached-comments";
+      }
+
       // ===== PHOTO / VIDEO – najpierw próbujemy "oficjalny" panel komentarzy =====
-      if (isPhotoView || isVideoView) {
+      if (!container && (isPhotoView || isVideoView)) {
         const moreCommentsBtn = Array.from(
           document.querySelectorAll(
             "button, div[role='button'], span[role='button']"
@@ -403,6 +406,53 @@ async function scrollWithinPost(page, label, factor = 0.3) {
           }
         }
 
+        // dodatkowy fallback na VIDEO – po polu "Napisz komentarz..."
+        if (!container && isVideoView) {
+          const commentBox = Array.from(
+            document.querySelectorAll("div[role='textbox'], textarea")
+          ).find((el) => {
+            const label = (el.getAttribute("aria-label") || "").toLowerCase();
+            const ph = (el.getAttribute("placeholder") || "").toLowerCase();
+            const txt = (el.textContent || "").toLowerCase();
+
+            const needles = [
+              "napisz komentarz",
+              "write a comment",
+              "escribe un comentario",
+              "schreibe einen kommentar",
+            ];
+
+            return needles.some((n) =>
+              label.includes(n) || ph.includes(n) || txt.includes(n)
+            );
+          });
+
+          if (commentBox) {
+            let p = commentBox.parentElement;
+            while (p && p !== document.body && p !== document.documentElement) {
+              const style = window.getComputedStyle(p);
+              const oy = style.overflowY;
+              const ch = p.clientHeight || 0;
+              const sh = p.scrollHeight || 0;
+              const delta = sh - ch;
+
+              if (
+                ch > 0 &&
+                delta > 10 &&
+                (oy === "auto" ||
+                  oy === "scroll" ||
+                  oy === "overlay" ||
+                  oy === "hidden")
+              ) {
+                container = p;
+                containerType = "video-comments-textbox";
+                break;
+              }
+              p = p.parentElement;
+            }
+          }
+        }
+
         // jeśli na watch nic sensownego nie znaleźliśmy – nie ruszamy okna
         if (isVideoView && !container) {
           const cur = window.scrollY || 0;
@@ -462,6 +512,20 @@ async function scrollWithinPost(page, label, factor = 0.3) {
             };
           }
           containerType = "window";
+        }
+      }
+
+      // Zapamiętujemy kontener komentarzy (żeby kolejne wywołania go użyły)
+      if (container) {
+        const isRootContainer =
+          container === document.body ||
+          container === document.documentElement ||
+          container === document.scrollingElement;
+
+        if (!isRootContainer) {
+          try {
+            container.setAttribute("data-fbwatcher-comments", "1");
+          } catch {}
         }
       }
 
@@ -539,6 +603,7 @@ async function scrollWithinPost(page, label, factor = 0.3) {
   return info;
 }
 
+
 /**
  * Dociągnięcie do ABSOLUTNEGO dołu panelu komentarzy.
  * Robi wewnętrzną pętlę w przeglądarce aż scroll przestanie się zmieniać.
@@ -584,8 +649,15 @@ async function scrollToAbsoluteBottom(page, label = "bottom") {
       let container = null;
       let containerType = null;
 
+      // 0) Najpierw spróbuj użyć zapamiętanego kontenera komentarzy
+      const cached = document.querySelector("[data-fbwatcher-comments='1']");
+      if (cached) {
+        container = cached;
+        containerType = "cached-comments";
+      }
+
       // PHOTO / VIDEO – najpierw próbujemy znaleźć panel komentarzy
-      if (isPhotoView || isVideoView) {
+      if (!container && (isPhotoView || isVideoView)) {
         const moreCommentsBtn = Array.from(
           document.querySelectorAll(
             "button, div[role='button'], span[role='button']"
@@ -769,6 +841,20 @@ async function scrollToAbsoluteBottom(page, label = "bottom") {
         }
       }
 
+      // Zapamiętaj kontener komentarzy (jeśli to nie jest globalne okno)
+      if (container) {
+        const isRootContainer =
+          container === document.body ||
+          container === document.documentElement ||
+          container === document.scrollingElement;
+
+        if (!isRootContainer) {
+          try {
+            container.setAttribute("data-fbwatcher-comments", "1");
+          } catch {}
+        }
+      }
+
       const isWindowContainer =
         container === document.body ||
         container === document.documentElement ||
@@ -864,6 +950,7 @@ async function scrollToAbsoluteBottom(page, label = "bottom") {
 
   return info;
 }
+
 
 /* ============================================================
    ===================== VIDEO – AUTO PAUSE ====================
