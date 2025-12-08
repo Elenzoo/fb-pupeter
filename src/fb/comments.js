@@ -6,6 +6,8 @@ import { acceptCookies, saveCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay, checkIfLogged } from "./login.js";
 import { clickOneExpandButton } from "./expandButtons.js";
 
+
+let firstPostPauseDone = false;
 /* ============================================================
    =======  PRZEŁĄCZANIE FILTRA „WSZYSTKIE KOMENTARZE”  ========
    ============================================================ */
@@ -1266,10 +1268,20 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
    ==================== LICZBA KOMENTARZY ======================
    ============================================================ */
 
+
 async function getCommentCount(page, postUrl) {
   console.log(`[FB] Otwieranie posta: ${postUrl}`);
 
+  // Otwieramy posta
   await page.goto(postUrl, { waitUntil: "networkidle2", timeout: 60000 });
+
+  // --- PAUZA NA 2FA PRZY PIERWSZYM ODCZYCIE ---
+  if (!firstPostPauseDone) {
+    console.log("[FB] Pauza 10s na zalogowanie / 2FA...");
+    await new Promise((res) => setTimeout(res, 10000));
+    firstPostPauseDone = true;
+  }
+
   await sleepRandom(3000, 4500);
 
   await acceptCookies(page, "post-initial");
@@ -1316,6 +1328,10 @@ async function getCommentCount(page, postUrl) {
     await scrollPost(page, 200);
     await sleepRandom(800, 1200);
   }
+
+  
+
+
 
   // 1) Pierwsza próba ustawienia filtra
   try {
