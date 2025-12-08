@@ -321,7 +321,9 @@ async function startWatcher() {
   );
 
   /* ==== LOGOWANIE / COOKIES ==== */
+    /* ==== LOGOWANIE / COOKIES ==== */
   await loadCookies(page);
+
   await page
     .goto("https://www.facebook.com/", {
       waitUntil: "load",
@@ -329,14 +331,27 @@ async function startWatcher() {
     })
     .catch(() => {});
 
-  const loggedIn = await checkIfLogged(page);
+  let loggedIn = await checkIfLogged(page);
+
   if (!loggedIn) {
     console.log("[FB] Brak aktywnej sesji – logowanie...");
-    await fbLogin(page);
-    await saveCookies(page);
+    await fbLogin(page);          // tutaj robimy login + ewentualne 2FA
+
+    // po fbLogin sprawdzamy JESZCZE RAZ, czy faktycznie jesteśmy w środku
+    loggedIn = await checkIfLogged(page);
+
+    if (loggedIn) {
+      console.log("[FB] Logowanie udane – zapisuję cookies.");
+      await saveCookies(page);
+    } else {
+      console.error(
+        "[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone)."
+      );
+    }
   } else {
     console.log("[FB] Użyto istniejącej sesji FB (cookies).");
   }
+
 
   // Na start – pierwszy odczyt arkusza (wymuszony)
   await refreshPostsIfNeeded(true);
