@@ -1,4 +1,6 @@
 // src/fb/cookies.js
+const COOKIES_READ_ONLY = process.env.COOKIES_READ_ONLY === "true";
+
 import fs from "fs/promises";
 import { sleepRandom } from "../utils/sleep.js";
 
@@ -31,29 +33,30 @@ async function loadCookies(page) {
  * w katalogu roboczym procesu (tam, skąd odpalasz node).
  */
 async function saveCookies(page) {
+  if (COOKIES_READ_ONLY) {
+    console.log(
+      "[FB][cookies] COOKIES_READ_ONLY=true – pomijam zapis cookies.json (tylko odczyt z pliku)."
+    );
+    return;
+  }
+
   try {
     const cookies = await page.cookies();
+    const arr = cookies || [];
 
-    if (!Array.isArray(cookies) || cookies.length === 0) {
-      console.log(
-        "[FB][cookies] Brak cookies do zapisania – tablica pusta (prawdopodobnie niezalogowany?)."
-      );
-      return;
-    }
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const cookiesPath = path.join(__dirname, "..", "data", "cookies.json");
 
-    const json = JSON.stringify(cookies, null, 2);
-    await fs.writeFile("cookies.json", json, "utf8");
-
+    fs.writeFileSync(cookiesPath, JSON.stringify(arr, null, 2), "utf8");
     console.log(
-      `[FB][cookies] Zapisano ${cookies.length} cookies do cookies.json.`
+      `[FB][cookies] Zapisano ${arr.length} cookies do ${cookiesPath}`
     );
-  } catch (err) {
-    console.error(
-      "[FB][cookies] Błąd przy zapisie cookies do cookies.json:",
-      err?.message || err
-    );
+  } catch (e) {
+    console.log("[FB][cookies] Błąd przy zapisie cookies:", e?.message || e);
   }
 }
+
 
 /**
  * Ogólne akceptowanie popupu cookies na FB (np. na postach).
