@@ -2,8 +2,8 @@
 import { EXPAND_COMMENTS } from "../config.js";
 import { sleepRandom } from "../utils/sleep.js";
 import { scrollPost } from "./scroll.js";
-import { acceptCookies } from "./cookies.js";
-import { ensureLoggedInOnPostOverlay } from "./login.js";
+import { acceptCookies, saveCookies } from "./cookies.js";
+import { ensureLoggedInOnPostOverlay, checkIfLogged } from "./login.js";
 import { clickOneExpandButton } from "./expandButtons.js";
 
 /* ============================================================
@@ -1274,6 +1274,28 @@ async function getCommentCount(page, postUrl) {
 
   await acceptCookies(page, "post-initial");
   await ensureLoggedInOnPostOverlay(page);
+
+  // 🔐 Po próbie logowania z nakładki sprawdzamy, czy faktycznie jesteśmy już zalogowani.
+  // Jeśli tak – od razu zapisujemy cookies, żeby kolejne uruchomienia mogły użyć tej sesji.
+  try {
+    const loggedAfterPostOverlay = await checkIfLogged(page);
+    if (loggedAfterPostOverlay) {
+      console.log(
+        "[FB] Po wejściu na posta jesteśmy zalogowani – zapisuję cookies do cookies.json."
+      );
+      await saveCookies(page);
+    } else {
+      console.log(
+        "[FB] Po wejściu na posta nadal wyglądamy na niezalogowanych – cookies nie będą zapisane."
+      );
+    }
+  } catch (e) {
+    console.log(
+      "[FB] Błąd podczas sprawdzania/zapisu cookies po wejściu na posta:",
+      e?.message || e
+    );
+  }
+
   await acceptCookies(page, "post");
   await sleepRandom(1500, 2500);
 

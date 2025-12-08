@@ -1,13 +1,19 @@
 # katalogi
 node_modules/
 export_fb_watcher/
-# pliki z sekretami
+
+# sekrety
 .env
 cookies.json
 config/links.json
 
-# pliki, które mogą się generować same
+# cache
+data/comments-cache.json
+
+# generowane pliki
 npm-debug.log*
 dist/
+
+# lokalne helpery
 export_files.js*
 debug.js*

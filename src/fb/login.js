@@ -63,7 +63,103 @@ async function acceptLoginCookies(page) {
 }
 
 /**
- * Główne logowanie na FB.
+ * Pr próba zalogowania się na **dowolnym widocznym formularzu logowania**:
+ * - pasek u góry,
+ * - pełna strona logowania,
+ * - popup "Wyświetl więcej na Facebooku".
+ */
+async function loginViaVisibleForm(page, context = "visible-form") {
+  try {
+    console.log(`[FB][login-form] Szukam formularza logowania (${context})...`);
+
+    // Spróbuj ogarnąć ewentualne cookies na logowaniu
+    await acceptLoginCookies(page).catch(() => {});
+
+    const emailSelector = [
+      "input#email",
+      "input[name='email']",
+      "input[name='email_or_phone']",
+      "input[aria-label*='Adres e-mail']",
+      "input[placeholder*='Adres e-mail']",
+      "input[placeholder*='adres e-mail']",
+      "input[placeholder*='Email']",
+      "input[placeholder*='email']",
+    ].join(",");
+
+    const passSelector = [
+      "input#pass",
+      "input[name='pass']",
+      "input[aria-label*='Hasło']",
+      "input[placeholder*='Hasło']",
+      "input[placeholder*='hasło']",
+      "input[placeholder*='Password']",
+      "input[placeholder*='password']",
+    ].join(",");
+
+    const emailInput = await page.$(emailSelector);
+    const passInput = await page.$(passSelector);
+
+    if (!emailInput || !passInput) {
+      console.log(
+        "[FB][login-form] Brak pełnego formularza (email + hasło) na stronie."
+      );
+      return false;
+    }
+
+    const email = process.env.FB_EMAIL || "";
+    const password = process.env.FB_PASSWORD || "";
+
+    if (!email || !password) {
+      console.error(
+        "[FB][login-form] Brak FB_EMAIL / FB_PASSWORD w zmiennych środowiskowych."
+      );
+      return false;
+    }
+
+    console.log("[FB][login-form] Wypełniam email/hasło...");
+
+    // wyczyść i wpisz email
+    await emailInput.click({ clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    await emailInput.type(email, { delay: 50 });
+
+    // wyczyść i wpisz hasło
+    await passInput.click({ clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    await passInput.type(password, { delay: 50 });
+
+    const loginButton =
+      (await page.$("button[name='login']")) ||
+      (await page.$("button[type='submit']"));
+
+    if (!loginButton) {
+      console.log("[FB][login-form] Nie znalazłem przycisku logowania.");
+      return false;
+    }
+
+    console.log("[FB][login-form] Klikam Zaloguj się…");
+
+    await Promise.all([
+      loginButton.click(),
+      page
+        .waitForNavigation({
+          waitUntil: "networkidle2",
+          timeout: 60000,
+        })
+        .catch(() => {}),
+    ]);
+
+    await sleepRandom(1500, 2500);
+    console.log("[FB][login-form] Formularz logowania wysłany.");
+    return true;
+  } catch (err) {
+    console.error("[FB][login-form] Błąd:", err.message);
+    return false;
+  }
+}
+
+/**
+ * Główne logowanie na FB – klasyczne /login.
  */
 async function fbLogin(page) {
   console.log("[FB][login] Start logowania…");
@@ -73,7 +169,7 @@ async function fbLogin(page) {
     timeout: 60000,
   });
 
-  // 1. popup cookies – próbujemy go zamknąć zanim dotkniemy inputów
+  // popup cookies – próbujemy go zamknąć zanim dotkniemy inputów
   await acceptLoginCookies(page);
 
   console.log("[FB][login] Czekam na input email/pass...");
@@ -145,7 +241,7 @@ async function clickByText(page, text) {
 
 /**
  * Jeżeli na poście pojawi się nakładka z przyciskiem „Zaloguj się / Log In”
- * – klikamy, żeby przejść na pełną stronę FB.
+ * – próbujemy zalogować się **na miejscu**.
  */
 async function ensureLoggedInOnPostOverlay(page) {
   const overlayDetected = await page.evaluate(() => {
@@ -167,8 +263,23 @@ async function ensureLoggedInOnPostOverlay(page) {
 
   if (!overlayDetected) return;
 
-  console.log("[FB] Wykryto okno logowania na poście – próba zalogowania.");
+  console.log(
+    "[FB] Wykryto nakładkę / okno logowania na poście – próba zalogowania."
+  );
 
+  // 1) Najpierw spróbuj po prostu zalogować się na widocznym formularzu
+  const usedInline = await loginViaVisibleForm(page, "post-overlay-inline");
+  if (usedInline) {
+    const logged = await checkIfLogged(page);
+    if (logged) {
+      console.log(
+        "[FB] Udało się zalogować z poziomu nakładki posta (inline formularz)."
+      );
+      return;
+    }
+  }
+
+  // 2) Fallback – klikamy "Zaloguj się" / "Log In", jeśli jest osobny przycisk
   let clicked = await clickByText(page, "Zaloguj się");
   if (!clicked) {
     clicked = await clickByText(page, "Log In");
@@ -179,6 +290,23 @@ async function ensureLoggedInOnPostOverlay(page) {
       "[FB] Kliknięto przycisk logowania w nakładce posta. Czekam na przeładowanie..."
     );
     await sleepRandom(4000, 6000);
+
+    // Po przeładowaniu znowu spróbuj formularza, tym razem już na pełnej stronie logowania
+    const used = await loginViaVisibleForm(page, "post-overlay-after-click");
+    if (used) {
+      const logged = await checkIfLogged(page);
+      if (logged) {
+        console.log("[FB] Zalogowano po kliknięciu przycisku w nakładce.");
+      } else {
+        console.log(
+          "[FB] Formularz po nakładce wysłany, ale nadal nie widać zalogowanej sesji."
+        );
+      }
+    } else {
+      console.log(
+        "[FB] Po kliknięciu przycisku w nakładce nie znalazłem formularza logowania."
+      );
+    }
   } else {
     console.log(
       "[FB] Nie udało się znaleźć przycisku logowania w nakładce posta."
@@ -186,4 +314,11 @@ async function ensureLoggedInOnPostOverlay(page) {
   }
 }
 
-export { fbLogin, checkIfLogged, ensureLoggedInOnPostOverlay, clickByText, acceptLoginCookies };
+export {
+  fbLogin,
+  checkIfLogged,
+  ensureLoggedInOnPostOverlay,
+  clickByText,
+  acceptLoginCookies,
+  loginViaVisibleForm,
+};
