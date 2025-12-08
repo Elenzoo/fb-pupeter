@@ -14,15 +14,38 @@ import {
 import { loadCookies, saveCookies } from "./fb/cookies.js";
 import { checkIfLogged, fbLogin } from "./fb/login.js";
 import { sendWebhook } from "./webhook.js";
+import { loadCache, saveCache } from "./db/cache.js";
 
 /**
- * Mapa: postId -> ostatnio znany licznik komentarzy.
+ * CACHE DYSKOWY
+ * Struktura w pliku:
+ * {
+ *   "https://facebook.com/link1": { lastCount: 29, knownIds: ["123","456"] },
+ *   "https://facebook.com/link2": { lastCount: 57, knownIds: ["abc","def"] }
+ * }
+ */
+const commentsCache = loadCache();
+
+/**
+ * Mapa: cacheKey (URL) -> ostatnio znany licznik komentarzy.
  */
 const lastCounts = new Map();
 /**
- * Mapa: postId -> zestaw znanych ID komentarzy (żeby odróżniać stare od nowych).
+ * Mapa: cacheKey (URL) -> zestaw znanych ID komentarzy (żeby odróżniać stare od nowych).
  */
 const knownCommentsPerPost = new Map();
+
+/**
+ * Na starcie ładujemy do map to, co jest w JSON-ie.
+ */
+for (const [url, entry] of Object.entries(commentsCache)) {
+  if (typeof entry.lastCount === "number") {
+    lastCounts.set(url, entry.lastCount);
+  }
+  if (Array.isArray(entry.knownIds)) {
+    knownCommentsPerPost.set(url, new Set(entry.knownIds));
+  }
+}
 
 /**
  * Aktualna lista postów (z arkusza).
@@ -37,26 +60,21 @@ let lastSheetFetch = 0;
 
 async function applyStealth(page) {
   await page.evaluateOnNewDocument(() => {
-    // 1) navigator.webdriver = false
     Object.defineProperty(navigator, "webdriver", {
       get: () => false,
     });
 
-    // 2) window.chrome – szkielet
     // @ts-ignore
     window.chrome = window.chrome || { runtime: {} };
 
-    // 3) sztuczne pluginy
     Object.defineProperty(navigator, "plugins", {
       get: () => [1, 2, 3],
     });
 
-    // 4) języki przeglądarki
     Object.defineProperty(navigator, "languages", {
       get: () => ["pl-PL", "pl"],
     });
 
-    // 5) permissions query (np. powiadomienia)
     const permissions = window.navigator.permissions;
     if (permissions && permissions.query) {
       const originalQuery = permissions.query.bind(permissions);
@@ -122,10 +140,6 @@ function parseSheetCsv(text) {
 
     const activeNorm = activeRaw.toLowerCase();
 
-    // 🔥 ZASADA:
-    // - jeśli kolumna "active" istnieje → aktywne TYLKO gdy:
-    //   TRUE / true / 1 / yes / tak
-    // - jeśli kolumny nie ma → traktujemy wszystkie wiersze jako aktywne
     const isActive =
       idxActive === -1
         ? true
@@ -148,7 +162,8 @@ function parseSheetCsv(text) {
 
 /**
  * Odświeża listę postów z Google Sheets co POSTS_REFRESH_MS.
- * Jeśli lista się zmieni → czyścimy lastCounts + knownCommentsPerPost.
+ * Jeśli lista się zmieni → zerujemy TYLKO mapy w pamięci.
+ * JSON na dysku zostaje – pamięta historię.
  */
 async function refreshPostsIfNeeded(force = false) {
   if (!POSTS_SHEET_URL) {
@@ -160,7 +175,7 @@ async function refreshPostsIfNeeded(force = false) {
 
   const now = Date.now();
   if (!force && now - lastSheetFetch < POSTS_REFRESH_MS) {
-    return; // za wcześnie na kolejne odświeżenie (gdy force=false)
+    return;
   }
 
   lastSheetFetch = now;
@@ -186,6 +201,7 @@ async function refreshPostsIfNeeded(force = false) {
         "[Sheet] Arkusz nie zwrócił żadnych AKTYWNYCH postów (sprawdź kolumnę active / TRUE)."
       );
       currentPosts = [];
+      // ważne: NIE czyścimy commentsCache na dysku
       lastCounts.clear();
       knownCommentsPerPost.clear();
       return;
@@ -196,11 +212,21 @@ async function refreshPostsIfNeeded(force = false) {
 
     if (oldJson !== newJson) {
       console.log(
-        `[Sheet] Lista postów zmieniona – było ${currentPosts.length}, teraz ${newPosts.length}. Resetuję cache komentarzy.`
+        `[Sheet] Lista postów zmieniona – było ${currentPosts.length}, teraz ${newPosts.length}. Resetuję mapy w pamięci.`
       );
       currentPosts = newPosts;
       lastCounts.clear();
       knownCommentsPerPost.clear();
+
+      // po wyczyszczeniu map wczytujemy ponownie z JSON-a
+      for (const [url, entry] of Object.entries(commentsCache)) {
+        if (typeof entry.lastCount === "number") {
+          lastCounts.set(url, entry.lastCount);
+        }
+        if (Array.isArray(entry.knownIds)) {
+          knownCommentsPerPost.set(url, new Set(entry.knownIds));
+        }
+      }
     } else {
       console.log("[Sheet] Lista postów bez zmian.");
     }
@@ -214,15 +240,53 @@ async function refreshPostsIfNeeded(force = false) {
    ============================================================ */
 
 /**
- * Zwraca (i ewentualnie tworzy) Set znanych komentarzy dla danego posta.
+ * Zwraca klucz cache dla posta – używamy **URL**, żeby przetrwać zmiany arkusza.
  */
-function getKnownSetForPost(postId) {
-  let set = knownCommentsPerPost.get(postId);
+function getCacheKey(post) {
+  return post.url;
+}
+
+/**
+ * Zwraca (i ewentualnie tworzy) Set znanych komentarzy dla danego posta.
+ * Najpierw próbuje załadować z commentsCache (JSON).
+ */
+function getKnownSetForPost(cacheKey) {
+  let set = knownCommentsPerPost.get(cacheKey);
   if (!set) {
-    set = new Set();
-    knownCommentsPerPost.set(postId, set);
+    const entry = commentsCache[cacheKey];
+    if (entry && Array.isArray(entry.knownIds)) {
+      set = new Set(entry.knownIds);
+    } else {
+      set = new Set();
+    }
+    knownCommentsPerPost.set(cacheKey, set);
   }
   return set;
+}
+
+/**
+ * Synchronizuje mapy (lastCounts, knownCommentsPerPost) z obiektem commentsCache
+ * i zapisuje wszystko na dysk.
+ */
+function flushCacheToDisk() {
+  // startujemy od starego cache – nie kasujemy historii dla nieobecnych postów
+  const out = { ...commentsCache };
+
+  for (const [cacheKey, count] of lastCounts.entries()) {
+    if (!out[cacheKey]) out[cacheKey] = { lastCount: 0, knownIds: [] };
+    out[cacheKey].lastCount = count;
+  }
+
+  for (const [cacheKey, set] of knownCommentsPerPost.entries()) {
+    if (!out[cacheKey]) out[cacheKey] = { lastCount: 0, knownIds: [] };
+    out[cacheKey].knownIds = Array.from(set);
+  }
+
+  // podmieniamy w pamięci, żeby kolejne rundy bazowały na świeżym obiekcie
+  Object.keys(commentsCache).forEach((k) => delete commentsCache[k]);
+  Object.assign(commentsCache, out);
+
+  saveCache(out);
 }
 
 /* ============================================================
@@ -233,7 +297,7 @@ const isDev = process.env.NODE_ENV !== "production"; // lokalnie będzie true
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: isDev ? true : "new",
+    headless: isDev ? false : "new",
     defaultViewport: null,
     args: [
       "--no-sandbox",
@@ -284,8 +348,6 @@ async function startWatcher() {
   );
 
   const loop = async () => {
-    // 🔁 Przy KAŻDEJ iteracji wymuszamy odświeżenie arkusza,
-    // żeby zmiana URL/active działała od razu w kolejnym cyklu.
     await refreshPostsIfNeeded(true);
 
     if (!currentPosts.length) {
@@ -294,6 +356,8 @@ async function startWatcher() {
       );
     } else {
       for (const post of currentPosts) {
+        const cacheKey = getCacheKey(post);
+
         try {
           const count = await getCommentCount(page, post.url);
           if (count == null) {
@@ -303,14 +367,14 @@ async function startWatcher() {
             continue;
           }
 
-          const prev = lastCounts.has(post.id)
-            ? lastCounts.get(post.id)
+          const prev = lastCounts.has(cacheKey)
+            ? lastCounts.get(cacheKey)
             : null;
-          const knownSet = getKnownSetForPost(post.id);
+          const knownSet = getKnownSetForPost(cacheKey);
 
           /* ------------------ PIERWSZE ODCZYTANIE ------------------ */
           if (prev === null) {
-            lastCounts.set(post.id, count);
+            lastCounts.set(cacheKey, count);
 
             console.log(
               `[Watcher] Post ${post.id}: Startowa liczba komentarzy = ${count}`
@@ -353,7 +417,7 @@ async function startWatcher() {
             console.log(
               `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
             );
-            lastCounts.set(post.id, count);
+            lastCounts.set(cacheKey, count);
           } else {
             console.log(
               `[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`
@@ -361,11 +425,9 @@ async function startWatcher() {
           }
 
           if (!EXPAND_COMMENTS) {
-            // Tryb "tylko licznik" – nic nie grzebiemy w DOM
             continue;
           }
 
-          // 🔎 ZAWSZE robimy expand + snapshot, żeby łapać nowe ID
           await expandAllComments(page);
           let snapshot = await extractCommentsData(page);
 
@@ -382,7 +444,7 @@ async function startWatcher() {
 
           let newComments = [];
 
-          // 1) standardowo: nowe ID względem knownSet
+          // 1) nowe ID względem knownSet
           for (const c of snapshot) {
             if (!c.id) continue;
             if (!knownSet.has(c.id)) {
@@ -391,8 +453,7 @@ async function startWatcher() {
             }
           }
 
-          // 2) Fallback – tylko gdy licznik FB wzrósł (count > prev),
-          //    a po ID nic nie znaleźliśmy (np. brak ID / niestabilny DOM).
+          // 2) fallback, gdy licznik FB wzrósł, a po ID nic nie ma
           if (newComments.length === 0 && count > prev) {
             const diff = Math.max(1, count - prev);
 
@@ -421,7 +482,6 @@ async function startWatcher() {
               `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
             );
 
-            // sendWebhook sam sobie odfiltruje "stare" po fb_time_iso
             await sendWebhook(post, newComments, count, prev);
           } else {
             console.log(
@@ -436,6 +496,9 @@ async function startWatcher() {
         }
       }
     }
+
+    // 🔥 KONIEC RUNDY → zapisujemy cache na dysk
+    flushCacheToDisk();
 
     const jitter = Math.floor(Math.random() * 5000);
     const delay = CHECK_INTERVAL_MS + jitter;
