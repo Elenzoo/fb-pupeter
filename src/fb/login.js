@@ -1,28 +1,113 @@
+// src/fb/login.js
 import { sleepRandom } from "../utils/sleep.js";
 
+/**
+ * Akceptuje popup cookies na stronie logowania FB.
+ * Szuka przycisku po tekście, oznacza go data-atrybutem i klika z poziomu Puppeteera.
+ */
+async function acceptLoginCookies(page) {
+  try {
+    console.log("[FB][login-cookies] Szukam popupu cookies...");
+
+    // chwila na pojawienie się popupu
+    await sleepRandom(800, 1300);
+
+    const found = await page.evaluate(() => {
+      const wanted = [
+        "Zezwól na wszystkie pliki cookie",
+        "Zezwól na wszystkie pliki",
+        "Allow all cookies",
+        "Odrzuć opcjonalne pliki cookie",
+        "Odrzuc opcjonalne pliki cookie",
+      ].map((t) => t.toLowerCase());
+
+      const buttons = Array.from(
+        document.querySelectorAll("button, [role='button']")
+      );
+
+      let marked = false;
+
+      for (const btn of buttons) {
+        const txt = (btn.innerText || btn.textContent || "").trim();
+        if (!txt) continue;
+        const low = txt.toLowerCase();
+
+        if (wanted.some((w) => low.includes(w))) {
+          btn.setAttribute("data-fb-cookie-btn", "1");
+          marked = true;
+          break;
+        }
+      }
+
+      return marked;
+    });
+
+    if (!found) {
+      console.log(
+        "[FB][login-cookies] Nie znaleziono przycisku cookies (po tekście)."
+      );
+      return false;
+    }
+
+    await page.click('[data-fb-cookie-btn="1"]');
+    console.log(
+      '[FB][login-cookies] Kliknięto przycisk cookies przez Puppeteera (data-fb-cookie-btn="1").'
+    );
+
+    await sleepRandom(1200, 2000);
+    return true;
+  } catch (err) {
+    console.log("[FB][login-cookies] Błąd:", err.message);
+    return false;
+  }
+}
+
+/**
+ * Główne logowanie na FB.
+ */
 async function fbLogin(page) {
-  console.log("[FB] Trwa logowanie...");
+  console.log("[FB][login] Start logowania…");
 
   await page.goto("https://www.facebook.com/login", {
     waitUntil: "networkidle2",
     timeout: 60000,
   });
 
-  await page.waitForSelector("#email", { timeout: 60000 });
+  // 1. popup cookies – próbujemy go zamknąć zanim dotkniemy inputów
+  await acceptLoginCookies(page);
 
+  console.log("[FB][login] Czekam na input email/pass...");
+
+  await page.waitForSelector("#email", { timeout: 60000 });
+  await page.waitForSelector("#pass", { timeout: 60000 });
+
+  // jeszcze raz sprawdź, czy cookies nie wyskoczyły ponownie
+  await acceptLoginCookies(page);
+
+  console.log("[FB][login] Wpisuję email...");
   await page.type("#email", process.env.FB_EMAIL || "", { delay: 60 });
+
+  console.log("[FB][login] Wpisuję hasło...");
   await page.type("#pass", process.env.FB_PASSWORD || "", { delay: 60 });
+
+  console.log("[FB][login] Klikam Zaloguj się…");
 
   await Promise.all([
     page.click('button[name="login"]'),
     page
-      .waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 })
+      .waitForNavigation({
+        waitUntil: "networkidle2",
+        timeout: 60000,
+      })
       .catch(() => {}),
   ]);
 
   console.log("[FB] Po logowaniu:", page.url());
 }
 
+/**
+ * Szybki check, czy jesteśmy zalogowani.
+ */
 async function checkIfLogged(page) {
   return page.evaluate(() => {
     const selectors = [
@@ -35,6 +120,10 @@ async function checkIfLogged(page) {
   });
 }
 
+/**
+ * Kliknięcie elementu (button / link) po dokładnym tekście – po stronie DOM.
+ * Używane np. w nakładce „Wyświetl więcej na Facebooku”.
+ */
 async function clickByText(page, text) {
   const res = await page.evaluate((label) => {
     const els = Array.from(
@@ -54,8 +143,11 @@ async function clickByText(page, text) {
   return res;
 }
 
+/**
+ * Jeżeli na poście pojawi się nakładka z przyciskiem „Zaloguj się / Log In”
+ * – klikamy, żeby przejść na pełną stronę FB.
+ */
 async function ensureLoggedInOnPostOverlay(page) {
-  // Sprawdzamy, czy jest nakładka typu "Wyświetl więcej na Facebooku"
   const overlayDetected = await page.evaluate(() => {
     const texts = Array.from(
       document.querySelectorAll("div, span, h1, h2, h3, button, a")
@@ -77,10 +169,8 @@ async function ensureLoggedInOnPostOverlay(page) {
 
   console.log("[FB] Wykryto okno logowania na poście – próba zalogowania.");
 
-  // Najpierw spróbuj PL
   let clicked = await clickByText(page, "Zaloguj się");
   if (!clicked) {
-    // potem EN jako fallback
     clicked = await clickByText(page, "Log In");
   }
 
@@ -96,4 +186,4 @@ async function ensureLoggedInOnPostOverlay(page) {
   }
 }
 
-export { fbLogin, checkIfLogged, ensureLoggedInOnPostOverlay, clickByText };
+export { fbLogin, checkIfLogged, ensureLoggedInOnPostOverlay, clickByText, acceptLoginCookies };
