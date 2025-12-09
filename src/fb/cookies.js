@@ -1,8 +1,24 @@
 // src/fb/cookies.js
-const COOKIES_READ_ONLY = process.env.COOKIES_READ_ONLY === "true";
 
 import fs from "fs/promises";
 import { sleepRandom } from "../utils/sleep.js";
+
+
+
+// 🔧 POPRAWNA interpretacja COOKIES_READ_ONLY z .env
+const COOKIES_READ_ONLY =
+  String(process.env.COOKIES_READ_ONLY || "")
+    .trim()
+    .toLowerCase() === "true";
+
+console.log(
+  "[FB][cookies] COOKIES_READ_ONLY =",
+  COOKIES_READ_ONLY,
+  "(raw:",
+  process.env.COOKIES_READ_ONLY,
+  ")"
+);
+
 
 /**
  * Ładowanie cookies z pliku cookies.json i wstrzyknięcie do strony.
@@ -42,20 +58,24 @@ async function saveCookies(page) {
 
   try {
     const cookies = await page.cookies();
-    const arr = cookies || [];
 
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-    const cookiesPath = path.join(__dirname, "..", "data", "cookies.json");
+    await fs.writeFile(
+      "cookies.json",
+      JSON.stringify(cookies, null, 2),
+      "utf8"
+    );
 
-    fs.writeFileSync(cookiesPath, JSON.stringify(arr, null, 2), "utf8");
     console.log(
-      `[FB][cookies] Zapisano ${arr.length} cookies do ${cookiesPath}`
+      `[FB][cookies] Zapisano cookies.json (liczba cookies: ${cookies.length}).`
     );
   } catch (e) {
-    console.log("[FB][cookies] Błąd przy zapisie cookies:", e?.message || e);
+    console.log(
+      "[FB][cookies] Błąd przy zapisie cookies.json:",
+      e?.message || e
+    );
   }
 }
+
 
 
 /**

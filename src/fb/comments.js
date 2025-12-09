@@ -3,9 +3,13 @@ import { EXPAND_COMMENTS } from "../config.js";
 import { sleepRandom } from "../utils/sleep.js";
 import { scrollPost } from "./scroll.js";
 import { acceptCookies, saveCookies } from "./cookies.js";
-import { ensureLoggedInOnPostOverlay, checkIfLogged } from "./login.js";
+import {ensureLoggedInOnPostOverlay,fbLogin,checkIfLogged,} from "./login.js";
 import { clickOneExpandButton } from "./expandButtons.js";
 import { safeGoto } from "../utils/navigation.js";
+
+const NAV_TIMEOUT_MS = process.env.NAV_TIMEOUT_MS
+  ? Number(process.env.NAV_TIMEOUT_MS)
+  : 90000; // było 60000, podbijamy do 90s
 
 let firstPostPauseDone = false;
 /* ============================================================
@@ -1268,32 +1272,108 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
    ==================== LICZBA KOMENTARZY ======================
    ============================================================ */
 
-
 async function getCommentCount(page, postUrl) {
   console.log(`[FB] Otwieranie posta: ${postUrl}`);
 
-  // używamy safeGoto z retry
+  // 1) wchodzimy na posta przez safeGoto (z retry)
   const ok = await safeGoto(page, postUrl, "post", {
     // dla liczników lepiej ładniej dociągnąć wszystko
     waitUntil: "networkidle2",
-    timeout: 90000,
+    timeout: NAV_TIMEOUT_MS, // 👈 stała z góry pliku
   });
 
   if (!ok) {
     // watcher będzie mógł rozpoznać ten typ błędu
-    throw new Error("safeGoto-failed")
+    throw new Error("safeGoto-failed");
   }
 
-  // --- PAUZA NA 2FA PRZY PIERWSZYM ODCZYCIE ---
-  
+  // 2) Fallback – FB zamiast posta mógł od razu dać /login?next=...
+  let currentUrl = page.url();
+  if (currentUrl.includes("/login")) {
+    console.log(
+      "[FB] Zamiast posta wylądowałem na /login?next=... – próbuję fbLogin() i wracam na posta."
+    );
 
-  await sleepRandom(3000, 4500);
+    await fbLogin(page);
+    await sleepRandom(3000, 4500);
 
+    const loggedAfterLogin = await checkIfLogged(page).catch(() => false);
+    console.log(
+      "[FB] Stan sesji po fbLogin() z /login:",
+      loggedAfterLogin ? "ZALOGOWANY" : "NIEZALOGOWANY"
+    );
+
+    if (loggedAfterLogin) {
+      await safeGoto(page, postUrl, "post", {
+        waitUntil: "networkidle2",
+        timeout: NAV_TIMEOUT_MS,
+      });
+    } else {
+      console.log(
+        "[FB] Po fbLogin() z /login nadal wyglądamy na niezalogowanych (prawdopodobnie 2FA) – kontynuuję jako gość."
+      );
+    }
+  }
+
+  // 3) Cookies przy pierwszym wejściu na posta
   await acceptCookies(page, "post-initial");
+
+  // 4) NOWY SCENARIUSZ:
+  //    jesteśmy na poście (tak jak na Twoim screenie – dialog + pasek "Zaloguj się" u góry),
+  //    ale nie ma /login w URL → sprawdzamy sesję ręcznie.
+  let loggedOnPost = false;
+  try {
+    loggedOnPost = await checkIfLogged(page);
+  } catch (e) {
+    console.log(
+      "[FB] checkIfLogged na widoku posta – błąd:",
+      e?.message || e
+    );
+  }
+
+  if (!loggedOnPost) {
+    console.log(
+      "[FB] Na widoku posta brak aktywnej sesji (np. pasek 'Zaloguj się') – próbuję fbLogin() i wracam na posta."
+    );
+
+    await fbLogin(page);
+    await sleepRandom(3000, 4500);
+
+    const loggedAfterFbLogin = await checkIfLogged(page).catch(() => false);
+    console.log(
+      "[FB] Stan sesji po fbLogin() z widoku posta:",
+      loggedAfterFbLogin ? "ZALOGOWANY" : "NIEZALOGOWANY"
+    );
+
+    if (loggedAfterFbLogin) {
+      console.log(
+        "[FB] Po fbLogin() wykryto zalogowanego użytkownika – ponownie otwieram posta."
+      );
+      await safeGoto(page, postUrl, "post", {
+        waitUntil: "networkidle2",
+        timeout: NAV_TIMEOUT_MS,
+      });
+
+      // po ponownym wejściu jeszcze raz łapiemy cookies z widoku posta
+      await acceptCookies(page, "post-initial");
+    } else {
+      console.log(
+        "[FB] Po fbLogin() nadal wyglądamy na niezalogowanych (prawdopodobnie 2FA) – kontynuuję jako gość."
+      );
+    }
+  }
+
+  // 5) Próba ogarnięcia nakładki "Wyświetl więcej na Facebooku" (jeśli występuje)
   await ensureLoggedInOnPostOverlay(page);
 
-  // 🔐 Po próbie logowania z nakładki sprawdzamy, czy faktycznie jesteśmy już zalogowani.
-  // Jeśli tak – od razu zapisujemy cookies, żeby kolejne uruchomienia mogły użyć tej sesji.
+  // --- PAUZA NA 2FA / przeładowanie widoku po ewentualnym logowaniu z nakładki ---
+  await sleepRandom(3000, 4500);
+
+  // 6) Cookies po ustabilizowaniu widoku posta
+  await acceptCookies(page, "post");
+
+  // 🔐 Po próbie logowania (fbLogin + nakładka) sprawdzamy, czy faktycznie jesteśmy zalogowani.
+  // Jeśli tak – zapisujemy cookies, żeby kolejne uruchomienia mogły użyć tej sesji.
   try {
     const loggedAfterPostOverlay = await checkIfLogged(page);
     if (loggedAfterPostOverlay) {
@@ -1313,7 +1393,8 @@ async function getCommentCount(page, postUrl) {
     );
   }
 
-  await acceptCookies(page, "post");
+  // 7) Reszta funkcji – BEZ ZMIAN względem tego, co miałeś
+
   await sleepRandom(1500, 2500);
 
   const isVideoView = /\/watch\/|[\?&]v=/i.test(postUrl);
@@ -1334,24 +1415,25 @@ async function getCommentCount(page, postUrl) {
     await sleepRandom(800, 1200);
   }
 
-  
-if (!firstPostPauseDone) {
+  if (!firstPostPauseDone) {
     console.log("[FB] Pauza 10s na zalogowanie / 2FA...");
-    await new Promise((res) => setTimeout(res, 10000));
+    await sleepRandom(9500, 10500); // ~10s, ale dalej losowo
     firstPostPauseDone = true;
   }
 
-
   // 1) Pierwsza próba ustawienia filtra
   try {
-    const ok = await switchCommentsFilterToAll(page);
+    const okFilter = await switchCommentsFilterToAll(page);
     console.log(
       "[FB] Pierwsza próba ustawienia filtra na 'Wszystkie komentarze':",
-      ok
+      okFilter
     );
-    if (ok) await sleepRandom(1200, 2000);
+    if (okFilter) await sleepRandom(1200, 2000);
   } catch (e) {
-    console.log("[FB] Błąd switchCommentsFilterToAll (pierwsza próba):", e.message);
+    console.log(
+      "[FB] Błąd switchCommentsFilterToAll (pierwsza próba):",
+      e.message
+    );
   }
 
   if (isVideoView) {
@@ -1390,6 +1472,8 @@ if (!firstPostPauseDone) {
     debug.globalSample = globalTexts.slice(0, 30);
     debug.buttonTextsSample = btnTexts.slice(0, 20);
 
+    // ... ⬇️ tu zostaje dokładnie Twój kod heurystyk (fromPhotoTopBlock, fromAllCommentsButton itd.)
+    // nic nie zmieniałem
     // PHOTO – heurystyka: po "Wszystkie reakcje" pierwszy numerek to liczba komentarzy
     function fromPhotoTopBlock(buttonTexts) {
       if (!isPhotoView) return null;
@@ -1664,7 +1748,10 @@ if (!firstPostPauseDone) {
     );
     if (ok2) await sleepRandom(800, 1500);
   } catch (e) {
-    console.log("[FB] Błąd switchCommentsFilterToAll (druga próba):", e.message);
+    console.log(
+      "[FB] Błąd switchCommentsFilterToAll (druga próba):",
+      e.message
+    );
   }
 
   // ========= FALLBACK ANCHORÓW – TEŻ CAŁY DOCUMENT =========
@@ -1745,6 +1832,7 @@ if (!firstPostPauseDone) {
   console.log("[FB] Brak liczby komentarzy w UI i brak anchorów, zwracam 0.");
   return 0;
 }
+
 
 /* ============================================================
    ================= ROZWIJANIE KOMENTARZY ====================

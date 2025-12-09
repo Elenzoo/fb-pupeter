@@ -311,7 +311,7 @@ const isDev = process.env.NODE_ENV !== "production"; // lokalnie będzie true
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: isDev ? true : "new",
+    headless: isDev ? false : "new",
     defaultViewport: null,
     args: [
       "--no-sandbox",
@@ -424,6 +424,43 @@ async function startWatcher() {
             await expandAllComments(page);
             let allComments = await extractCommentsData(page);
 
+            // --- FILTR: komentarze tylko z tego posta (po story_fbid + id) ---
+            try {
+              const postUrlObj = new URL(post.url);
+              const baseStory = postUrlObj.searchParams.get("story_fbid");
+              const baseId = postUrlObj.searchParams.get("id");
+
+              if (baseStory || baseId) {
+                allComments = allComments.filter((c) => {
+                  if (!c.permalink) return false;
+                  try {
+                    const cUrl = new URL(c.permalink);
+                    const cStory = cUrl.searchParams.get("story_fbid");
+                    const cId = cUrl.searchParams.get("id");
+
+                    if (baseStory && baseId) {
+                      return cStory === baseStory && cId === baseId;
+                    }
+                    if (baseStory && cStory) return cStory === baseStory;
+                    if (baseId && cId) return cId === baseId;
+
+                    return false;
+                  } catch {
+                    return false;
+                  }
+                });
+              }
+
+              console.log(
+                `[FB] Po filtrze URL (start) – komentarze z tego posta: ${allComments.length}`
+              );
+            } catch (e) {
+              console.warn(
+                "[FB] Błąd filtrowania po URL posta (start):",
+                e.message
+              );
+            }
+
             allComments = allComments.sort((a, b) => {
               const pa = typeof a.pos === "number" ? a.pos : 999999999;
               const pb = typeof b.pos === "number" ? b.pos : 999999999;
@@ -464,6 +501,43 @@ async function startWatcher() {
 
           await expandAllComments(page);
           let snapshot = await extractCommentsData(page);
+
+          // --- FILTR: komentarze tylko z tego posta (po story_fbid + id) ---
+          try {
+            const postUrlObj = new URL(post.url);
+            const baseStory = postUrlObj.searchParams.get("story_fbid");
+            const baseId = postUrlObj.searchParams.get("id");
+
+            if (baseStory || baseId) {
+              snapshot = snapshot.filter((c) => {
+                if (!c.permalink) return false;
+                try {
+                  const cUrl = new URL(c.permalink);
+                  const cStory = cUrl.searchParams.get("story_fbid");
+                  const cId = cUrl.searchParams.get("id");
+
+                  if (baseStory && baseId) {
+                    return cStory === baseStory && cId === baseId;
+                  }
+                  if (baseStory && cStory) return cStory === baseStory;
+                  if (baseId && cId) return cId === baseId;
+
+                  return false;
+                } catch {
+                  return false;
+                }
+              });
+            }
+
+            console.log(
+              `[FB] Po filtrze URL – komentarze z tego posta: ${snapshot.length}`
+            );
+          } catch (e) {
+            console.warn(
+              "[FB] Błąd filtrowania po URL posta:",
+              e.message
+            );
+          }
 
           snapshot = snapshot.sort((a, b) => {
             const pa = typeof a.pos === "number" ? a.pos : 999999999;
