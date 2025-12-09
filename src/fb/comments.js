@@ -5,7 +5,7 @@ import { scrollPost } from "./scroll.js";
 import { acceptCookies, saveCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay, checkIfLogged } from "./login.js";
 import { clickOneExpandButton } from "./expandButtons.js";
-
+import { safeGoto } from "../utils/navigation.js";
 
 let firstPostPauseDone = false;
 /* ============================================================
@@ -1272,15 +1272,20 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
 async function getCommentCount(page, postUrl) {
   console.log(`[FB] Otwieranie posta: ${postUrl}`);
 
-  // Otwieramy posta
-  await page.goto(postUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  // używamy safeGoto z retry
+  const ok = await safeGoto(page, postUrl, "post", {
+    // dla liczników lepiej ładniej dociągnąć wszystko
+    waitUntil: "networkidle2",
+    timeout: 90000,
+  });
+
+  if (!ok) {
+    // watcher będzie mógł rozpoznać ten typ błędu
+    throw new Error("safeGoto-failed")
+  }
 
   // --- PAUZA NA 2FA PRZY PIERWSZYM ODCZYCIE ---
-  if (!firstPostPauseDone) {
-    console.log("[FB] Pauza 10s na zalogowanie / 2FA...");
-    await new Promise((res) => setTimeout(res, 10000));
-    firstPostPauseDone = true;
-  }
+  
 
   await sleepRandom(3000, 4500);
 
@@ -1330,7 +1335,11 @@ async function getCommentCount(page, postUrl) {
   }
 
   
-
+if (!firstPostPauseDone) {
+    console.log("[FB] Pauza 10s na zalogowanie / 2FA...");
+    await new Promise((res) => setTimeout(res, 10000));
+    firstPostPauseDone = true;
+  }
 
 
   // 1) Pierwsza próba ustawienia filtra

@@ -54,6 +54,22 @@ for (const [url, entry] of Object.entries(commentsCache)) {
 let currentPosts = [];
 let lastSheetFetch = 0;
 
+// Licznik błędów nawigacji – jak coś się mocno przytnie, wywalamy proces
+let navErrorCount = 0;
+const MAX_NAV_ERRORS = 5;
+
+function isNavigationError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err).toLowerCase();
+
+  return (
+    msg.includes("safegoto-failed") ||
+    msg.includes("navigation timeout") ||
+    msg.includes("net::err_connection_timed_out") ||
+    msg.includes("net::err_timed_out")
+  );
+}
+
 /* ============================================================
    ===============   STEALTH / UKRYWANIE BOTA   ===============
    ============================================================ */
@@ -114,9 +130,7 @@ function parseSheetCsv(text) {
   }
 
   const header = lines[0].split(",");
-  const idxUrl = header.findIndex(
-    (h) => h.trim().toLowerCase() === "url"
-  );
+  const idxUrl = header.findIndex((h) => h.trim().toLowerCase() === "url");
   const idxActive = header.findIndex(
     (h) => h.trim().toLowerCase() === "active"
   );
@@ -297,7 +311,7 @@ const isDev = process.env.NODE_ENV !== "production"; // lokalnie będzie true
 
 async function startWatcher() {
   const browser = await puppeteer.launch({
-    headless: isDev ?  false: "new",
+    headless: isDev ? true : "new",
     defaultViewport: null,
     args: [
       "--no-sandbox",
@@ -313,6 +327,10 @@ async function startWatcher() {
 
   await applyStealth(page);
 
+  // bardziej tolerancyjne timeouty na serwerze
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(90000);
+
   await page.setViewport({ width: 1280, height: 720 });
 
   await page.setUserAgent(
@@ -321,7 +339,6 @@ async function startWatcher() {
   );
 
   /* ==== LOGOWANIE / COOKIES ==== */
-    /* ==== LOGOWANIE / COOKIES ==== */
   await loadCookies(page);
 
   await page
@@ -335,7 +352,7 @@ async function startWatcher() {
 
   if (!loggedIn) {
     console.log("[FB] Brak aktywnej sesji – logowanie...");
-    await fbLogin(page);          // tutaj robimy login + ewentualne 2FA
+    await fbLogin(page); // tutaj robimy login + ewentualne 2FA
 
     // po fbLogin sprawdzamy JESZCZE RAZ, czy faktycznie jesteśmy w środku
     loggedIn = await checkIfLogged(page);
@@ -352,7 +369,6 @@ async function startWatcher() {
     console.log("[FB] Użyto istniejącej sesji FB (cookies).");
   }
 
-
   // Na start – pierwszy odczyt arkusza (wymuszony)
   await refreshPostsIfNeeded(true);
 
@@ -364,6 +380,9 @@ async function startWatcher() {
 
   const loop = async () => {
     await refreshPostsIfNeeded(true);
+
+    // flaga rundy pod błędy nawigacji
+    let hadNavErrorThisRound = false;
 
     if (!currentPosts.length) {
       console.log(
@@ -508,12 +527,35 @@ async function startWatcher() {
             `[Watcher] Błąd przy sprawdzaniu ${post.id}:`,
             err.message
           );
+
+          if (isNavigationError(err)) {
+            hadNavErrorThisRound = true;
+            navErrorCount++;
+            console.log(
+              `[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`
+            );
+          }
         }
       }
     }
 
     // 🔥 KONIEC RUNDY → zapisujemy cache na dysk
     flushCacheToDisk();
+
+    // jeśli cała runda przeszła bez błędów nawigacji – resetujemy licznik
+    if (!hadNavErrorThisRound && navErrorCount > 0) {
+      console.log(
+        `[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`
+      );
+      navErrorCount = 0;
+    }
+
+    if (navErrorCount >= MAX_NAV_ERRORS) {
+      console.error(
+        "[Watcher] Za dużo błędów nawigacji z rzędu – kończę proces, niech PM2/menedżer odpali go od nowa."
+      );
+      process.exit(1);
+    }
 
     const jitter = Math.floor(Math.random() * 5000);
     const delay = CHECK_INTERVAL_MS + jitter;
