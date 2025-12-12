@@ -310,68 +310,6 @@ function flushCacheToDisk() {
 const isDev = process.env.NODE_ENV !== "production"; // lokalnie będzie true
 
 async function startWatcher() {
-  const browser = await puppeteer.launch({
-    headless: isDev ? true : "new",
-    defaultViewport: null,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-notifications",
-      "--disable-blink-features=AutomationControlled",
-    ],
-    ignoreDefaultArgs: ["--enable-automation"],
-  });
-
-  const page = await browser.newPage();
-
-  await applyStealth(page);
-
-  // bardziej tolerancyjne timeouty na serwerze
-  page.setDefaultNavigationTimeout(90000);
-  page.setDefaultTimeout(90000);
-
-  await page.setViewport({ width: 1280, height: 720 });
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-  );
-
-  /* ==== LOGOWANIE / COOKIES ==== */
-  await loadCookies(page);
-
-  await page
-    .goto("https://www.facebook.com/", {
-      waitUntil: "load",
-      timeout: 60000,
-    })
-    .catch(() => {});
-
-  let loggedIn = await checkIfLogged(page);
-
-  if (!loggedIn) {
-    console.log("[FB] Brak aktywnej sesji – logowanie...");
-    await fbLogin(page); // tutaj robimy login + ewentualne 2FA
-
-    // po fbLogin sprawdzamy JESZCZE RAZ, czy faktycznie jesteśmy w środku
-    loggedIn = await checkIfLogged(page);
-
-    if (loggedIn) {
-      console.log("[FB] Logowanie udane – zapisuję cookies.");
-      await saveCookies(page);
-    } else {
-      console.error(
-        "[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone)."
-      );
-    }
-  } else {
-    console.log("[FB] Użyto istniejącej sesji FB (cookies).");
-  }
-
-  // Na start – pierwszy odczyt arkusza (wymuszony)
-  await refreshPostsIfNeeded(true);
-
   console.log(
     "[Watcher] Monitoring startuje. Sprawdzanie co",
     (CHECK_INTERVAL_MS / 1000).toFixed(0),
@@ -379,50 +317,194 @@ async function startWatcher() {
   );
 
   const loop = async () => {
-    await refreshPostsIfNeeded(true);
-
-    // flaga rundy pod błędy nawigacji
+    let browser = null;
+    let page = null;
     let hadNavErrorThisRound = false;
 
-    if (!currentPosts.length) {
+    try {
       console.log(
-        "[Watcher] Brak aktywnych postów do monitorowania (arkusz pusty lub same FALSE)."
+        "[Watcher] ==== Nowy cykl watchera – startuję świeżą przeglądarkę ===="
       );
-    } else {
-      for (const post of currentPosts) {
-        const cacheKey = getCacheKey(post);
 
-        try {
-          const count = await getCommentCount(page, post.url);
-          if (count == null) {
-            console.log(
-              `[Watcher] Post ${post.id}: Nie udało się odczytać licznika.`
-            );
-            continue;
-          }
+      browser = await puppeteer.launch({
+        headless: isDev ? false : "new",
+        defaultViewport: null,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-notifications",
+          "--disable-blink-features=AutomationControlled",
+        ],
+        ignoreDefaultArgs: ["--enable-automation"],
+      });
 
-          const prev = lastCounts.has(cacheKey)
-            ? lastCounts.get(cacheKey)
-            : null;
-          const knownSet = getKnownSetForPost(cacheKey);
+      page = await browser.newPage();
 
-          /* ------------------ PIERWSZE ODCZYTANIE ------------------ */
-          if (prev === null) {
-            lastCounts.set(cacheKey, count);
+      await applyStealth(page);
 
-            console.log(
-              `[Watcher] Post ${post.id}: Startowa liczba komentarzy = ${count}`
-            );
+      // bardziej tolerancyjne timeouty na serwerze
+      page.setDefaultNavigationTimeout(90000);
+      page.setDefaultTimeout(90000);
 
-            if (!EXPAND_COMMENTS) {
+      await page.setViewport({ width: 1280, height: 720 });
+
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      );
+
+      /* ==== LOGOWANIE / COOKIES ==== */
+      await loadCookies(page);
+
+      await page
+        .goto("https://www.facebook.com/", {
+          waitUntil: "load",
+          timeout: 60000,
+        })
+        .catch(() => {});
+
+      let loggedIn = await checkIfLogged(page);
+
+      if (!loggedIn) {
+        console.log("[FB] Brak aktywnej sesji – logowanie...");
+        await fbLogin(page); // tutaj robimy login + ewentualne 2FA
+
+        // po fbLogin sprawdzamy JESZCZE RAZ, czy faktycznie jesteśmy w środku
+        loggedIn = await checkIfLogged(page);
+
+        if (loggedIn) {
+          console.log("[FB] Logowanie udane – zapisuję cookies.");
+          await saveCookies(page);
+        } else {
+          console.error(
+            "[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone)."
+          );
+        }
+      } else {
+        console.log("[FB] Użyto istniejącej sesji FB (cookies).");
+      }
+
+      // Na początku cyklu – odczyt arkusza (wymuszony)
+      await refreshPostsIfNeeded(true);
+
+      if (!currentPosts.length) {
+        console.log(
+          "[Watcher] Brak aktywnych postów do monitorowania (arkusz pusty lub same FALSE)."
+        );
+      } else {
+        for (const post of currentPosts) {
+          const cacheKey = getCacheKey(post);
+
+          try {
+            const count = await getCommentCount(page, post.url);
+            if (count == null) {
               console.log(
-                `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam wczytywanie istniejących.`
+                `[Watcher] Post ${post.id}: Nie udało się odczytać licznika.`
               );
               continue;
             }
 
+            const prev = lastCounts.has(cacheKey)
+              ? lastCounts.get(cacheKey)
+              : null;
+            const knownSet = getKnownSetForPost(cacheKey);
+
+            /* ------------------ PIERWSZE ODCZYTANIE ------------------ */
+            if (prev === null) {
+              lastCounts.set(cacheKey, count);
+
+              console.log(
+                `[Watcher] Post ${post.id}: Startowa liczba komentarzy = ${count}`
+              );
+
+              if (!EXPAND_COMMENTS) {
+                console.log(
+                  `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam wczytywanie istniejących.`
+                );
+                continue;
+              }
+
+              await expandAllComments(page);
+              let allComments = await extractCommentsData(page);
+
+              // --- FILTR: komentarze tylko z tego posta (po story_fbid + id) ---
+              try {
+                const postUrlObj = new URL(post.url);
+                const baseStory = postUrlObj.searchParams.get("story_fbid");
+                const baseId = postUrlObj.searchParams.get("id");
+
+                if (baseStory || baseId) {
+                  allComments = allComments.filter((c) => {
+                    if (!c.permalink) return false;
+                    try {
+                      const cUrl = new URL(c.permalink);
+                      const cStory = cUrl.searchParams.get("story_fbid");
+                      const cId = cUrl.searchParams.get("id");
+
+                      if (baseStory && baseId) {
+                        return cStory === baseStory && cId === baseId;
+                      }
+                      if (baseStory && cStory) return cStory === baseStory;
+                      if (baseId && cId) return cId === baseId;
+
+                      return false;
+                    } catch {
+                      return false;
+                    }
+                  });
+                }
+
+                console.log(
+                  `[FB] Po filtrze URL (start) – komentarze z tego posta: ${allComments.length}`
+                );
+              } catch (e) {
+                console.warn(
+                  "[FB] Błąd filtrowania po URL posta (start):",
+                  e.message
+                );
+              }
+
+              allComments = allComments.sort((a, b) => {
+                const pa = typeof a.pos === "number" ? a.pos : 999999999;
+                const pb = typeof b.pos === "number" ? b.pos : 999999999;
+                return pa - pb;
+              });
+
+              let maxPos = 0;
+              for (const c of allComments) {
+                if (c.id) knownSet.add(c.id);
+                if (typeof c.pos === "number" && c.pos > maxPos) {
+                  maxPos = c.pos;
+                }
+              }
+
+              console.log(
+                `[Watcher] Post ${post.id}: Zapamiętano ${allComments.length} istniejących komentarzy (maxPos=${maxPos}).`
+              );
+
+              continue;
+            }
+
+            /* ------------------ KOLEJNE ODCZYTY ------------------ */
+
+            if (count !== prev) {
+              console.log(
+                `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
+              );
+              lastCounts.set(cacheKey, count);
+            } else {
+              console.log(
+                `[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`
+              );
+            }
+
+            if (!EXPAND_COMMENTS) {
+              continue;
+            }
+
             await expandAllComments(page);
-            let allComments = await extractCommentsData(page);
+            let snapshot = await extractCommentsData(page);
 
             // --- FILTR: komentarze tylko z tego posta (po story_fbid + id) ---
             try {
@@ -431,7 +513,7 @@ async function startWatcher() {
               const baseId = postUrlObj.searchParams.get("id");
 
               if (baseStory || baseId) {
-                allComments = allComments.filter((c) => {
+                snapshot = snapshot.filter((c) => {
                   if (!c.permalink) return false;
                   try {
                     const cUrl = new URL(c.permalink);
@@ -452,190 +534,137 @@ async function startWatcher() {
               }
 
               console.log(
-                `[FB] Po filtrze URL (start) – komentarze z tego posta: ${allComments.length}`
+                `[FB] Po filtrze URL – komentarze z tego posta: ${snapshot.length}`
               );
             } catch (e) {
               console.warn(
-                "[FB] Błąd filtrowania po URL posta (start):",
+                "[FB] Błąd filtrowania po URL posta:",
                 e.message
               );
             }
 
-            allComments = allComments.sort((a, b) => {
+            snapshot = snapshot.sort((a, b) => {
               const pa = typeof a.pos === "number" ? a.pos : 999999999;
               const pb = typeof b.pos === "number" ? b.pos : 999999999;
               return pa - pb;
             });
 
-            let maxPos = 0;
-            for (const c of allComments) {
-              if (c.id) knownSet.add(c.id);
-              if (typeof c.pos === "number" && c.pos > maxPos) {
-                maxPos = c.pos;
+            console.log(
+              `[DBG] extractCommentsData – snapshot = ${snapshot.length}`
+            );
+            console.dir(snapshot.slice(0, 5), { depth: null });
+
+            let newComments = [];
+
+            // 1) nowe ID względem knownSet
+            for (const c of snapshot) {
+              if (!c.id) continue;
+              if (!knownSet.has(c.id)) {
+                knownSet.add(c.id);
+                newComments.push(c);
               }
             }
 
-            console.log(
-              `[Watcher] Post ${post.id}: Zapamiętano ${allComments.length} istniejących komentarzy (maxPos=${maxPos}).`
-            );
+            // 2) fallback, gdy licznik FB wzrósł, a po ID nic nie ma
+            if (newComments.length === 0 && count > prev) {
+              const diff = Math.max(1, count - prev);
 
-            continue;
-          }
-
-          /* ------------------ KOLEJNE ODCZYTY ------------------ */
-
-          if (count !== prev) {
-            console.log(
-              `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
-            );
-            lastCounts.set(cacheKey, count);
-          } else {
-            console.log(
-              `[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`
-            );
-          }
-
-          if (!EXPAND_COMMENTS) {
-            continue;
-          }
-
-          await expandAllComments(page);
-          let snapshot = await extractCommentsData(page);
-
-          // --- FILTR: komentarze tylko z tego posta (po story_fbid + id) ---
-          try {
-            const postUrlObj = new URL(post.url);
-            const baseStory = postUrlObj.searchParams.get("story_fbid");
-            const baseId = postUrlObj.searchParams.get("id");
-
-            if (baseStory || baseId) {
-              snapshot = snapshot.filter((c) => {
-                if (!c.permalink) return false;
-                try {
-                  const cUrl = new URL(c.permalink);
-                  const cStory = cUrl.searchParams.get("story_fbid");
-                  const cId = cUrl.searchParams.get("id");
-
-                  if (baseStory && baseId) {
-                    return cStory === baseStory && cId === baseId;
-                  }
-                  if (baseStory && cStory) return cStory === baseStory;
-                  if (baseId && cId) return cId === baseId;
-
-                  return false;
-                } catch {
-                  return false;
-                }
+              const cleaned = snapshot.filter((c) => {
+                const textOk = c.text && c.text.trim();
+                const idOk = c.id && c.id.trim();
+                const linkOk = c.permalink && c.permalink.trim();
+                return textOk || idOk || linkOk;
               });
+
+              const tail = cleaned.slice(-diff);
+
+              for (const c of tail) {
+                if (c.id) knownSet.add(c.id);
+              }
+
+              newComments = tail;
+
+              console.log(
+                `[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} komentarzy jako nowe.`
+              );
             }
 
-            console.log(
-              `[FB] Po filtrze URL – komentarze z tego posta: ${snapshot.length}`
-            );
-          } catch (e) {
-            console.warn(
-              "[FB] Błąd filtrowania po URL posta:",
-              e.message
-            );
-          }
+            if (newComments.length > 0) {
+              console.log(
+                `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
+              );
 
-          snapshot = snapshot.sort((a, b) => {
-            const pa = typeof a.pos === "number" ? a.pos : 999999999;
-            const pb = typeof b.pos === "number" ? b.pos : 999999999;
-            return pa - pb;
-          });
-
-          console.log(
-            `[DBG] extractCommentsData – snapshot = ${snapshot.length}`
-          );
-          console.dir(snapshot.slice(0, 5), { depth: null });
-
-          let newComments = [];
-
-          // 1) nowe ID względem knownSet
-          for (const c of snapshot) {
-            if (!c.id) continue;
-            if (!knownSet.has(c.id)) {
-              knownSet.add(c.id);
-              newComments.push(c);
+              await sendWebhook(post, newComments, count, prev);
+            } else {
+              console.log(
+                `[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`
+              );
             }
-          }
+          } catch (err) {
+  console.error(
+    `[Watcher] Błąd przy sprawdzaniu ${post.id}:`,
+    err && err.message ? err.message : err
+  );
+  if (err && err.stack) {
+    console.error("[Watcher] Stack błędu:", err.stack);
+  }
 
-          // 2) fallback, gdy licznik FB wzrósł, a po ID nic nie ma
-          if (newComments.length === 0 && count > prev) {
-            const diff = Math.max(1, count - prev);
+  if (isNavigationError(err)) {
+    hadNavErrorThisRound = true;
+    navErrorCount++;
+    console.log(
+      `[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`
+    );
+  }
+}
 
-            const cleaned = snapshot.filter((c) => {
-              const textOk = c.text && c.text.trim();
-              const idOk = c.id && c.id.trim();
-              const linkOk = c.permalink && c.permalink.trim();
-              return textOk || idOk || linkOk;
-            });
-
-            const tail = cleaned.slice(-diff);
-
-            for (const c of tail) {
-              if (c.id) knownSet.add(c.id);
-            }
-
-            newComments = tail;
-
-            console.log(
-              `[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} komentarzy jako nowe.`
-            );
-          }
-
-          if (newComments.length > 0) {
-            console.log(
-              `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
-            );
-
-            await sendWebhook(post, newComments, count, prev);
-          } else {
-            console.log(
-              `[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`
-            );
-          }
-        } catch (err) {
-          console.error(
-            `[Watcher] Błąd przy sprawdzaniu ${post.id}:`,
-            err.message
-          );
-
-          if (isNavigationError(err)) {
-            hadNavErrorThisRound = true;
-            navErrorCount++;
-            console.log(
-              `[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`
-            );
-          }
         }
       }
-    }
+    } catch (err) {
+      console.error("[Watcher] Błąd w cyklu watchera:", err);
+    } finally {
+      // 🔥 KONIEC RUNDY → zapisujemy cache na dysk
+      flushCacheToDisk();
 
-    // 🔥 KONIEC RUNDY → zapisujemy cache na dysk
-    flushCacheToDisk();
+      // jeśli cała runda przeszła bez błędów nawigacji – resetujemy licznik
+      if (!hadNavErrorThisRound && navErrorCount > 0) {
+        console.log(
+          `[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`
+        );
+        navErrorCount = 0;
+      }
 
-    // jeśli cała runda przeszła bez błędów nawigacji – resetujemy licznik
-    if (!hadNavErrorThisRound && navErrorCount > 0) {
+      if (browser) {
+        try {
+          await browser.close();
+          console.log(
+            "[Watcher] Zamknięto przeglądarkę po zakończeniu cyklu."
+          );
+        } catch (closeErr) {
+          console.log(
+            "[Watcher] Błąd podczas zamykania przeglądarki:",
+            closeErr?.message || closeErr
+          );
+        }
+      }
+
+      if (navErrorCount >= MAX_NAV_ERRORS) {
+        console.error(
+          "[Watcher] Za dużo błędów nawigacji z rzędu – kończę proces, niech PM2/menedżer odpali go od nowa."
+        );
+        process.exit(1);
+      }
+
+      const jitter = Math.floor(Math.random() * 5000);
+      const delay = CHECK_INTERVAL_MS + jitter;
       console.log(
-        `[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`
+        `[Watcher] Kolejny cykl za około ${Math.round(delay / 1000)} sekund.`
       );
-      navErrorCount = 0;
+      setTimeout(loop, delay);
     }
-
-    if (navErrorCount >= MAX_NAV_ERRORS) {
-      console.error(
-        "[Watcher] Za dużo błędów nawigacji z rzędu – kończę proces, niech PM2/menedżer odpali go od nowa."
-      );
-      process.exit(1);
-    }
-
-    const jitter = Math.floor(Math.random() * 5000);
-    const delay = CHECK_INTERVAL_MS + jitter;
-    setTimeout(loop, delay);
   };
 
+  // start pierwszego cyklu
   loop();
 }
 

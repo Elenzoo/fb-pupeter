@@ -3,9 +3,11 @@ import { EXPAND_COMMENTS } from "../config.js";
 import { sleepRandom } from "../utils/sleep.js";
 import { scrollPost } from "./scroll.js";
 import { acceptCookies, saveCookies } from "./cookies.js";
-import {ensureLoggedInOnPostOverlay,fbLogin,checkIfLogged,} from "./login.js";
+import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "./login.js";
 import { clickOneExpandButton } from "./expandButtons.js";
 import { safeGoto } from "../utils/navigation.js";
+import { getUiCommentInfo } from "./uiCommentInfo.js";
+
 
 const NAV_TIMEOUT_MS = process.env.NAV_TIMEOUT_MS
   ? Number(process.env.NAV_TIMEOUT_MS)
@@ -138,6 +140,75 @@ async function switchCommentsFilterToAll(page) {
   console.log("[FB][filter] Nieoczekiwany stan w switchCommentsFilterToAll:", pre);
   return false;
 }
+
+async function clickShowAllCommentsIfPresent(page) {
+  console.log("[FB][show-all] Próba kliknięcia 'Pokaż wszystkie' (aria-label)…");
+
+  try {
+    const clicked = await page.evaluate(() => {
+      // Jeśli filtr już jest, to znaczy że "Pokaż wszystkie" zostało kliknięte / niepotrzebne
+      const bodyText = (document.body.innerText || "").toLowerCase();
+      if (
+        bodyText.includes("najtrafniejsze") ||
+        bodyText.includes("najnowsze") ||
+        bodyText.includes("wszystkie komentarze") ||
+        bodyText.includes("all comments") ||
+        bodyText.includes("ukryj komentarze") ||
+        bodyText.includes("hide comments")
+      ) {
+        return false;
+      }
+
+      const selectors = [
+        "div[aria-label='Pokaż wszystkie'][role='button']",
+        "div[aria-label='Wyświetl wszystkie'][role='button']",
+        "div[aria-label='Show all'][role='button']",
+        "div[aria-label='View all'][role='button']",
+      ];
+
+      let el = null;
+      for (const sel of selectors) {
+        el = document.querySelector(sel);
+        if (el) break;
+      }
+      if (!el) return false;
+
+      try {
+        el.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch (e) {
+        // scrollIntoView nie musi się udać
+      }
+
+      // zwykły JS – bez TypeScripta
+      if (typeof el.click === "function") {
+        el.click();
+        return true;
+      }
+
+      return false;
+    });
+
+    if (!clicked) {
+      console.log(
+        "[FB][show-all] Nie znaleziono aria-label='Pokaż wszystkie' albo filtr już widoczny – pomijam."
+      );
+      return false;
+    }
+
+    console.log("[FB][show-all] Kliknięto 'Pokaż wszystkie' (aria-label).");
+    await sleepRandom(900, 1600);
+    return true;
+  } catch (err) {
+    console.log(
+      "[FB][show-all] Błąd podczas klikania 'Pokaż wszystkie':",
+      err?.message || err
+    );
+    return false;
+  }
+}
+
+
+
 
 /**
  * Próbuje kliknąć opcję "Wszystkie komentarze / All comments" w otwartym menu.
@@ -290,7 +361,7 @@ async function scrollWithinPost(page, label, factor = 0.3) {
       const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
         href
       );
-      const isVideoView = /\/watch\/|[\?&]v=/i.test(href);
+      const isVideoView = /\/watch\/|\/videos\/|[\?&]v=/i.test(href);
 
       // wstrzykujemy funkcję getPostRoot
       // eslint-disable-next-line no-eval
@@ -621,7 +692,7 @@ async function scrollToAbsoluteBottom(page, label = "bottom") {
       const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
         href
       );
-      const isVideoView = /\/watch\/|[\?&]v=/i.test(href);
+      const isVideoView = /\/watch\/|\/videos\/|[\?&]v=/i.test(href);
 
       // wstrzykujemy funkcję getPostRoot
       // eslint-disable-next-line no-eval
@@ -1065,13 +1136,13 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
   const hasTarget = typeof expectedTotal === "number" && expectedTotal > 0;
 
   const view = await page.evaluate(() => {
-    const href = location.href;
-    const isVideo = /\/watch\/|[\?&]v=/i.test(href);
-    const isPhoto = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
-      href
-    );
-    return { href, isVideo, isPhoto };
-  });
+  const href = location.href;
+  const isVideo = /\/watch\/|\/videos\/|[\?&]v=/i.test(href); // 👈 dodane /videos/
+  const isPhoto = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
+    href
+  );
+  return { href, isVideo, isPhoto };
+});
 
   console.log(
     "[FB] ensureAllCommentsLoaded – start",
@@ -1268,6 +1339,380 @@ async function ensureAllCommentsLoaded(page, expectedTotal = null) {
   );
 }
 
+
+async function clickMoreCommentsButtonsVideo(page, maxLoops = 80) {
+  console.log(
+    "[FB][more-comments] Start klikania 'Wyświetl więcej komentarzy / odpowiedzi' (video)…"
+  );
+
+  for (let i = 0; i < maxLoops; i++) {
+    const result = await page.evaluate(() => {
+      const norm = (s) =>
+        (s || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+
+      function getPostRoot() {
+        // 1) overlay z postem / video
+        const dialogs = Array.from(
+          document.querySelectorAll("div[role='dialog']")
+        );
+        for (const dlg of dialogs) {
+          const txt = (dlg.innerText || dlg.textContent || "").toLowerCase();
+          if (!txt) continue;
+          if (
+            txt.includes("komentarz") ||
+            txt.includes("comments") ||
+            txt.includes("napisz komentarz")
+          ) {
+            const art = dlg.querySelector("article");
+            return art || dlg;
+          }
+        }
+
+        // 2) strona "Filmy" – główny artykuł
+        const main = document.querySelector("main");
+        if (main) {
+          const art = main.querySelector("article");
+          if (art) return art;
+          return main;
+        }
+
+        // 3) fallback
+        return document.body || document;
+      }
+
+      const root = getPostRoot();
+
+      const MORE_COMMENTS_LABELS = [
+        "wyświetl więcej komentarzy",
+        "zobacz więcej komentarzy",
+        "view more comments",
+        "view previous comments",
+        "see more comments",
+      ];
+
+      const REPLY_LABELS = [
+        "wyświetl więcej odpowiedzi",
+        "zobacz więcej odpowiedzi",
+        "view more replies",
+        "see more replies",
+      ];
+
+      const els = Array.from(
+        root.querySelectorAll(
+          "button, div[role='button'], span[role='button'], span"
+        )
+      );
+
+      let target = null;
+      let kind = null;
+
+      // 1) priorytet: "Wyświetl więcej komentarzy"
+      for (const el of els) {
+        const txt = norm(el.textContent);
+        if (!txt) continue;
+
+        if (MORE_COMMENTS_LABELS.includes(txt)) {
+          const rect = el.getBoundingClientRect();
+          if (rect.bottom < 0 || rect.top > window.innerHeight) continue; // tylko to, co widać
+          target = el;
+          kind = "comments";
+          break;
+        }
+      }
+
+      // 2) jeśli nie ma "więcej komentarzy" – szukamy "więcej/X odpowiedzi"
+      if (!target) {
+        for (const el of els) {
+          const txt = norm(el.textContent);
+          if (!txt) continue;
+
+          // "Wyświetl więcej odpowiedzi", "Zobacz więcej odpowiedzi"
+          if (REPLY_LABELS.includes(txt)) {
+            const rect = el.getBoundingClientRect();
+            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+            target = el;
+            kind = "replies";
+            break;
+          }
+
+          // "Sebastian ... · 12 odpowiedzi", "3 odpowiedzi", "5 replies"
+          if (
+            /(^|\s)\d+\s+(odpowiedź|odpowiedzi|replies)\b/.test(txt) ||
+            (txt.includes(" replies") && /\d+/.test(txt))
+          ) {
+            const rect = el.getBoundingClientRect();
+            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+            target = el;
+            kind = "replies";
+            break;
+          }
+        }
+      }
+
+      if (!target) {
+        return { clicked: false, kind: null };
+      }
+
+      try {
+        target.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch (e) {
+        // ignorujemy
+      }
+
+      if (typeof target.click === "function") {
+        target.click();
+        return { clicked: true, kind };
+      }
+
+      return { clicked: false, kind: null };
+    });
+
+    if (!result || !result.clicked) {
+      if (i === 0) {
+        console.log(
+          "[FB][more-comments] Brak przycisków 'więcej komentarzy/odpowiedzi' – nic nie klikam."
+        );
+      } else {
+        console.log(
+          `[FB][more-comments] Brak kolejnych przycisków – zakończono po ${i} kliknięciach.`
+        );
+      }
+      break;
+    }
+
+    const what =
+      result.kind === "replies"
+        ? "więcej odpowiedzi / X odpowiedzi"
+        : "więcej komentarzy";
+
+    console.log(
+      `[FB][more-comments] Kliknięto '${what}' (iteracja ${i + 1}/${maxLoops}).`
+    );
+
+    // krótka pauza po kliknięciu
+    await sleepRandom(900, 1600);
+
+    // mały scroll w dół w panelu komentarzy – bez ogromnych skoków
+    try {
+      await scrollWithinPost(page, `video-more-${i + 1}`, 0.18);
+    } catch (e) {
+      console.log(
+        "[FB][more-comments] scrollWithinPost(video) – błąd:",
+        e?.message || e
+      );
+    }
+
+    await sleepRandom(800, 1400);
+  }
+
+  console.log(
+    `[FB][more-comments] Zakończono sekwencję video (maxLoops=${maxLoops}).`
+  );
+}
+
+
+
+async function walkVideoCommentsSequential(page, maxCycles = 40) {
+  console.log("[FB][video-walk] start – sekwencyjny spacer po komentarzach (VIDEO)…");
+
+  for (let cycle = 1; cycle <= maxCycles; cycle++) {
+    const result = await page.evaluate(() => {
+      const norm = (s) =>
+        (s || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+
+      function getPostRoot() {
+        // 1) dialog z postem / overlay
+        const dialogs = Array.from(
+          document.querySelectorAll("div[role='dialog']")
+        );
+        for (const dlg of dialogs) {
+          const txt = (dlg.innerText || dlg.textContent || "").toLowerCase();
+          if (!txt) continue;
+          if (
+            txt.includes("komentarz") ||
+            txt.includes("comments") ||
+            txt.includes("napisz komentarz")
+          ) {
+            const art = dlg.querySelector("article");
+            return art || dlg;
+          }
+        }
+
+        // 2) klasyczna strona „Filmy”
+        const main = document.querySelector("main, div[role='main']");
+        if (main) {
+          const art = main.querySelector("article");
+          return art || main;
+        }
+
+        return document.body || document;
+      }
+
+      function getCommentsContainer(root) {
+        const divs = Array.from(root.querySelectorAll("div"));
+        let best = null;
+        let bestScore = 0;
+
+        for (const el of divs) {
+          const style = window.getComputedStyle(el);
+          if (!style) continue;
+
+          const oy = style.overflowY;
+          const h = el.clientHeight || 0;
+          const sh = el.scrollHeight || 0;
+
+          if (
+            (oy === "auto" || oy === "scroll") &&
+            sh > h + 40
+          ) {
+            const text = (el.innerText || "").toLowerCase();
+            if (
+              text.includes("komentarz") ||
+              text.includes("comment") ||
+              text.includes("napisz komentarz")
+            ) {
+              const score = sh;
+              if (score > bestScore) {
+                bestScore = score;
+                best = el;
+              }
+            }
+          }
+        }
+
+        return best || root;
+      }
+
+      function clickMoreCommentsOnce(root) {
+        const LABELS = [
+          "wyświetl więcej komentarzy",
+          "zobacz więcej komentarzy",
+          "view more comments",
+          "see more comments",
+        ];
+
+        const buttons = Array.from(
+          root.querySelectorAll(
+            "button, div[role='button'], span[role='button'], span"
+          )
+        );
+
+        for (const el of buttons) {
+          const txt = norm(el.textContent);
+          if (!txt) continue;
+          if (LABELS.includes(txt)) {
+            try {
+              el.scrollIntoView({ block: "center", inline: "nearest" });
+            } catch (e) {}
+            if (typeof el.click === "function") el.click();
+            return true;
+          }
+        }
+
+        return false;
+      }
+
+      function expandReplies(root, limit = 15) {
+        const buttons = Array.from(
+          root.querySelectorAll(
+            "button, div[role='button'], span[role='button'], span"
+          )
+        );
+
+        let clicked = 0;
+
+        for (const el of buttons) {
+          const txt = norm(el.textContent);
+          if (!txt) continue;
+
+          // „Wyświetl więcej odpowiedzi”, „Zobacz więcej odpowiedzi”, „View more replies”
+          const isMoreReplies =
+            txt.includes("więcej odpowiedzi") ||
+            txt.includes("more replies") ||
+            txt.includes("view previous replies") ||
+            txt.includes("zobacz odpowiedzi");
+
+          // „12 odpowiedzi”, „3 odpowiedzi”, „2 replies”
+          const isCountReplies = /\d+\s+(odpowiedź|odpowiedzi|replies)\b/.test(
+            txt
+          );
+
+          if (!isMoreReplies && !isCountReplies) continue;
+
+          try {
+            el.scrollIntoView({ block: "center", inline: "nearest" });
+          } catch (e) {}
+
+          if (typeof el.click === "function") {
+            el.click();
+            clicked++;
+            if (clicked >= limit) break;
+          }
+        }
+
+        return clicked;
+      }
+
+      function scrollComments(container) {
+        const before = container.scrollTop || 0;
+        const step = Math.max(200, (container.clientHeight || 0) * 0.7);
+        const target = Math.min(
+          before + step,
+          (container.scrollHeight || 0)
+        );
+        container.scrollTop = target;
+        const after = container.scrollTop || 0;
+        return { before, after };
+      }
+
+      const root = getPostRoot();
+      const container = getCommentsContainer(root);
+
+      // 1) klikamy „Wyświetl więcej komentarzy” TYLKO RAZ w tym cyklu
+      const clickedMore = clickMoreCommentsOnce(root);
+
+      // 2) rozwijamy widoczne „X odpowiedzi” / „więcej odpowiedzi”
+      const repliesClicked = expandReplies(root, 20);
+
+      // 3) scroll w dół panela komentarzy
+      const scrollRes = scrollComments(container);
+
+      const hasButtons = clickedMore || repliesClicked > 0;
+      const scrolled = scrollRes.after !== scrollRes.before;
+
+      return {
+        clickedMore,
+        repliesClicked,
+        scrolled,
+        hasButtons,
+      };
+    });
+
+    console.log(
+      `[FB][video-walk] cycle ${cycle}: more=${result.clickedMore}, replies=${result.repliesClicked}, scrolled=${result.scrolled}`
+    );
+
+    // warunek wyjścia: brak guzików i scroll nic nie zmienił
+    if (!result.hasButtons && !result.scrolled) {
+      console.log(
+        "[FB][video-walk] stop – brak 'więcej komentarzy/odpowiedzi' i nie ma gdzie scrollować."
+      );
+      break;
+    }
+
+    await sleepRandom(1200, 2000);
+  }
+
+  console.log("[FB][video-walk] koniec spaceru po komentarzach VIDEO.");
+}
+
+
 /* ============================================================
    ==================== LICZBA KOMENTARZY ======================
    ============================================================ */
@@ -1397,7 +1842,7 @@ async function getCommentCount(page, postUrl) {
 
   await sleepRandom(1500, 2500);
 
-  const isVideoView = /\/watch\/|[\?&]v=/i.test(postUrl);
+    const isVideoView = /\/watch\/|\/videos\/|[\?&]v=/i.test(postUrl);
   const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
     postUrl
   );
@@ -1408,6 +1853,8 @@ async function getCommentCount(page, postUrl) {
 
   if (isVideoView) {
     await pauseVideoIfAny(page);
+    // 🔴 NOWOŚĆ: przy video w overlayu klikamy "Pokaż wszystkie", jeśli trzeba
+    await clickShowAllCommentsIfPresent(page);
   }
 
   if (!isVideoView) {
@@ -1415,11 +1862,8 @@ async function getCommentCount(page, postUrl) {
     await sleepRandom(800, 1200);
   }
 
-  if (!firstPostPauseDone) {
-    console.log("[FB] Pauza 10s na zalogowanie / 2FA...");
-    await sleepRandom(9500, 10500); // ~10s, ale dalej losowo
-    firstPostPauseDone = true;
-  }
+
+  
 
   // 1) Pierwsza próba ustawienia filtra
   try {
@@ -1440,304 +1884,36 @@ async function getCommentCount(page, postUrl) {
     await pauseVideoIfAny(page);
   }
 
-  // ========= UI PARSER – liczymy z całego dokumentu (przed doładowaniem) =========
-  const uiInfo = await page.evaluate(() => {
-    const debug = {};
-
-    const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
-      location.href
-    );
-    const isVideoView = /\/watch\/|[\?&]v=/i.test(location.href);
-
-    debug.isPhotoView = isPhotoView;
-    debug.isVideoView = isVideoView;
-
-    const root = document;
-    debug.rootTag = root.tagName || "DOCUMENT";
-
-    const allEls = Array.from(root.querySelectorAll("span, div, button, a"));
-
-    const globalTexts = allEls
-      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    const btnEls = Array.from(
-      root.querySelectorAll("button, div[role='button'], span[role='button']")
-    );
-
-    const btnTexts = btnEls
-      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    debug.globalSample = globalTexts.slice(0, 30);
-    debug.buttonTextsSample = btnTexts.slice(0, 20);
-
-    // ... ⬇️ tu zostaje dokładnie Twój kod heurystyk (fromPhotoTopBlock, fromAllCommentsButton itd.)
-    // nic nie zmieniałem
-    // PHOTO – heurystyka: po "Wszystkie reakcje" pierwszy numerek to liczba komentarzy
-    function fromPhotoTopBlock(buttonTexts) {
-      if (!isPhotoView) return null;
-
-      const idx = buttonTexts.findIndex((t) => {
-        const low = t.toLowerCase();
-        return (
-          low.includes("wszystkie reakcje") ||
-          low.includes("all reactions")
-        );
-      });
-      if (idx === -1) return null;
-
-      const tail = buttonTexts.slice(idx + 1, idx + 8);
-      const firstNum = tail.find((t) => /^\d+$/.test(t));
-      if (!firstNum) return null;
-
-      const num = parseInt(firstNum, 10);
-      if (!Number.isFinite(num) || num <= 0) return null;
-
-      return { num, raw: tail.join(",") };
-    }
-
-    function fromAllCommentsButton(buttonTexts) {
-      const idx = buttonTexts.findIndex((t) => {
-        const low = t.toLowerCase();
-        return low === "wszystkie komentarze" || low === "all comments";
-      });
-      if (idx === -1) return null;
-
-      const numericCandidates = [];
-      for (let i = idx - 3; i <= idx + 3; i++) {
-        if (i < 0 || i >= buttonTexts.length || i === idx) continue;
-        const t = buttonTexts[i];
-        if (!t) continue;
-        const m = t.match(/^\d+$/);
-        if (m) numericCandidates.push(parseInt(m[0], 10));
-      }
-      if (!numericCandidates.length) return null;
-      const best = Math.max(...numericCandidates);
-      return { num: best, raw: numericCandidates.join(",") };
-    }
-
-    function fromFilterLinkedCount(buttonTexts) {
-      const filterIdx = buttonTexts.findIndex((t) => {
-        const low = t.toLowerCase();
-        return (
-          low === "najtrafniejsze" ||
-          low === "most relevant" ||
-          low === "wszystkie komentarze" ||
-          low === "all comments"
-        );
-      });
-
-      if (filterIdx === -1) return null;
-
-      for (let i = filterIdx - 1; i >= 0; i--) {
-        const txt = buttonTexts[i];
-        if (!txt) continue;
-        const lower = txt.toLowerCase();
-
-        if (!lower.includes("komentarz") && !lower.includes("comment")) {
-          continue;
-        }
-
-        const m = lower.match(
-          /(\d+(?:[.,]\d+)?)(?:\s*(tys\.|k))?\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (!m) continue;
-
-        let n = parseFloat(m[1].replace(",", "."));
-        if (m[2]) n *= 1000;
-        n = Math.round(n);
-
-        return { num: n, raw: txt };
-      }
-
-      return null;
-    }
-
-    function fromReactionsBlock(allTexts) {
-      const idx = allTexts.findIndex((t) => {
-        const lower = t.toLowerCase();
-        return (
-          lower.includes("wszystkie reakcje") ||
-          lower.includes("all reactions")
-        );
-      });
-      if (idx === -1) return null;
-
-      const tail = allTexts.slice(idx + 1, idx + 10);
-
-      const likeIdx = tail.findIndex((t) => {
-        const lower = t.toLowerCase();
-        return (
-          lower.includes("lubię to") ||
-          lower.includes("like") ||
-          lower.includes("polub")
-        );
-      });
-      const segment = likeIdx === -1 ? tail : tail.slice(0, likeIdx);
-
-      const nums = segment
-        .map((t) => t.trim())
-        .filter((t) => /^\d+$/.test(t))
-        .map((t) => parseInt(t, 10))
-        .filter((n) => Number.isFinite(n) && n >= 0);
-
-      if (!nums.length) return null;
-
-      let chosen = null;
-      if (nums.length >= 2) {
-        chosen = nums[1];
-      } else {
-        chosen = nums[0];
-      }
-
-      return { num: chosen, raw: nums.join(",") };
-    }
-
-    function parsePhrase(texts) {
-      let best = null;
-      let raw = null;
-
-      for (const t of texts) {
-        const lower = t.toLowerCase();
-
-        if (
-          lower.includes("wszystkie reakcje") ||
-          lower.includes("all reactions")
-        ) {
-          continue;
-        }
-        if (!lower.includes("komentarz") && !lower.includes("comment")) continue;
-        if (
-          lower.startsWith("zobacz jeszcze") ||
-          lower.startsWith("wyświetl jeszcze") ||
-          lower.startsWith("view more")
-        )
-          continue;
-
-        const m = lower.match(
-          /(\d+(?:[.,]\d+)?)(?:\s*(tys\.|k))?\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (!m) continue;
-
-        let n = parseFloat(m[1].replace(",", "."));
-        if (m[2]) n *= 1000;
-        n = Math.round(n);
-
-        best = n;
-        raw = t;
-      }
-
-      return best != null ? { num: best, raw } : null;
-    }
-
-    function parseXofY(texts) {
-      let best = null;
-      let raw = null;
-      for (const t of texts) {
-        const lower = t.toLowerCase();
-        const m = lower.match(
-          /(\d+)\s*z\s*(\d+)\s+(komentarz|komentarze|komentarzy|comment|comments)\b/
-        );
-        if (!m) continue;
-
-        const total = parseInt(m[2], 10);
-        if (!Number.isFinite(total) || total <= 0) continue;
-
-        if (best === null || total > best) {
-          best = total;
-          raw = t;
-        }
-      }
-      return best != null && best > 0 ? { num: best, raw } : null;
-    }
-
-    function digitNearComment(allElements) {
-      let near = null;
-      for (const el of allElements) {
-        const txt = (el.textContent || "").trim();
-        if (!/^\d+$/.test(txt)) continue;
-        const parent = el.parentElement;
-        if (!parent) continue;
-        const block = (parent.innerText || "").toLowerCase();
-        if (block.includes("komentarz") || block.includes("comment")) {
-          const n = parseInt(txt, 10);
-          if (!near || n > near) near = n;
-        }
-      }
-      return near;
-    }
-
-    const allTexts = [...globalTexts, ...btnTexts];
-
-    // 1) PHOTO – najpierw próbujemy topowy blok po "Wszystkie reakcje"
-    const photoRes = fromPhotoTopBlock(btnTexts);
-    if (photoRes)
-      return {
-        num: photoRes.num,
-        debug: { ...debug, source: "photoTopBlock", raw: photoRes.raw },
-      };
-
-    // 2) standardowe heurystyki
-    const btnRes = !isPhotoView ? fromAllCommentsButton(btnTexts) : null;
-    if (btnRes)
-      return {
-        num: btnRes.num,
-        debug: { ...debug, source: "buttonAllComments", raw: btnRes.raw },
-      };
-
-    const filterRes = fromFilterLinkedCount(btnTexts);
-    if (filterRes)
-      return {
-        num: filterRes.num,
-        debug: { ...debug, source: "filterLinked", raw: filterRes.raw },
-      };
-
-    const reactRes = fromReactionsBlock(allTexts);
-    if (reactRes)
-      return {
-        num: reactRes.num,
-        debug: { ...debug, source: "reactionsBlock", raw: reactRes.raw },
-      };
-
-    const phraseRes = parsePhrase(allTexts);
-    if (phraseRes)
-      return {
-        num: phraseRes.num,
-        debug: { ...debug, source: "phrase", raw: phraseRes.raw },
-      };
-
-    const xOfY = parseXofY(allTexts);
-    if (xOfY)
-      return {
-        num: xOfY.num,
-        debug: { ...debug, source: "xOfY", raw: xOfY.raw },
-      };
-
-    const near = digitNearComment(allEls);
-    if (near != null)
-      return {
-        num: near,
-        debug: { ...debug, source: "digitNear" },
-      };
-
-    return { num: null, debug: { ...debug, source: "none" } };
-  });
+    // ========= UI PARSER – liczymy z całego dokumentu (przed doładowaniem) =========
+  const uiInfo = await getUiCommentInfo(page);
 
   console.log("[DBG] Comments debug (skrócone):", {
-    source: uiInfo.debug?.source,
-    raw: uiInfo.debug?.raw,
-    isPhotoView: uiInfo.debug?.isPhotoView,
-    isVideoView: uiInfo.debug?.isVideoView,
+    source: uiInfo?.source,
+    raw: uiInfo?.raw,
+    viewType: uiInfo?.viewType,
+    comments: uiInfo?.comments,
   });
 
   let expectedTotal = null;
-  if (typeof uiInfo.num === "number" && uiInfo.num > 0) {
-    expectedTotal = uiInfo.num;
+  if (uiInfo && typeof uiInfo.comments === "number" && uiInfo.comments > 0) {
+    expectedTotal = uiInfo.comments;
+  }
+
+  // 🔥 VIDEO: najpierw agresywnie klikamy "Wyświetl więcej komentarzy",
+  // dopiero potem uruchamiamy główny loader scrollujący.
+  if (isVideoView) {
+    await clickMoreCommentsButtonsVideo(page);
   }
 
   // 2) Doładowanie komentarzy – target z UI tylko jako orientacja
-  await ensureAllCommentsLoaded(page, expectedTotal);
+    // 2) Doładowanie komentarzy – dla VIDEO osobny spacer, reszta starym loaderem
+  if (isVideoView) {
+    await walkVideoCommentsSequential(page, expectedTotal || null);
+  } else {
+    await ensureAllCommentsLoaded(page, expectedTotal);
+  }
+
+
 
   // 3) Druga próba filtra – na wypadek zmiany layoutu
   try {
@@ -1789,7 +1965,8 @@ async function getCommentCount(page, postUrl) {
 
   console.log("[FB] Fallback – anchor IDs:", fallback.count);
 
-  let finalNum = uiInfo.num;
+  let finalNum = uiInfo?.comments ?? null;
+
 
   if (fallback.count > 0) {
     if (finalNum == null || finalNum === 0) {
@@ -2041,6 +2218,31 @@ async function extractCommentsData(page) {
         pos: pos ?? existing.pos ?? null,
       });
     }
+
+    
+  // ⬇️ czyścimy wynik z pustych śmieci (brak tekstu, ID, linka)
+  const cleaned = data.filter((c) => {
+    const hasText = c.text && c.text.trim().length > 0;
+    const hasId = c.id && String(c.id).trim().length > 0;
+    const hasLink = c.permalink && c.permalink.trim().length > 0;
+    return hasText || hasId || hasLink;
+  });
+
+  console.log(
+    "[DBG] extractCommentsData – raw:",
+    data.length,
+    "po czyszczeniu:",
+    cleaned.length
+  );
+
+  console.log(
+    "[FB] extractCommentsData – wyciągnięto komentarzy:",
+    cleaned.length
+  );
+  
+
+
+
 
     return Array.from(byId.values());
   });
