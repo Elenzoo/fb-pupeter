@@ -71,6 +71,11 @@ if (!POSTS.length && !POSTS_SHEET_URL) {
 const EXPAND_COMMENTS =
   process.env.EXPAND_COMMENTS === "false" ? false : true;
 
+// NOWE: przełącznik refaktoru UI handlers
+// USE_UI_HANDLERS=false → jedzie legacy
+const USE_UI_HANDLERS =
+  process.env.USE_UI_HANDLERS === "false" ? false : true;
+
 // co ile sekund lecimy po postach (podstawowy interwał)
 // można nadpisać w .env: CHECK_INTERVAL_MS=60000
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
@@ -79,8 +84,9 @@ export {
   // stary system – optional (watcher go już nie potrzebuje, ale nic nie szkodzi że jest)
   POSTS,
   POST_LABELS,
-  // używane przez watcher.js
+  // używane przez watcher.js / comments.js
   EXPAND_COMMENTS,
+  USE_UI_HANDLERS,
   CHECK_INTERVAL_MS,
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,

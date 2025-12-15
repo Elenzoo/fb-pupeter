@@ -1,3 +1,4 @@
+// src/webhook.js
 import axios from "axios";
 import { POST_LABELS } from "./config.js";
 
@@ -41,6 +42,56 @@ function parseFbRelativeTime(raw) {
 }
 
 /* ============================================================
+   NORMALIZACJA ID: zawsze numeryczne
+   ============================================================ */
+
+function decodeUrlSafeBase64(str) {
+  try {
+    if (!str) return null;
+    let s = String(str).trim();
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const buf = Buffer.from(s, "base64");
+    const out = buf.toString("utf8");
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+function pickNumericId(comment) {
+  // 1) preferuj id_num, jeśli jest OK
+  if (comment?.id_num && /^\d+$/.test(String(comment.id_num))) return String(comment.id_num);
+
+  // 2) czasem id już jest numeryczne
+  if (comment?.id && /^\d+$/.test(String(comment.id))) return String(comment.id);
+
+  // 3) spróbuj wyciągnąć z base64 (często kończy się "_<digits>")
+  const raw = comment?.id_raw || comment?.id || null;
+  if (raw) {
+    const dec = decodeUrlSafeBase64(raw);
+    if (dec) {
+      // typowo: "comment:..._<NUM>"
+      let m = dec.match(/_(\d{6,})\s*$/);
+      if (m) return m[1];
+
+      // fallback: ostatni długi numer w środku stringa
+      m = dec.match(/(\d{6,})\s*$/);
+      if (m) return m[1];
+    }
+
+    // 4) regex po samym raw/id (gdy już zawiera _123...)
+    let m2 = String(raw).match(/_(\d{6,})\b/);
+    if (m2) return m2[1];
+
+    m2 = String(raw).match(/\b(\d{6,})\b/);
+    if (m2) return m2[1];
+  }
+
+  return null;
+}
+
+/* ============================================================
    FILTR WIEKU KOMENTARZA – NIE WYSYŁAMY STARYCH
    ============================================================ */
 
@@ -50,7 +101,7 @@ function filterByAge(comments) {
   const now = Date.now();
 
   return comments.filter((c) => {
-    if (!c.time || c.time.trim() === "") return false; // komentarz bez czasu = odrzucamy
+    if (!c.time || String(c.time).trim() === "") return false; // komentarz bez czasu = odrzucamy
 
     const abs = parseFbRelativeTime(c.time);
     if (!abs) return false;
@@ -73,26 +124,47 @@ async function sendWebhook(post, newComments, newCount, oldCount) {
   }
 
   /* --------------------------------------------
-       1) Normalizacja czasu i dodanie pól ISO
+       1) Normalizacja czasu i ID (numeryczne)
      -------------------------------------------- */
 
-  const normalized = newComments.map((c) => {
+  const normalized = (newComments || []).map((c) => {
     const iso = parseFbRelativeTime(c.time);
+    const numericId = pickNumericId(c);
+
     return {
-      ...c,
+      // UWAGA: id ma być TYLKO numeryczne
+      id: numericId,
+      // zachowaj resztę pól, ale usuń id_raw żeby nie wyciekało base64
+      author: c.author ?? null,
+      text: c.text ?? null,
+      time: c.time ?? null,
+      permalink: c.permalink ?? null,
+      pos: c.pos ?? null,
+
+      // zostawiamy ISO do filtra / downstream
       fb_time_raw: c.time || null,
       fb_time_iso: iso ? iso.toISOString() : null,
     };
   });
 
+  // jeśli z jakiegoś powodu nie udało się zrobić numerycznego id — odfiltruj (bo chcesz tylko cyfry)
+  const onlyWithNumericId = normalized.filter((c) => c.id && /^\d+$/.test(String(c.id)));
+
+  if (onlyWithNumericId.length !== normalized.length) {
+    console.log("[Webhook] Odfiltrowałem komentarze bez numerycznego id:", {
+      before: normalized.length,
+      after: onlyWithNumericId.length,
+    });
+  }
+
   /* --------------------------------------------
        2) Filtrowanie komentarzy po wieku
      -------------------------------------------- */
 
-  const freshOnly = filterByAge(normalized);
+  const freshOnly = filterByAge(onlyWithNumericId);
 
   console.log("[Webhook] Filtr wieku komentarzy:", {
-    before: normalized.length,
+    before: onlyWithNumericId.length,
     after: freshOnly.length,
   });
 
