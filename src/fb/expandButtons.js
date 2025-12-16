@@ -6,8 +6,10 @@
 // Obsługa PL + EN + ogólne wzorce (comment/reply/more).
 // Zwraca true, jeśli COŚ zostało kliknięte.
 
+import { INCLUDE_REPLIES } from "../config.js";
+
 async function clickOneExpandButton(page) {
-  const res = await page.evaluate(() => {
+  const res = await page.evaluate((includeReplies) => {
     const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
       location.href
     );
@@ -111,9 +113,12 @@ async function clickOneExpandButton(page) {
       ) {
         return { kind: "more-comments", priority: 3 };
       }
-      if (hasReplyWord && (hasMoreWord || /\d/.test(text))) {
+
+      // ✅ ON/OFF odpowiedzi
+      if (includeReplies && hasReplyWord && (hasMoreWord || /\d/.test(text))) {
         return { kind: "more-replies", priority: 2 };
       }
+
       if (
         text === "zobacz więcej" ||
         text === "see more" ||
@@ -163,7 +168,8 @@ async function clickOneExpandButton(page) {
     } catch (e) {
       return { clicked: false };
     }
-  });
+  }, INCLUDE_REPLIES);
+
   if (res && res.clicked) {
     console.log(
       `[FB] -> klik expand '${res.text}' (kind=${res.kind})`

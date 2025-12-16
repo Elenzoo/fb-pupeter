@@ -1,3 +1,4 @@
+// config.js
 import "dotenv/config";
 
 /* ==================== GOOGLE SHEETS – NOWY SYSTEM ==================== */
@@ -76,6 +77,11 @@ const EXPAND_COMMENTS =
 const USE_UI_HANDLERS =
   process.env.USE_UI_HANDLERS === "false" ? false : true;
 
+// NOWE: przełącznik rozwijania odpowiedzi (replies)
+// INCLUDE_REPLIES=false → nie klikamy "Wyświetl X odpowiedzi / replies"
+const INCLUDE_REPLIES =
+  process.env.INCLUDE_REPLIES === "false" ? false : true;
+
 // co ile sekund lecimy po postach (podstawowy interwał)
 // można nadpisać w .env: CHECK_INTERVAL_MS=60000
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
@@ -87,6 +93,7 @@ export {
   // używane przez watcher.js / comments.js
   EXPAND_COMMENTS,
   USE_UI_HANDLERS,
+  INCLUDE_REPLIES,
   CHECK_INTERVAL_MS,
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,
