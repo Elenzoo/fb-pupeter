@@ -6,7 +6,7 @@ import { acceptCookies, saveCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "./login.js";
 import { clickOneExpandButton } from "./expandButtons.js";
 import { safeGoto } from "../utils/navigation.js";
-import { getUiCommentInfo } from "./uicommentinfo.js";
+import { getUiCommentInfo } from "./uiCommentInfo.js";
 
 import * as uiPhoto from "./ui/photo.js";
 import * as uiPost from "./ui/post.js";

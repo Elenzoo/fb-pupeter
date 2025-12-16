@@ -17,3 +17,13 @@ dist/
 # lokalne helpery
 export_files.js*
 debug.js*
+
+# server junk / snapshots
+backups/
+*.log
+run.log
+debug-*.png
+debug-*.txt
+cookies.json.bak*
+src_backup_ua_*/
+*.bak*

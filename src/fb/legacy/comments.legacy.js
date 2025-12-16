@@ -8,7 +8,7 @@ import { scrollPost } from "../scroll.js";
 import { acceptCookies, saveCookies } from "../cookies.js";
 import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "../login.js";
 import { clickOneExpandButton } from "../expandButtons.js";
-import { getUiCommentInfo } from "../uicommentinfo.js";
+import { getUiCommentInfo } from "../uiCommentInfo.js";
 
 
 const NAV_TIMEOUT_MS = process.env.NAV_TIMEOUT_MS

@@ -835,7 +835,7 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
   await waitForScrollStop(page, { timeoutMs: 2400, stableMs: 320 });
 
   const MAX_ROUNDS = 600;
-  const MAX_NO_PROGRESS = 10;
+  const MAX_NO_PROGRESS = 60;
 
   let noProgress = 0;
   let lastAnchors = await getCurrentCommentAnchorCount(page);
@@ -849,7 +849,7 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
 
     const after = await getCurrentCommentAnchorCount(page);
 
-    const progressed = scrollInfo.after !== scrollInfo.before || clicks > 0 || after > before;
+    const progressed = scrollInfo.after !== scrollInfo.before || clicks > 0;
 
     if (progressed) noProgress = 0;
     else noProgress++;

@@ -4,7 +4,7 @@ import { sleepRandom } from "../../utils/sleep.js";
 import { scrollPost } from "../scroll.js";
 import { acceptCookies, saveCookies } from "../cookies.js";
 import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "../login.js";
-import { getUiCommentInfo } from "../uicommentinfo.js";
+import { getUiCommentInfo } from "../uiCommentInfo.js";
 
 export const type = "photo";
 

@@ -21,6 +21,10 @@ export async function safeGoto(page, url, label = "goto", options = {}) {
         `[NAV] (${label}) próba ${attempt}/${MAX_ATTEMPTS}: ${url}`
       );
 
+  // === FORCE DESKTOP PROFILE (SERVER FIX) ===
+  await page.setViewport({ width: 1366, height: 768 });
+// DISABLED UA // === END FORCE DESKTOP PROFILE ===
+
       await page.goto(url, finalOptions);
 
       console.log(`[NAV] (${label}) OK na próbie ${attempt}`);

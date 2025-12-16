@@ -2,7 +2,7 @@ import { safeGoto } from "../../utils/navigation.js";
 import { sleepRandom } from "../../utils/sleep.js";
 import { acceptCookies } from "../cookies.js";
 import { fbLogin, checkIfLogged } from "../login.js";
-import { getUiCommentInfo } from "../uicommentinfo.js";
+import { getUiCommentInfo } from "../uiCommentInfo.js";
 
 /** Typ handlera UI */
 export const type = "videos";
