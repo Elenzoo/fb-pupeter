@@ -653,7 +653,7 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
       `[FB][ui:videos] cycle ${i}/${maxCycles} action=${r?.action} acted=${!!r?.acted} noProgress=${noProgress}`
     );
 
-    if (noProgress >= 12) {
+    if (noProgress >= 10) {
       console.log("[FB][ui:videos] Brak postępu – kończę ładowanie.");
       break;
     }
