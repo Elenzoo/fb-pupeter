@@ -70,6 +70,12 @@ async function debugOuterStats(page, outerHandle) {
     const r = outer.getBoundingClientRect();
     const style = getComputedStyle(outer);
 
+    const articles = Array.from(outer.querySelectorAll("[role='article']"));
+    const articlesComment = articles.filter((a) => {
+      const aria = (a.getAttribute("aria-label") || "").toLowerCase();
+      return aria.includes("komentarz") || aria.includes("comment");
+    });
+
     const anchors = Array.from(
       outer.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
     );
@@ -81,11 +87,10 @@ async function debugOuterStats(page, outerHandle) {
       (allText.match(/view more comments/g) || []).length +
       (allText.match(/see more comments/g) || []).length;
 
+    // TOP aria-labels (często w outer widać czy to powiadomienia / sidebar / komentarze)
     const labels = [];
     const nodes = Array.from(
-      outer.querySelectorAll(
-        "button,div[role='button'],span[role='button'],a,abbr,[role='article'],div,span"
-      )
+      outer.querySelectorAll("button,div[role='button'],span[role='button'],a,abbr,[role='article']")
     ).slice(0, 4000);
 
     for (const el of nodes) {
@@ -110,6 +115,8 @@ async function debugOuterStats(page, outerHandle) {
         position: style.position,
       },
       counts: {
+        roleArticle: articles.length,
+        roleArticleComment: articlesComment.length,
         anchors: anchors.length,
         moreHits,
       },
@@ -190,65 +197,31 @@ function parseBestCommentsCountFromBlob(blobStr) {
   return best;
 }
 
-function pickBestCount(candidates) {
-  const nums = candidates.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0);
-  if (!nums.length) return null;
-
-  nums.sort((a, b) => b - a);
-  const best = nums[0];
-  const second = nums[1];
-
-  if (second && best >= 2 * second && second < 150) return best;
-
-  return best;
-}
-
 /* ============================================================
    =================== COMMENTS CONTAINER FIND =================
    ============================================================ */
 
-/**
- * WATCH FIX:
- * - NIE polegamy na h2 "Komentarze" (często go nie ma w Watch).
- * - Szukamy największego klastra linków comment_id/reply_comment_id na stronie.
- */
 async function findCommentsOuter(page) {
-  const handle = await page.evaluateHandle(() => {
-    const nodes = Array.from(document.querySelectorAll("div, section, main, article")).slice(0, 30000);
+  // h2 "Komentarze" / "Comments" -> parent
+  const h2 = await page
+    .$x("//h2[normalize-space()='Komentarze' or normalize-space()='Comments']")
+    .then((arr) => arr?.[0] || null);
 
-    const visible = (el) => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect?.();
-      return r && r.width >= 220 && r.height >= 220;
-    };
+  if (!h2) return null;
 
-    let best = null;
-    let bestScore = -1;
-
-    for (const el of nodes) {
-      if (!visible(el)) continue;
-
-      const anchors = el.querySelectorAll?.("a[href*='comment_id'], a[href*='reply_comment_id']");
-      const aCount = anchors ? anchors.length : 0;
-      if (aCount < 3) continue;
-
-      const txt = (el.innerText || "").toLowerCase();
-      const hasWords =
-        txt.includes("komentarz") || txt.includes("komentarzy") || txt.includes("comments") || txt.includes("comment");
-
-      // score: anchor count + bonus za słowa “komentarz”
-      const score = aCount + (hasWords ? 12 : 0);
-
-      if (score > bestScore) {
-        bestScore = score;
-        best = el;
-      }
+  const outer = await page.evaluateHandle((node) => {
+    const isEl = (x) => x && x.nodeType === 1;
+    let cur = node;
+    for (let i = 0; i < 10; i++) {
+      if (!isEl(cur)) break;
+      const el = cur;
+      if (el.classList && el.classList.contains("x1jx94hy")) return el;
+      cur = el.parentElement;
     }
+    return node.parentElement || null;
+  }, h2);
 
-    return best || null;
-  });
-
-  const el = handle?.asElement?.() || null;
+  const el = outer?.asElement?.() || null;
   if (!el) return null;
 
   const ok = await page.evaluate((o) => o && document.contains(o), el).catch(() => false);
@@ -281,7 +254,7 @@ async function findScrollableInOuter(page, outerHandle) {
 
     const nodes = Array.from(outer.querySelectorAll("div,section,main,article"))
       .filter(isVisible)
-      .slice(0, 20000);
+      .slice(0, 15000);
 
     let best = null;
     let bestScore = -1;
@@ -296,8 +269,7 @@ async function findScrollableInOuter(page, outerHandle) {
         txt.includes("wyświetl więcej komentarzy") ||
         txt.includes("view more comments") ||
         txt.includes("see more comments") ||
-        txt.includes("zobacz więcej komentarzy") ||
-        txt.includes("zobacz wcześniejsze komentarze");
+        txt.includes("zobacz więcej komentarzy");
 
       const score = delta + (hasMore ? 100000 : 0);
       if (score > bestScore) {
@@ -372,6 +344,21 @@ async function clickMoreCommentsIfPresent(page, outerHandle) {
   return !!clicked;
 }
 
+async function getVisibleCommentCount(page, outerHandle) {
+  if (!outerHandle) return 0;
+  return page
+    .evaluate((outer) => {
+      const articles = Array.from(outer.querySelectorAll("[role='article']"));
+      let count = 0;
+      for (const a of articles) {
+        const aria = (a.getAttribute("aria-label") || "").toLowerCase();
+        if (aria.includes("komentarz") || aria.includes("comment")) count++;
+      }
+      return count;
+    }, outerHandle)
+    .catch(() => 0);
+}
+
 async function getAnchorsCount(page, outerHandle) {
   if (!outerHandle) return 0;
   return page
@@ -392,27 +379,14 @@ async function getAnchorsCount(page, outerHandle) {
     .catch(() => 0);
 }
 
-async function getCommentRootsCount(page, outerHandle) {
-  if (!outerHandle) return 0;
-  return page
-    .evaluate((outer) => {
-      const as = Array.from(
-        outer.querySelectorAll("a[href*='comment_id'], a[href*='reply_comment_id']")
-      );
-      const roots = new Set();
-      for (const a of as) {
-        const root = a.closest?.("[role='article']") || a.closest?.("div");
-        if (root) roots.add(root);
-      }
-      return roots.size;
-    }, outerHandle)
-    .catch(() => 0);
-}
-
 /* ============================================================
    ============================ API ============================
    ============================================================ */
 
+/**
+ * Przygotowanie strony dla wideo w Watch.
+ * ZASADA: nic nie klikamy poza UI Watch.
+ */
 export async function prepare(page, url) {
   console.log(`[FB][ui:watch] Otwieranie wideo (Watch): ${url}`);
   const ok = await safeGoto(page, url, "watch", { waitUntil: "networkidle2", timeout: 90000 });
@@ -454,6 +428,7 @@ export async function prepare(page, url) {
 
   await acceptCookies(page, "watch");
 
+  // pauza wideo (bez klikania UI)
   try {
     await page.evaluate(() => {
       const vids = Array.from(document.querySelectorAll("video"));
@@ -477,40 +452,39 @@ export async function prepare(page, url) {
   }
 }
 
+/**
+ * Pobiera liczbę komentarzy dla wideo (Watch).
+ */
 export async function getCommentCount(page, url) {
   const uiInfo = await getUiCommentInfo(page).catch(() => null);
-
-  const parsedFromUiRaw = uiInfo?.raw ? parseBestCommentsCountFromBlob(uiInfo.raw) : null;
-
-  let parsedFromOuter = null;
-  const outer = await findCommentsOuter(page).catch(() => null);
-  if (outer) {
-    parsedFromOuter = await page
-      .evaluate((o) => (o.innerText || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim(), outer)
-      .then((txt) => parseBestCommentsCountFromBlob(txt))
-      .catch(() => null);
-  }
-
-  const uiDirect =
-    uiInfo && typeof uiInfo.comments === "number" && uiInfo.comments > 0 ? uiInfo.comments : null;
-
-  const totalComments = pickBestCount([parsedFromOuter, parsedFromUiRaw, uiDirect]);
-
-  console.log(`[FB][ui:watch][DBG] count sources:`, {
-    ui_source: uiInfo?.source || null,
-    ui_viewType: uiInfo?.viewType || null,
-    ui_comments: uiDirect,
-    parsedFromUiRaw,
-    parsedFromOuter,
-    picked: totalComments,
+  console.log(`[FB][ui:watch][DBG] UI info:`, {
+    source: uiInfo?.source,
+    raw: uiInfo?.raw ? String(uiInfo.raw).slice(0, 250) + "..." : null,
+    viewType: uiInfo?.viewType,
+    comments: uiInfo?.comments,
   });
 
-  let final = totalComments;
+  let totalComments = null;
 
-  console.log(`[FB][ui:watch] Liczba komentarzy wg UI: ${final !== null ? final : "brak danych"}`);
-  return final;
+  if (uiInfo && typeof uiInfo.comments === "number" && uiInfo.comments > 0) {
+    totalComments = uiInfo.comments;
+  } else if (uiInfo?.raw) {
+    const parsed = parseBestCommentsCountFromBlob(uiInfo.raw);
+    if (parsed) {
+      totalComments = parsed;
+      console.log(`[FB][ui:watch][DBG] Parsed from uiInfo.raw => ${parsed}`);
+    }
+  }
+
+  console.log(`[FB][ui:watch] Liczba komentarzy wg UI: ${totalComments !== null ? totalComments : "brak danych"}`);
+  return totalComments;
 }
 
+/**
+ * Wczytuje wszystkie komentarze w trybie Watch.
+ * -> jedyne kliki: "Wyświetl więcej komentarzy"
+ * -> scroll: wheel na kontenerze komentarzy
+ */
 export async function loadAllComments(page, { expectedTotal } = {}) {
   console.log("[FB][ui:watch] Ładuję wszystkie komentarze (Watch)...");
 
@@ -534,90 +508,74 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
   }
 
   const scroller = await findScrollableInOuter(page, outer);
-
-  if (DEBUG_WATCH) {
-    if (scroller) {
-      const sstats = await debugScrollerStats(page, scroller);
-      console.log("[FB][ui:watch][DBG] SCROLLER stats:", sstats);
-      await shotElement(page, scroller, "watch-scroller.png");
-    } else {
-      console.log("[FB][ui:watch][DBG] SCROLLER NOT FOUND -> fallback: window scroll");
+  if (!scroller) {
+    console.log("[FB][ui:watch][DBG] SCROLLER NOT FOUND -> return");
+    if (DEBUG_WATCH) {
+      const stats = await debugOuterStats(page, outer);
+      console.log("[FB][ui:watch][DBG] OUTER stats (no scroller):", stats);
       await safeShot(page, "watch-no-scroller.png");
     }
+    return;
   }
 
+  if (DEBUG_WATCH) {
+    const sstats = await debugScrollerStats(page, scroller);
+    console.log("[FB][ui:watch][DBG] SCROLLER stats:", sstats);
+    await shotElement(page, scroller, "watch-scroller.png");
+  }
+
+  let prevArticles = await getVisibleCommentCount(page, outer);
   let prevAnchors = await getAnchorsCount(page, outer);
-  let prevRoots = await getCommentRootsCount(page, outer);
   let noProgress = 0;
 
   for (let cycle = 1; cycle <= maxCycles; cycle++) {
     const clicked = await clickMoreCommentsIfPresent(page, outer);
 
-    let wheeled = false;
+    // scrollTop before/after
     let beforeST = 0;
     let afterST = 0;
+    try {
+      beforeST = await page.evaluate((s) => s.scrollTop || 0, scroller).catch(() => 0);
+    } catch {}
 
-    if (scroller) {
-      try {
-        beforeST = await page.evaluate((s) => s.scrollTop || 0, scroller).catch(() => 0);
-      } catch {}
-
-      try {
-        const box = await scroller.boundingBox();
-        if (box && box.width > 5 && box.height > 5) {
-          await page.mouse.move(box.x + box.width / 2, box.y + Math.min(80, box.height / 2));
-          await page.mouse.wheel({ deltaY: Math.max(500, Math.floor(box.height * 0.9)) });
-          wheeled = true;
-        }
-      } catch {}
-
-      await sleepRandom(450, 850);
-
-      try {
-        afterST = await page.evaluate((s) => s.scrollTop || 0, scroller).catch(() => 0);
-      } catch {}
-    } else {
-      try {
-        beforeST = await page.evaluate(() => {
-          const el = document.scrollingElement || document.documentElement;
-          return el ? el.scrollTop || 0 : 0;
-        });
-      } catch {}
-      try {
-        await page.mouse.wheel({ deltaY: 900 });
+    let wheeled = false;
+    try {
+      const box = await scroller.boundingBox();
+      if (box && box.width > 5 && box.height > 5) {
+        await page.mouse.move(box.x + box.width / 2, box.y + Math.min(80, box.height / 2));
+        await page.mouse.wheel({ deltaY: Math.max(500, Math.floor(box.height * 0.9)) });
         wheeled = true;
-      } catch {}
-      await sleepRandom(450, 850);
-      try {
-        afterST = await page.evaluate(() => {
-          const el = document.scrollingElement || document.documentElement;
-          return el ? el.scrollTop || 0 : 0;
-        });
-      } catch {}
-    }
+      }
+    } catch {}
 
+    await sleepRandom(450, 850);
+
+    try {
+      afterST = await page.evaluate((s) => s.scrollTop || 0, scroller).catch(() => 0);
+    } catch {}
+
+    const curArticles = await getVisibleCommentCount(page, outer);
     const curAnchors = await getAnchorsCount(page, outer);
-    const curRoots = await getCommentRootsCount(page, outer);
 
-    const progressed = curAnchors > prevAnchors || curRoots > prevRoots;
+    const progressed = curArticles > prevArticles || curAnchors > prevAnchors;
 
     if (progressed) {
+      prevArticles = curArticles;
       prevAnchors = curAnchors;
-      prevRoots = curRoots;
       noProgress = 0;
     } else {
       noProgress++;
     }
 
     console.log(
-      `[FB][ui:watch][DBG] cycle ${cycle}/${maxCycles}: clickedMore=${clicked}, wheel=${wheeled}, scrollTop ${beforeST} -> ${afterST}, roots=${curRoots}, anchors=${curAnchors}, noProgress=${noProgress}`
+      `[FB][ui:watch][DBG] cycle ${cycle}/${maxCycles}: clickedMore=${clicked}, wheel=${wheeled}, scrollTop ${beforeST} -> ${afterST}, articles=${curArticles}, anchors=${curAnchors}, noProgress=${noProgress}`
     );
 
     if (DEBUG_WATCH && cycle === 5) {
       await safeShot(page, "watch-after-5.png");
     }
 
-    if (noProgress >= 8) {
+    if (noProgress >= 6) {
       console.log("[FB][ui:watch] Brak postępu przez kilka cykli – przerywam.");
       if (DEBUG_WATCH) await safeShot(page, "watch-stuck.png");
       break;
@@ -627,123 +585,64 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
   console.log("[FB][ui:watch] Załadowano wszystkie dostępne komentarze (Watch).");
 }
 
+/**
+ * Ekstrahuje komentarze spod wideo (Watch).
+ * (szerszy selektor: role=article + aria-label)
+ */
 export async function extractComments(page, url) {
-  const outer = await findCommentsOuter(page).catch(() => null);
-  if (!outer) {
-    console.log("[FB][ui:watch][DBG] extractComments: OUTER NOT FOUND");
-    if (DEBUG_WATCH) await safeShot(page, "watch-extract-no-outer.png");
-    return [];
-  }
-
-  const comments = await page.evaluate((outerEl) => {
-    function norm(s) {
-      return String(s || "")
-        .replace(/\u00a0/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function toAbsHref(href) {
-      if (!href) return null;
-      if (href.startsWith("http")) return href;
-      if (href.startsWith("/")) return `${location.origin}${href}`;
-      return href;
-    }
-
+  const comments = await page.evaluate(() => {
     function getCommentId(href) {
       try {
         const u = new URL(href, location.origin);
-        return u.searchParams.get("reply_comment_id") || u.searchParams.get("comment_id");
+        const cid = u.searchParams.get("comment_id");
+        const rid = u.searchParams.get("reply_comment_id");
+        return rid || cid;
       } catch {
         return null;
       }
     }
 
-    function normalizeTime(text) {
-      if (!text) return null;
-
-      const t = norm(text).toLowerCase();
-      if (!t) return null;
-
-      if (t.includes("przed chwilą")) return "0 min";
-      if (t === "właśnie teraz" || t === "teraz" || t === "now" || t === "just now") return "0 min";
-      if (t.includes("wczoraj") || t.includes("yesterday")) return "wczoraj";
-
-      if (/^\d+\s*(sek|sek\.|s|sec|secs|second|seconds)\b/.test(t)) return t;
-      if (/^\d+\s*(min|min\.|m|minut|minuty|minutę)\b/.test(t)) return t;
-      if (/^\d+\s*(godz|godz\.|h|hr|hour|hours)\b/.test(t)) return t;
-      if (/^\d+\s*(dzień|dni|d)\b/.test(t)) return t;
-      if (/^\d+\s*(tyg|tyg\.|week|weeks)\b/.test(t)) return t;
-
-      return null;
+    function pickText(el) {
+      if (!el) return "";
+      return (el.textContent || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
     }
 
-    function findTimeInRoot(root) {
-      if (!root) return null;
+    const articles = Array.from(document.querySelectorAll("[role='article']")).filter((a) => {
+      const aria = (a.getAttribute("aria-label") || "").toLowerCase();
+      return aria.includes("komentarz") || aria.includes("comment");
+    });
 
-      const els = Array.from(root.querySelectorAll("abbr, a, span")).slice(0, 250);
-      for (const el of els) {
-        const aria = el.getAttribute?.("aria-label");
-        const t1 = normalizeTime(aria);
-        if (t1) return t1;
-
-        const title = el.getAttribute?.("title");
-        const t2 = normalizeTime(title);
-        if (t2) return t2;
-
-        const txt = el.textContent;
-        const t3 = normalizeTime(txt);
-        if (t3) return t3;
-      }
-      return null;
-    }
-
-    const anchors = Array.from(
-      outerEl.querySelectorAll("a[href*='comment_id='], a[href*='reply_comment_id=']")
-    );
-
-    const seenRoots = new Set();
     const out = [];
 
-    for (const a of anchors) {
-      const href = a.getAttribute("href") || a.href || null;
-      const absHref = toAbsHref(href);
+    for (const art of articles) {
+      try {
+        const linkEl = art.querySelector("a[href*='comment_id='], a[href*='reply_comment_id=']");
+        const href = linkEl?.href || null;
+        const id = href ? getCommentId(href) : null;
 
-      const id = absHref ? getCommentId(absHref) : null;
-      if (!id) continue;
+        const author =
+          pickText(art.querySelector("a[role='link'] span")) ||
+          pickText(art.querySelector("strong")) ||
+          null;
 
-      const root = a.closest?.("[role='article']") || a.closest?.("div") || null;
-      if (!root) continue;
-      if (seenRoots.has(root)) continue;
-      seenRoots.add(root);
+        let text = "";
+        const autos = Array.from(art.querySelectorAll("[dir='auto']")).map(pickText).filter(Boolean);
+        if (autos.length) {
+          text = autos.length >= 2 ? autos[autos.length - 1] : autos[0];
+        }
 
-      const author =
-        norm(root.querySelector("a[role='link'] span")?.textContent) ||
-        norm(root.querySelector("strong")?.textContent) ||
-        null;
+        const permalink = href || null;
+        if (!author && !text) continue;
 
-      const autos = Array.from(root.querySelectorAll("[dir='auto']"))
-        .map((el) => norm(el.textContent))
-        .filter(Boolean);
-
-      let text = "";
-      if (autos.length) text = autos[autos.length - 1];
-
-      const time = findTimeInRoot(root);
-
-      if (!author && !text) continue;
-
-      out.push({
-        id,
-        author,
-        text,
-        permalink: absHref,
-        time: time || null,
-      });
+        out.push({ id, author, text, permalink, time: null });
+      } catch {}
     }
 
     return out;
-  }, outer);
+  });
 
   console.log(`[FB][ui:watch] Wyekstrahowano komentarzy: ${comments.length}`);
   return comments;

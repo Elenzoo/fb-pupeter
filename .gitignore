@@ -1,29 +1,7 @@
-# katalogi
 node_modules/
-export_fb_watcher/
-
-# sekrety
-.env
 cookies.json
-config/links.json
-
-# cache
-data/comments-cache.json
-
-# generowane pliki
-npm-debug.log*
-dist/
-
-# lokalne helpery
-export_files.js*
-debug.js*
-
-# server junk / snapshots
-backups/
+.env
+.env.*
 *.log
-run.log
-debug-*.png
-debug-*.txt
-cookies.json.bak*
-src_backup_ua_*/
-*.bak*
+screenshots/
+.cache/
