@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Panel FB Watcher</title>
+
+  <style>
+    :root{
+      --bg:#0b0f14;
+      --card:#121926;
+      --card2:#0b1220;
+      --border:#223047;
+      --border2:#2a3a55;
+      --text:#e7eef7;
+      --muted:rgba(231,238,247,.75);
+      --primary:#2563eb;
+      --danger:#b91c1c;
+      --ok:#34d399;
+      --err:#f87171;
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --radius:14px;
+    }
+
+    * { box-sizing:border-box; }
+    body {
+      font-family: system-ui, Arial;
+      margin: 16px;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    h2 { margin: 6px 0 6px; }
+    h3 { margin: 6px 0 12px; }
+
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+    .card {
+      background: var(--card);
+      border:1px solid var(--border);
+      border-radius: var(--radius);
+      padding:14px;
+      margin:12px 0;
+      box-shadow: var(--shadow);
+    }
+
+    input, textarea, button, select {
+      font: inherit;
+      border-radius:12px;
+      border:1px solid var(--border2);
+      background: var(--card2);
+      color: var(--text);
+      padding:10px 12px;
+      outline: none;
+    }
+    input:focus, textarea:focus, select:focus {
+      border-color: rgba(37, 99, 235, .75);
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, .18);
+    }
+
+    input, textarea { width: 100%; }
+    textarea { resize: vertical; min-height: 90px; }
+
+    button { cursor:pointer; transition: transform .04s ease, opacity .2s ease, background .2s ease; }
+    button:active { transform: translateY(1px); }
+    button.primary { background: var(--primary); border-color: var(--primary); }
+    button.danger { background: var(--danger); border-color: var(--danger); }
+    button.ghost { background: transparent; }
+    button.small { padding:8px 10px; border-radius: 10px; }
+
+    label { font-size:12px; opacity:0.85; display:block; margin:8px 0 6px; }
+
+    .muted { opacity:0.78; font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    .sep { height:1px; background: var(--border); margin:10px 0; opacity:0.8; }
+
+    .thumb {
+      width:64px; height:40px;
+      object-fit:cover;
+      border-radius:10px;
+      border:1px solid var(--border);
+      background: var(--card2);
+    }
+
+    /* ===== tabela ===== */
+    .tableWrap {
+      width: 100%;
+      overflow-x: auto;
+      border-radius: 12px;
+      border: 1px solid rgba(34,48,71,.45);
+      background: rgba(11,18,32,.25);
+    }
+
+    table { width:100%; border-collapse: collapse; table-layout: fixed; min-width: 980px; }
+    th, td {
+      border-bottom:1px solid rgba(34,48,71,.7);
+      padding:10px;
+      text-align:left;
+      vertical-align:top;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+    th { font-size: 12px; opacity:.9; position: sticky; top: 0; background: rgba(18,25,38,.96); backdrop-filter: blur(8px); }
+
+    /* kolumny */
+    th.col-id,  td.col-id  { width: 170px; }
+    th.col-url, td.col-url { width: 620px; } /* szersza kolumna link */
+    th.col-name,td.col-name{ width: 170px; }
+    th.col-img, td.col-img { width: 120px; }
+    th.col-desc,td.col-desc{ width: 260px; }
+    th.col-act, td.col-act { width: 110px; text-align:center; }
+    th.col-btn, td.col-btn { width: 210px; } /* miejsce na Edytuj + Usuń */
+
+    /* URL: pełny, zawijany */
+    td.col-url a{
+      color: #93c5fd;
+      text-decoration: underline;
+      white-space: normal;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+      display:inline;
+    }
+
+    /* wrapper dla linka + ikonki kopiuj */
+    .urlWrap{
+      display:flex;
+      align-items:flex-start;
+      gap:10px;
+    }
+    .urlWrap a{
+      flex: 1;
+      min-width: 0;
+    }
+
+    /* ikonka kopiuj – mała, jak w necie */
+    .iconBtn{
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      border-radius: 10px;
+      background: transparent;
+      border: 1px solid rgba(42,58,85,.9);
+      opacity: .9;
+      flex: 0 0 auto;
+    }
+    .iconBtn:hover{
+      opacity: 1;
+      background: rgba(37,99,235,.15);
+    }
+    .iconBtn:active{
+      transform: translateY(1px);
+    }
+    .iconBtn svg{
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: rgba(231,238,247,.95);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    /* akcje w tabeli */
+    .actionsWrap{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content:flex-start;
+      flex-wrap:nowrap;
+    }
+
+    /* ===== status ===== */
+    .hint { margin-top:10px; }
+    .hint.ok { color: #a7f3d0; }
+    .hint.err { color: #fca5a5; }
+
+    /* ===== logi: proporcje ===== */
+    .logsBox {
+      display:flex;
+      flex-direction: column;
+      gap:10px;
+    }
+    #logs {
+      height: 200px;
+      min-height: 160px;
+      max-height: 520px;
+    }
+    .logsExpanded #logs { height: 420px; }
+
+    /* ===== modal ===== */
+    .modalOverlay{
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.55);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding: 18px;
+      z-index: 9999;
+    }
+    .modalOverlay.show{ display:flex; }
+    .modal{
+      width: min(640px, 100%);
+      border-radius: 16px;
+      border: 1px solid rgba(34,48,71,.9);
+      background: rgba(18,25,38,.98);
+      box-shadow: 0 20px 60px rgba(0,0,0,.55);
+      padding: 16px;
+    }
+    .modal h4{ margin:0 0 8px; font-size: 16px; }
+    .modal .modalBody{ color: rgba(231,238,247,.85); font-size: 13px; line-height: 1.45; }
+    .modal .modalActions{
+      display:flex;
+      justify-content:flex-end;
+      gap:10px;
+      margin-top: 14px;
+    }
+    .kbd{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      opacity:.9;
+      padding: 2px 6px;
+      border:1px solid rgba(42,58,85,.9);
+      border-radius: 8px;
+      background: rgba(11,18,32,.55);
+    }
+
+    @media (max-width: 860px){
+      table { min-width: 980px; }
+    }
+  </style>
+</head>
+
+<body>
+  <h2>FB Watcher — Panel</h2>
+  <div class="muted">Panel działa lokalnie. Token jest wymagany do akcji.</div>
+
+  <div class="card">
+    <div class="row">
+      <div style="flex:1; min-width:260px;">
+        <label>Token panelu</label>
+        <input id="token" placeholder="PANEL_TOKEN z .env" />
+      </div>
+      <div style="display:flex; gap:10px; align-items:flex-end;">
+        <button class="primary" id="saveToken">Zapisz token</button>
+        <button id="refresh">Odśwież</button>
+      </div>
+    </div>
+
+    <div id="status" class="muted hint" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card">
+    <h3>Ustawienia (.env)</h3>
+
+    <div class="row">
+      <div style="flex:1; min-width:260px;">
+        <label>E-mail Facebook</label>
+        <input id="FB_EMAIL" />
+      </div>
+      <div style="flex:1; min-width:260px;">
+        <label>Hasło Facebook</label>
+        <input id="FB_PASSWORD" type="password" />
+      </div>
+    </div>
+
+    <label>Webhook (URL)</label>
+    <input id="WEBHOOK_URL" />
+
+    <div class="row">
+      <div style="flex:1; min-width:220px;">
+        <label>Interwał sprawdzania (ms)</label>
+        <input id="CHECK_INTERVAL_MS" />
+      </div>
+      <div style="flex:2; min-width:260px;">
+        <label>Arkusz z postami (CSV export)</label>
+        <input id="POSTS_SHEET_URL" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div style="flex:1; min-width:220px;">
+        <label>Tryb bez okna (headless)</label>
+        <select id="HEADLESS_BROWSER">
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      </div>
+      <div style="flex:1; min-width:220px;">
+        <label>Obsługa UI (handlery)</label>
+        <select id="USE_UI_HANDLERS">
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      </div>
+      <div style="flex:1; min-width:220px;">
+        <label>Uwzględniaj odpowiedzi</label>
+        <select id="INCLUDE_REPLIES">
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <button class="primary" id="saveEnv">Zapisz ustawienia</button>
+      <button id="pm2Start">Start watchera</button>
+      <button id="pm2Stop">Stop watchera</button>
+      <button id="pm2Restart">Restart watchera</button>
+      <button class="danger" id="clearCookies">Wyczyść cookies</button>
+    </div>
+
+    <div id="envMsg" class="muted hint" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card">
+    <h3>Posty (data/posts.json)</h3>
+
+    <div class="row">
+      <div style="flex:2; min-width:260px;">
+        <label>Nowy URL posta</label>
+        <input id="newPostUrl" placeholder="https://www.facebook.com/..." />
+      </div>
+
+      <div style="flex:1; min-width:220px;">
+        <label>Nazwa</label>
+        <input id="newPostName" placeholder="np. A1" />
+      </div>
+
+      <div style="flex:1; min-width:260px;">
+        <label>URL zdjęcia</label>
+        <input id="newPostImage" placeholder="https://...jpg" />
+      </div>
+    </div>
+
+    <label>Opis</label>
+    <textarea id="newPostDescription" placeholder="Krótki opis..."></textarea>
+
+    <div class="row" style="margin-top:10px;">
+      <div style="min-width:220px; display:flex; align-items:center; gap:10px;">
+        <label style="margin:0; display:flex; align-items:center; gap:10px;">
+          <input type="checkbox" id="newPostActive" checked /> aktywny
+        </label>
+        <button class="primary" id="addPost">Dodaj</button>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;" class="tableWrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-id">ID</th>
+            <th class="col-url">Link</th>
+            <th class="col-name">Nazwa</th>
+            <th class="col-img">Zdjęcie</th>
+            <th class="col-desc">Opis</th>
+            <th class="col-act">Aktywny</th>
+            <th class="col-btn">Akcje</th>
+          </tr>
+        </thead>
+        <tbody id="posts"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" id="logsCard">
+    <div class="row" style="justify-content:space-between; align-items:center;">
+      <h3 style="margin:0;">Logi</h3>
+      <button class="small ghost" id="toggleLogsSize" title="Rozwiń / zwin logi">
+        Rozwiń
+      </button>
+    </div>
+
+    <div class="logsBox">
+      <div class="row">
+        <button id="loadOut">Wyjście (OUT)</button>
+        <button id="loadErr">Błędy (ERR)</button>
+
+        <input id="logLines" style="width:120px;" value="200" title="Ile linii wczytać" />
+
+        <select id="logAutoEvery" style="width:160px;" title="Jak często odświeżać">
+          <option value="0">auto: wył.</option>
+          <option value="1000">co 1 s</option>
+          <option value="2000" selected>co 2 s</option>
+          <option value="5000">co 5 s</option>
+          <option value="10000">co 10 s</option>
+        </select>
+
+        <button class="primary" id="logAutoToggle">Auto: WYŁ</button>
+
+        <label style="margin:0; display:flex; align-items:center; gap:8px;" class="muted">
+          <input type="checkbox" id="logAutoScroll" checked />
+          auto-scroll
+        </label>
+      </div>
+
+      <div class="sep"></div>
+
+      <textarea
+        id="logs"
+        class="mono"
+        readonly
+        spellcheck="false"
+        placeholder="Kliknij „Wyjście (OUT)” albo „Błędy (ERR)”, żeby wczytać logi..."></textarea>
+
+      <div id="logHint" class="muted hint"></div>
+    </div>
+  </div>
+
+  <!-- modal -->
+  <div class="modalOverlay" id="modalOverlay" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h4 id="modalTitle">Potwierdzenie</h4>
+      <div class="modalBody" id="modalBody"></div>
+      <div class="modalActions">
+        <button id="modalCancel">Anuluj</button>
+        <button class="danger" id="modalOk">Usuń</button>
+      </div>
+      <div class="muted" style="margin-top:10px;">
+        Skrót: <span class="kbd">Esc</span> zamyka okno.
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

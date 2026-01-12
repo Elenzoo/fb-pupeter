@@ -12,17 +12,14 @@ function parseFbRelativeTime(raw) {
   const t = raw.toLowerCase().trim();
   const now = new Date();
 
-  // „Przed chwilą”
   if (t.includes("przed chwilą")) return now;
 
-  // „Wczoraj”
   if (t.includes("wczoraj") || t.includes("yesterday")) {
     const d = new Date(now);
     d.setDate(d.getDate() - 1);
     return d;
   }
 
-  // np. „2 min”, „3 godz.”, „7 tyg.”, „4 dni”
   const m = t.match(/(\d+)\s*(sek|min|minut|godz|h|dni|tyg)/);
   if (!m) return null;
 
@@ -42,74 +39,69 @@ function parseFbRelativeTime(raw) {
 }
 
 /* ============================================================
-   NORMALIZACJA ID: zawsze numeryczne
-   ============================================================ */
-
-function decodeUrlSafeBase64(str) {
-  try {
-    if (!str) return null;
-    let s = String(str).trim();
-    s = s.replace(/-/g, "+").replace(/_/g, "/");
-    while (s.length % 4) s += "=";
-    const buf = Buffer.from(s, "base64");
-    const out = buf.toString("utf8");
-    return out || null;
-  } catch {
-    return null;
-  }
-}
-
-function pickNumericId(comment) {
-  // 1) preferuj id_num, jeśli jest OK
-  if (comment?.id_num && /^\d+$/.test(String(comment.id_num))) return String(comment.id_num);
-
-  // 2) czasem id już jest numeryczne
-  if (comment?.id && /^\d+$/.test(String(comment.id))) return String(comment.id);
-
-  // 3) spróbuj wyciągnąć z base64 (często kończy się "_<digits>")
-  const raw = comment?.id_raw || comment?.id || null;
-  if (raw) {
-    const dec = decodeUrlSafeBase64(raw);
-    if (dec) {
-      // typowo: "comment:..._<NUM>"
-      let m = dec.match(/_(\d{6,})\s*$/);
-      if (m) return m[1];
-
-      // fallback: ostatni długi numer w środku stringa
-      m = dec.match(/(\d{6,})\s*$/);
-      if (m) return m[1];
-    }
-
-    // 4) regex po samym raw/id (gdy już zawiera _123...)
-    let m2 = String(raw).match(/_(\d{6,})\b/);
-    if (m2) return m2[1];
-
-    m2 = String(raw).match(/\b(\d{6,})\b/);
-    if (m2) return m2[1];
-  }
-
-  return null;
-}
-
-/* ============================================================
    FILTR WIEKU KOMENTARZA – NIE WYSYŁAMY STARYCH
    ============================================================ */
 
-const MAX_AGE_MIN = 60; // ← możesz zmienić na 30 / 120 / 5 itd.
+// możesz nadpisać w .env: WEBHOOK_MAX_AGE_MIN=60
+const MAX_AGE_MIN = Number(process.env.WEBHOOK_MAX_AGE_MIN || 60);
 
 function filterByAge(comments) {
   const now = Date.now();
 
   return comments.filter((c) => {
-    if (!c.time || String(c.time).trim() === "") return false; // komentarz bez czasu = odrzucamy
+    const rel = (c?.fb_time_raw || c?.time || "").trim();
+    if (!rel) return false;
 
-    const abs = parseFbRelativeTime(c.time);
+    const abs = parseFbRelativeTime(rel);
     if (!abs) return false;
 
     const ageMinutes = (now - abs.getTime()) / 60000;
-
     return ageMinutes <= MAX_AGE_MIN;
   });
+}
+
+/* ============================================================
+   BUILD EVENT PAYLOAD (1 komentarz = 1 obiekt)
+   ============================================================ */
+
+function buildEventPayload(post, c) {
+  // meta posta (panel/sheets/env fallback)
+  const postName =
+    (post?.name && String(post.name).trim()) ||
+    POST_LABELS[post?.id] ||
+    post?.id ||
+    "post";
+
+  const postImage = (post?.image && String(post.image).trim()) || null;
+  const postDescription = (post?.description && String(post.description).trim()) || null;
+
+  const rel = (c?.fb_time_raw || c?.time || "").trim() || null;
+  const createdAt = c?.fb_time_iso || null;
+
+  return {
+    event: "new_comment",
+
+    post: {
+      id: post?.id || null,
+      name: postName,
+      description: postDescription,
+      image: postImage,
+      url: post?.url || null,
+    },
+
+    comment: {
+      id: c?.id || null,
+      author: c?.author || c?.name || null,
+      text: c?.text || c?.message || null,
+      created_at: createdAt,
+      relative_time: rel,
+    },
+
+    meta: {
+      source: "facebook",
+      detected_at: new Date().toISOString(),
+    },
+  };
 }
 
 /* ============================================================
@@ -123,49 +115,33 @@ async function sendWebhook(post, newComments, newCount, oldCount) {
     return;
   }
 
+  const list = Array.isArray(newComments) ? newComments : [];
+  if (list.length === 0) return;
+
   /* --------------------------------------------
-       1) Normalizacja czasu i ID (numeryczne)
+       1) Normalizacja czasu i dodanie pól ISO
      -------------------------------------------- */
 
-  const normalized = (newComments || []).map((c) => {
-    const iso = parseFbRelativeTime(c.time);
-    const numericId = pickNumericId(c);
-
+  const normalized = list.map((c) => {
+    const rel = (c?.time || "").trim();
+    const iso = parseFbRelativeTime(rel);
     return {
-      // UWAGA: id ma być TYLKO numeryczne
-      id: numericId,
-      // zachowaj resztę pól, ale usuń id_raw żeby nie wyciekało base64
-      author: c.author ?? null,
-      text: c.text ?? null,
-      time: c.time ?? null,
-      permalink: c.permalink ?? null,
-      pos: c.pos ?? null,
-
-      // zostawiamy ISO do filtra / downstream
-      fb_time_raw: c.time || null,
+      ...c,
+      fb_time_raw: rel || null,
       fb_time_iso: iso ? iso.toISOString() : null,
     };
   });
-
-  // jeśli z jakiegoś powodu nie udało się zrobić numerycznego id — odfiltruj (bo chcesz tylko cyfry)
-  const onlyWithNumericId = normalized.filter((c) => c.id && /^\d+$/.test(String(c.id)));
-
-  if (onlyWithNumericId.length !== normalized.length) {
-    console.log("[Webhook] Odfiltrowałem komentarze bez numerycznego id:", {
-      before: normalized.length,
-      after: onlyWithNumericId.length,
-    });
-  }
 
   /* --------------------------------------------
        2) Filtrowanie komentarzy po wieku
      -------------------------------------------- */
 
-  const freshOnly = filterByAge(onlyWithNumericId);
+  const freshOnly = filterByAge(normalized);
 
   console.log("[Webhook] Filtr wieku komentarzy:", {
-    before: onlyWithNumericId.length,
+    before: normalized.length,
     after: freshOnly.length,
+    maxAgeMin: MAX_AGE_MIN,
   });
 
   if (freshOnly.length === 0) {
@@ -174,30 +150,26 @@ async function sendWebhook(post, newComments, newCount, oldCount) {
   }
 
   /* --------------------------------------------
-       3) Payload do webhooka
+       3) Wysyłka: 1 komentarz = 1 event
      -------------------------------------------- */
 
-  const payload = {
-    postId: post.id,
-    postUrl: post.url,
-    postName: POST_LABELS[post.id] || post.id,
-    commentCount: newCount,
-    previousCommentCount: oldCount,
-    newComments: freshOnly,
-    timestamp: new Date().toISOString(),
-  };
+  for (const c of freshOnly) {
+    const payload = buildEventPayload(post, c);
 
-  console.log("[Webhook] Wysyłanie danych o nowych komentarzach:", payload);
+    // pomocniczo: zachowujemy też liczniki w logach (nie w payload)
+    console.log("[Webhook] Send event:", {
+      postId: payload.post.id,
+      commentId: payload.comment.id,
+      author: payload.comment.author,
+      counts: { newCount, oldCount },
+    });
 
-  /* --------------------------------------------
-       4) Wysyłka do Make / webhooka
-     -------------------------------------------- */
-
-  try {
-    await axios.post(url, payload, { timeout: 10000 });
-    console.log("[Webhook] Wysłano nowe komentarze do webhooka.");
-  } catch (err) {
-    console.error("[Webhook] Błąd wysyłania:", err.message);
+    try {
+      await axios.post(url, payload, { timeout: 10000 });
+      console.log("[Webhook] Wysłano event new_comment.");
+    } catch (err) {
+      console.error("[Webhook] Błąd wysyłania:", err?.message || err);
+    }
   }
 }
 

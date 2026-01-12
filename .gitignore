@@ -1,7 +1,21 @@
+# local / build artifacts
+dist/
+data/
+.ai/
+DEBUG_EXPORT/
+export_fb_watcher/
+export_files.js
+test-telegram.mjs
+config/links.json
+
+# node
 node_modules/
-cookies.json
-.env
-.env.*
+
+# logs / tmp
 *.log
-screenshots/
-.cache/
+.tmp/
+
+# secrets
+.env
+cookies.json
+

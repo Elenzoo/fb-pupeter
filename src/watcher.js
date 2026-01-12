@@ -1,5 +1,7 @@
 // src/watcher.js
 import puppeteer from "puppeteer";
+import fs from "fs";
+import path from "path";
 import {
   EXPAND_COMMENTS,
   CHECK_INTERVAL_MS,
@@ -18,6 +20,18 @@ import { loadCookies, saveCookies } from "./fb/cookies.js";
 import { checkIfLogged, fbLogin } from "./fb/login.js";
 import { sendWebhook } from "./webhook.js";
 import { loadCache, saveCache } from "./db/cache.js";
+import { sendTelegramLeads } from "./telegram.js";
+
+/**
+ * ŹRÓDŁO POSTÓW (PRIMARY): panel => data/posts.json
+ * Fallback: Google Sheets CSV (POSTS_SHEET_URL)
+ *
+ * Możesz nadpisać ścieżkę:
+ * POSTS_FILE=C:\Projekty vs\FB_Watcher\data\posts.json
+ */
+const POSTS_FILE =
+  process.env.POSTS_FILE ||
+  path.join(process.cwd(), "data", "posts.json");
 
 /**
  * CACHE DYSKOWY:
@@ -26,16 +40,17 @@ import { loadCache, saveCache } from "./db/cache.js";
  * }
  */
 const commentsCache = loadCache();
-const lastCounts = new Map();                // url -> lastCount
-const knownCommentsPerPost = new Map();      // url -> Set(knownIds)
+const lastCounts = new Map(); // url -> lastCount
+const knownCommentsPerPost = new Map(); // url -> Set(knownIds)
 
 for (const [url, entry] of Object.entries(commentsCache)) {
   if (typeof entry?.lastCount === "number") lastCounts.set(url, entry.lastCount);
-  if (Array.isArray(entry?.knownIds)) knownCommentsPerPost.set(url, new Set(entry.knownIds));
+  if (Array.isArray(entry?.knownIds))
+    knownCommentsPerPost.set(url, new Set(entry.knownIds));
 }
 
 let currentPosts = [];
-let lastSheetFetch = 0;
+let lastRefreshAny = 0; // wspólny zegar odświeżania źródeł
 
 let navErrorCount = 0;
 const MAX_NAV_ERRORS = 5;
@@ -67,13 +82,98 @@ async function applyStealth(page) {
     if (permissions && permissions.query) {
       const originalQuery = permissions.query.bind(permissions);
       permissions.query = (parameters) => {
-        if (parameters && parameters.name === "notifications" && window.Notification) {
+        if (
+          parameters &&
+          parameters.name === "notifications" &&
+          window.Notification
+        ) {
           return Promise.resolve({ state: window.Notification.permission });
         }
         return originalQuery(parameters);
       };
     }
   });
+}
+
+/* ============================================================
+   ===============   PANEL POSTS (data/posts.json)   ===========
+   ============================================================ */
+
+function safeJsonParse(s) {
+  try {
+    return { ok: true, value: JSON.parse(s) };
+  } catch (e) {
+    return { ok: false, error: e?.message || "Invalid JSON" };
+  }
+}
+
+function normalizeUrl(u) {
+  if (!u) return "";
+  const x = String(u).trim();
+  if (!/^https?:\/\/.+/i.test(x)) return "";
+  return x;
+}
+
+function readPanelPosts() {
+  try {
+    if (!fs.existsSync(POSTS_FILE)) {
+      return {
+        ok: false,
+        error: "posts.json nie istnieje",
+        posts: [],
+        path: POSTS_FILE,
+      };
+    }
+    const raw = fs.readFileSync(POSTS_FILE, "utf8").trim();
+    if (!raw) {
+      return {
+        ok: false,
+        error: "posts.json jest pusty",
+        posts: [],
+        path: POSTS_FILE,
+      };
+    }
+    const parsed = safeJsonParse(raw);
+    if (!parsed.ok || !Array.isArray(parsed.value)) {
+      return {
+        ok: false,
+        error: "posts.json ma zły format (expected array)",
+        posts: [],
+        path: POSTS_FILE,
+      };
+    }
+
+    const posts = parsed.value
+      .map((p) => {
+        const url = normalizeUrl(p?.url);
+        const active = Boolean(p?.active);
+        if (!url) return null;
+        return {
+          id: String(p?.id || url),
+          url,
+          active,
+          name: p?.name ? String(p.name) : "",
+          image: p?.image ? String(p.image) : "",
+          description: p?.description ? String(p.description) : "",
+        };
+      })
+      .filter(Boolean);
+
+    const activePosts = posts.filter((p) => p.active);
+    return {
+      ok: true,
+      posts: activePosts,
+      total: posts.length,
+      path: POSTS_FILE,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e?.message || "Błąd czytania posts.json",
+      posts: [],
+      path: POSTS_FILE,
+    };
+  }
 }
 
 /* ============================================================
@@ -91,9 +191,19 @@ function parseSheetCsv(text) {
     return [];
   }
 
-  const header = lines[0].split(",");
-  const idxUrl = header.findIndex((h) => h.trim().toLowerCase() === "url");
-  const idxActive = header.findIndex((h) => h.trim().toLowerCase() === "active");
+  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+
+  const idxUrl = header.findIndex((h) => h === "url");
+  const idxActive = header.findIndex((h) => h === "active");
+
+  // nowe kolumny od klienta
+  const idxName = header.findIndex((h) => h === "name" || h === "nazwa");
+  const idxImage = header.findIndex(
+    (h) => h === "image" || h === "img" || h === "photo" || h === "zdjecie"
+  );
+  const idxDesc = header.findIndex(
+    (h) => h === "description" || h === "desc" || h === "opis"
+  );
 
   if (idxUrl === -1) {
     console.error('[Sheet] Brak kolumny "url" w arkuszu.');
@@ -109,33 +219,81 @@ function parseSheetCsv(text) {
 
     const activeRaw = idxActive !== -1 ? (row[idxActive] || "").trim() : "";
     const activeNorm = activeRaw.toLowerCase();
-    const isActive = idxActive === -1 ? true : ["true", "1", "yes", "tak", "y"].includes(activeNorm);
-
-    console.log(`[Sheet] Wiersz ${i}: url=${rawUrl}, activeRaw="${activeRaw}", isActive=${isActive}`);
+    const isActive =
+      idxActive === -1
+        ? true
+        : ["true", "1", "yes", "tak", "y"].includes(activeNorm);
 
     if (!isActive) continue;
-    posts.push({ id: `sheet-${i}`, url: rawUrl });
+
+    const name = idxName !== -1 ? (row[idxName] || "").trim() : "";
+    const image = idxImage !== -1 ? (row[idxImage] || "").trim() : "";
+    const description = idxDesc !== -1 ? (row[idxDesc] || "").trim() : "";
+
+    posts.push({
+      id: `sheet-${i}`,
+      url: rawUrl,
+      name,
+      image,
+      description,
+    });
   }
 
   return posts;
 }
 
+/* ============================================================
+   ===============   POSTS REFRESH (PANEL -> SHEETS)   =========
+   ============================================================ */
+
 async function refreshPostsIfNeeded(force = false) {
-  if (!POSTS_SHEET_URL) {
-    console.warn("[Sheet] POSTS_SHEET_URL nie ustawiony – brak źródła postów z arkusza.");
+  const now = Date.now();
+  if (!force && now - lastRefreshAny < POSTS_REFRESH_MS) return;
+  lastRefreshAny = now;
+
+  // 1) PRIMARY: panel posts.json
+  const panel = readPanelPosts();
+  if (panel.ok && panel.posts.length > 0) {
+    const newPosts = panel.posts;
+
+    const oldJson = JSON.stringify(currentPosts);
+    const newJson = JSON.stringify(newPosts);
+
+    if (oldJson !== newJson) {
+      console.log(
+        `[Posts] Źródło: PANEL (${panel.path}) → aktywne: ${newPosts.length} (łącznie w pliku: ${panel.total})`
+      );
+      currentPosts = newPosts;
+    } else {
+      console.log(`[Posts] PANEL bez zmian (${newPosts.length} aktywnych).`);
+    }
     return;
   }
 
-  const now = Date.now();
-  if (!force && now - lastSheetFetch < POSTS_REFRESH_MS) return;
+  console.log(
+    `[Posts] PANEL nie dał aktywnych postów (${panel.path}) → fallback: Sheets`
+  );
 
-  lastSheetFetch = now;
+  // 2) FALLBACK: Sheets
+  if (!POSTS_SHEET_URL) {
+    console.warn(
+      "[Sheet] POSTS_SHEET_URL nie ustawiony – brak źródła postów z arkusza."
+    );
+    currentPosts = [];
+    return;
+  }
+
   console.log("[Sheet] Odświeżam listę postów z Google Sheets...");
 
   try {
     const res = await fetch(POSTS_SHEET_URL);
     if (!res.ok) {
-      console.error("[Sheet] Błąd HTTP przy pobieraniu CSV:", res.status, res.statusText);
+      console.error(
+        "[Sheet] Błąd HTTP przy pobieraniu CSV:",
+        res.status,
+        res.statusText
+      );
+      currentPosts = [];
       return;
     }
 
@@ -143,7 +301,9 @@ async function refreshPostsIfNeeded(force = false) {
     const newPosts = parseSheetCsv(csvText);
 
     if (!newPosts.length) {
-      console.warn("[Sheet] Arkusz nie zwrócił żadnych AKTYWNYCH postów (sprawdź active / TRUE).");
+      console.warn(
+        "[Sheet] Arkusz nie zwrócił żadnych AKTYWNYCH postów (sprawdź active / TRUE)."
+      );
       currentPosts = [];
       return;
     }
@@ -152,13 +312,16 @@ async function refreshPostsIfNeeded(force = false) {
     const newJson = JSON.stringify(newPosts);
 
     if (oldJson !== newJson) {
-      console.log(`[Sheet] Lista postów zmieniona – było ${currentPosts.length}, teraz ${newPosts.length}.`);
+      console.log(
+        `[Sheet] Lista postów zmieniona – było ${currentPosts.length}, teraz ${newPosts.length}.`
+      );
       currentPosts = newPosts;
     } else {
       console.log("[Sheet] Lista postów bez zmian.");
     }
   } catch (err) {
     console.error("[Sheet] Błąd przy pobieraniu/parsowaniu CSV:", err.message);
+    currentPosts = [];
   }
 }
 
@@ -174,7 +337,8 @@ function getKnownSetForPost(cacheKey) {
   let set = knownCommentsPerPost.get(cacheKey);
   if (!set) {
     const entry = commentsCache[cacheKey];
-    set = entry && Array.isArray(entry.knownIds) ? new Set(entry.knownIds) : new Set();
+    set =
+      entry && Array.isArray(entry.knownIds) ? new Set(entry.knownIds) : new Set();
     knownCommentsPerPost.set(cacheKey, set);
   }
   return set;
@@ -205,7 +369,11 @@ function flushCacheToDisk() {
 const isDev = process.env.NODE_ENV !== "production";
 
 async function startWatcher() {
-  console.log("[Watcher] Monitoring startuje. Sprawdzanie co", Math.round(CHECK_INTERVAL_MS / 1000), "sekund.");
+  console.log(
+    "[Watcher] Monitoring startuje. Sprawdzanie co",
+    Math.round(CHECK_INTERVAL_MS / 1000),
+    "sekund."
+  );
 
   const loop = async () => {
     let browser = null;
@@ -213,7 +381,9 @@ async function startWatcher() {
     let hadNavErrorThisRound = false;
 
     try {
-      console.log("[Watcher] ==== Nowy cykl watchera – startuję świeżą przeglądarkę ====");
+      console.log(
+        "[Watcher] ==== Nowy cykl watchera – startuję świeżą przeglądarkę ===="
+      );
 
       browser = await puppeteer.launch({
         headless: isDev ? true : "new",
@@ -235,9 +405,12 @@ async function startWatcher() {
       page.setDefaultTimeout(90000);
 
       await page.setViewport({ width: 1280, height: 720 });
-// DISABLED UA // cookies + login
+
+      // cookies + login
       await loadCookies(page);
-      await page.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
+      await page
+        .goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 })
+        .catch(() => {});
 
       let loggedIn = await checkIfLogged(page);
       if (!loggedIn) {
@@ -249,7 +422,9 @@ async function startWatcher() {
           console.log("[FB] Logowanie udane – zapisuję cookies.");
           await saveCookies(page);
         } else {
-          console.error("[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone).");
+          console.error(
+            "[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone)."
+          );
         }
       } else {
         console.log("[FB] Użyto istniejącej sesji FB (cookies).");
@@ -265,23 +440,23 @@ async function startWatcher() {
           const cacheKey = getCacheKey(post);
 
           try {
-            // 🔥 KLUCZ: zawsze prepare przed liczeniem/scrollowaniem/ekstrakcją
+            // zawsze prepare przed liczeniem/scrollowaniem/ekstrakcją
             await prepare(page, post.url);
 
             const count = await getCommentCount(page, post.url);
             const hasCount = typeof count === "number" && Number.isFinite(count);
 
             if (!hasCount) {
-              console.log(`[Watcher] Post ${post.id}: Nie udało się odczytać licznika -> tryb awaryjny (jadę po ID).`);
+              console.log(
+                `[Watcher] Post ${post.id}: Nie udało się odczytać licznika -> tryb awaryjny (jadę po ID).`
+              );
             }
 
             const prev = lastCounts.has(cacheKey) ? lastCounts.get(cacheKey) : null;
             const knownSet = getKnownSetForPost(cacheKey);
 
-            // pierwsze wejście na posta: zapamiętaj stan, nie wysyłaj
+            // pierwsze wejście: zapamiętaj stan, nie wysyłaj
             if (prev === null) {
-              // jeśli nie mamy licznika: zapisujemy 0 jako "punkt startu" tylko po to,
-              // żeby nie wchodzić w "prev === null" za każdym razem.
               const initialCount = hasCount ? count : 0;
               lastCounts.set(cacheKey, initialCount);
 
@@ -300,9 +475,13 @@ async function startWatcher() {
 
                 const snap = await extractCommentsData(page, post.url).catch(() => []);
                 for (const c of snap) if (c?.id) knownSet.add(c.id);
-                console.log(`[Watcher] Post ${post.id}: Zapamiętano ${snap.length} istniejących komentarzy.`);
+                console.log(
+                  `[Watcher] Post ${post.id}: Zapamiętano ${snap.length} istniejących komentarzy.`
+                );
               } else {
-                console.log(`[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam ekstrakcję.`);
+                console.log(
+                  `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam ekstrakcję.`
+                );
               }
 
               continue;
@@ -311,26 +490,26 @@ async function startWatcher() {
             // licznik: aktualizuj tylko jeśli mamy twarde dane
             if (hasCount) {
               if (count !== prev) {
-                console.log(`[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`);
+                console.log(
+                  `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
+                );
                 lastCounts.set(cacheKey, count);
               } else {
                 console.log(`[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`);
               }
             } else {
-              console.log(`[Watcher] Post ${post.id}: Brak licznika -> pomijam porównanie count, lecę po ID.`);
+              console.log(
+                `[Watcher] Post ${post.id}: Brak licznika -> pomijam porównanie count, lecę po ID.`
+              );
             }
 
             if (!EXPAND_COMMENTS) continue;
 
-            await loadAllComments(
-              page,
-              { expectedTotal: hasCount ? count : undefined }
-            ).catch(() => {});
+            await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(
+              () => {}
+            );
 
             let snapshot = await extractCommentsData(page, post.url).catch(() => []);
-
-            console.log(`[DBG] extractCommentsData – snapshot = ${snapshot.length}`);
-            console.dir(snapshot.slice(0, 5), { depth: null });
 
             // nowe ID
             const newComments = [];
@@ -348,26 +527,43 @@ async function startWatcher() {
               const tail = snapshot.slice(-diff);
               for (const c of tail) if (c?.id) knownSet.add(c.id);
 
-              console.log(`[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} jako nowe.`);
+              console.log(
+                `[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} jako nowe.`
+              );
               await sendWebhook(post, tail, count, prev);
+              await sendTelegramLeads(post, tail);
               continue;
             }
 
             if (newComments.length > 0) {
-              console.log(`[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`);
-              // parametry webhooka: jeśli brak licznika, wysyłamy null (czytelne po stronie Make)
-              await sendWebhook(post, newComments, hasCount ? count : null, hasCount ? prev : null);
+              console.log(
+                `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
+              );
+              await sendWebhook(
+                post,
+                newComments,
+                hasCount ? count : null,
+                hasCount ? prev : null
+              );
+              await sendTelegramLeads(post, newComments);
             } else {
-              console.log(`[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`);
+              console.log(
+                `[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`
+              );
             }
           } catch (err) {
-            console.error(`[Watcher] Błąd przy sprawdzaniu ${post.id}:`, err?.message || err);
+            console.error(
+              `[Watcher] Błąd przy sprawdzaniu ${post.id}:`,
+              err?.message || err
+            );
             if (err?.stack) console.error("[Watcher] Stack:", err.stack);
 
             if (isNavigationError(err)) {
               hadNavErrorThisRound = true;
               navErrorCount++;
-              console.log(`[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`);
+              console.log(
+                `[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`
+              );
             }
           }
         }
@@ -378,7 +574,9 @@ async function startWatcher() {
       flushCacheToDisk();
 
       if (!hadNavErrorThisRound && navErrorCount > 0) {
-        console.log(`[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`);
+        console.log(
+          `[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`
+        );
         navErrorCount = 0;
       }
 
@@ -398,7 +596,9 @@ async function startWatcher() {
 
       const jitter = Math.floor(Math.random() * 5000);
       const delay = CHECK_INTERVAL_MS + jitter;
-      console.log(`[Watcher] Kolejny cykl za około ${Math.round(delay / 1000)} sekund.`);
+      console.log(
+        `[Watcher] Kolejny cykl za około ${Math.round(delay / 1000)} sekund.`
+      );
       setTimeout(loop, delay);
     }
   };

@@ -1,4 +1,3 @@
-
 {
   "name": "fb_puppeteer",
   "version": "1.0.0",
@@ -6,7 +5,9 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "panel:exe": "npm run panel:build && npx @yao-pkg/pkg -t node20-win-x64 dist/panel-bundle.cjs -o dist/fbwatcher-panel.exe",
+    "panel:build": "npx esbuild src/panel/api.js --bundle --platform=node --format=cjs --outfile=dist/panel-bundle.cjs"
   },
   "keywords": [],
   "author": "",
@@ -15,5 +16,19 @@
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
     "puppeteer": "^24.31.0"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.11.0",
+    "esbuild": "^0.27.2",
+    "nexe": "^5.0.0-beta.4",
+    "pkg": "^5.8.1"
+  },
+  "pkg": {
+    "assets": [
+      "src/panel/api.js",
+      "src/panel/**/*.js",
+      ".env",
+      "data/**/*"
+    ]
   }
 }

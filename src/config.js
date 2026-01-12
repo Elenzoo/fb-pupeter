@@ -1,5 +1,10 @@
-// config.js
 import "dotenv/config";
+
+/* ==================== PANEL – NOWY SYSTEM ==================== */
+/**
+ * POSTS_JSON_PATH – ścieżka do pliku z postami zarządzanymi przez panel (domyślnie data/posts.json)
+ */
+const POSTS_JSON_PATH = process.env.POSTS_JSON_PATH || "data/posts.json";
 
 /* ==================== GOOGLE SHEETS – NOWY SYSTEM ==================== */
 /**
@@ -11,7 +16,7 @@ import "dotenv/config";
 const POSTS_SHEET_URL = process.env.POSTS_SHEET_URL || "";
 
 /**
- * POSTS_REFRESH_MS – co ile MILISEKUND watcher ma odświeżać listę postów z arkusza.
+ * POSTS_REFRESH_MS – co ile MILISEKUND watcher ma odświeżać listę postów (panel/sheets).
  * Np. domyślnie co 5 minut.
  */
 const POSTS_REFRESH_MS = Number(
@@ -54,16 +59,14 @@ const POSTS = getPostsFromEnv();
 const POST_LABELS = getPostLabelsFromEnv(POSTS);
 
 /**
- * Jeżeli nie masz ani FB_POST_URLS, ani POSTS_SHEET_URL,
- * to faktycznie nie ma co monitorować → robimy twardy exit.
- * Jeśli korzystasz z Google Sheets (POSTS_SHEET_URL ustawione),
- * to brak FB_POST_URLS już nie jest problemem.
+ * UWAGA: Przy panelu (posts.json) brak źródeł jest normalny na start.
+ * Nie robimy twardego exit — watcher ma żyć i po prostu nie monitorować niczego,
+ * dopóki nie dodasz postów w panelu.
  */
 if (!POSTS.length && !POSTS_SHEET_URL) {
-  console.error(
-    "[CONFIG] Brak źródeł postów. Ustaw FB_POST_URLS (ENV) lub POSTS_SHEET_URL (Google Sheets CSV)."
+  console.warn(
+    "[CONFIG] Brak FB_POST_URLS i POSTS_SHEET_URL. Jeśli używasz panelu, dodaj posty w data/posts.json. Watcher będzie działał, ale nie ma co monitorować."
   );
-  process.exit(1);
 }
 
 /* ==================== OGÓLNE OPCJE WATCHERA ==================== */
@@ -87,14 +90,18 @@ const INCLUDE_REPLIES =
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
 
 export {
-  // stary system – optional (watcher go już nie potrzebuje, ale nic nie szkodzi że jest)
+  // stary system – optional
   POSTS,
   POST_LABELS,
+
   // używane przez watcher.js / comments.js
   EXPAND_COMMENTS,
   USE_UI_HANDLERS,
   INCLUDE_REPLIES,
   CHECK_INTERVAL_MS,
+
+  // źródła postów
+  POSTS_JSON_PATH,
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,
 };
