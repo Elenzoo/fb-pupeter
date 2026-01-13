@@ -85,11 +85,19 @@
     /* ===== tabela ===== */
     .tableWrap {
       width: 100%;
-      overflow-x: auto;
+      /* było: overflow-x; teraz robimy pełny scroll + limit wysokości */
+      max-height: calc(100vh - 260px);
+      overflow: auto;
+
       border-radius: 12px;
       border: 1px solid rgba(34,48,71,.45);
       background: rgba(11,18,32,.25);
     }
+
+    /* opcjonalnie: ładniejsze scrollbary */
+    .tableWrap::-webkit-scrollbar { height: 10px; width: 10px; }
+    .tableWrap::-webkit-scrollbar-thumb { background: rgba(42,58,85,.9); border-radius: 999px; }
+    .tableWrap::-webkit-scrollbar-track { background: rgba(11,18,32,.35); border-radius: 999px; }
 
     table { width:100%; border-collapse: collapse; table-layout: fixed; min-width: 980px; }
     th, td {
@@ -100,7 +108,22 @@
       overflow-wrap:anywhere;
       word-break:break-word;
     }
-    th { font-size: 12px; opacity:.9; position: sticky; top: 0; background: rgba(18,25,38,.96); backdrop-filter: blur(8px); }
+
+    /* sticky head */
+    th {
+      font-size: 12px;
+      opacity:.9;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: rgba(18,25,38,.96);
+      backdrop-filter: blur(8px);
+    }
+
+    /* delikatny hover, żeby to "oddychało" */
+    tbody tr:hover td {
+      background: rgba(37,99,235,.06);
+    }
 
     /* kolumny */
     th.col-id,  td.col-id  { width: 170px; }
@@ -111,14 +134,10 @@
     th.col-act, td.col-act { width: 110px; text-align:center; }
     th.col-btn, td.col-btn { width: 210px; } /* miejsce na Edytuj + Usuń */
 
-    /* URL: pełny, zawijany */
+    /* URL: kolor */
     td.col-url a{
       color: #93c5fd;
       text-decoration: underline;
-      white-space: normal;
-      overflow-wrap:anywhere;
-      word-break:break-word;
-      display:inline;
     }
 
     /* wrapper dla linka + ikonki kopiuj */
@@ -127,10 +146,31 @@
       align-items:flex-start;
       gap:10px;
     }
-    .urlWrap a{
-      flex: 1;
-      min-width: 0;
-    }
+
+    /* KLUCZ: niech link nie robi ściany (max 2 linie) */
+.urlWrap a{
+  flex: 1;
+  min-width: 0;
+
+  /* clamp (Chromium/WebKit) */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+
+  /* clamp (standard / future) */
+  line-clamp: 2;
+
+  overflow: hidden;
+
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+
+  /* fallback gdy clamp nie działa */
+  max-height: 2.5em;
+}
+
+
 
     /* ikonka kopiuj – mała, jak w necie */
     .iconBtn{
@@ -230,6 +270,7 @@
 
     @media (max-width: 860px){
       table { min-width: 980px; }
+      .tableWrap { max-height: calc(100vh - 220px); }
     }
   </style>
 </head>

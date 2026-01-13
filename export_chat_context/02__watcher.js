@@ -27,10 +27,11 @@ import { sendTelegramLeads } from "./telegram.js";
  * Fallback: Google Sheets CSV (POSTS_SHEET_URL)
  *
  * Możesz nadpisać ścieżkę:
- * POSTS_FILE=/opt/fb-watcher/data/posts.json
+ * POSTS_FILE=C:\Projekty vs\FB_Watcher\data\posts.json
  */
 const POSTS_FILE =
-  process.env.POSTS_FILE || path.join(process.cwd(), "data", "posts.json");
+  process.env.POSTS_FILE ||
+  path.join(process.cwd(), "data", "posts.json");
 
 /**
  * CACHE DYSKOWY:
@@ -49,7 +50,7 @@ for (const [url, entry] of Object.entries(commentsCache)) {
 }
 
 let currentPosts = [];
-let lastRefreshAny = 0;
+let lastRefreshAny = 0; // wspólny zegar odświeżania źródeł
 
 let navErrorCount = 0;
 const MAX_NAV_ERRORS = 5;
@@ -63,12 +64,6 @@ function isNavigationError(err) {
     msg.includes("net::err_connection_timed_out") ||
     msg.includes("net::err_timed_out")
   );
-}
-
-function envBool(name, def = false) {
-  const raw = String(process.env[name] ?? "").trim().toLowerCase();
-  if (raw === "") return def;
-  return ["1", "true", "yes", "y", "tak", "on"].includes(raw);
 }
 
 /* ============================================================
@@ -122,16 +117,30 @@ function normalizeUrl(u) {
 function readPanelPosts() {
   try {
     if (!fs.existsSync(POSTS_FILE)) {
-      return { ok: false, error: "posts.json nie istnieje", posts: [], path: POSTS_FILE };
+      return {
+        ok: false,
+        error: "posts.json nie istnieje",
+        posts: [],
+        path: POSTS_FILE,
+      };
     }
     const raw = fs.readFileSync(POSTS_FILE, "utf8").trim();
     if (!raw) {
-      return { ok: false, error: "posts.json jest pusty", posts: [], path: POSTS_FILE };
+      return {
+        ok: false,
+        error: "posts.json jest pusty",
+        posts: [],
+        path: POSTS_FILE,
+      };
     }
-
     const parsed = safeJsonParse(raw);
     if (!parsed.ok || !Array.isArray(parsed.value)) {
-      return { ok: false, error: "posts.json ma zły format (expected array)", posts: [], path: POSTS_FILE };
+      return {
+        ok: false,
+        error: "posts.json ma zły format (expected array)",
+        posts: [],
+        path: POSTS_FILE,
+      };
     }
 
     const posts = parsed.value
@@ -151,9 +160,19 @@ function readPanelPosts() {
       .filter(Boolean);
 
     const activePosts = posts.filter((p) => p.active);
-    return { ok: true, posts: activePosts, total: posts.length, path: POSTS_FILE };
+    return {
+      ok: true,
+      posts: activePosts,
+      total: posts.length,
+      path: POSTS_FILE,
+    };
   } catch (e) {
-    return { ok: false, error: e?.message || "Błąd czytania posts.json", posts: [], path: POSTS_FILE };
+    return {
+      ok: false,
+      error: e?.message || "Błąd czytania posts.json",
+      posts: [],
+      path: POSTS_FILE,
+    };
   }
 }
 
@@ -177,6 +196,7 @@ function parseSheetCsv(text) {
   const idxUrl = header.findIndex((h) => h === "url");
   const idxActive = header.findIndex((h) => h === "active");
 
+  // nowe kolumny od klienta
   const idxName = header.findIndex((h) => h === "name" || h === "nazwa");
   const idxImage = header.findIndex(
     (h) => h === "image" || h === "img" || h === "photo" || h === "zdjecie"
@@ -256,7 +276,9 @@ async function refreshPostsIfNeeded(force = false) {
 
   // 2) FALLBACK: Sheets
   if (!POSTS_SHEET_URL) {
-    console.warn("[Sheet] POSTS_SHEET_URL nie ustawiony – brak źródła postów z arkusza.");
+    console.warn(
+      "[Sheet] POSTS_SHEET_URL nie ustawiony – brak źródła postów z arkusza."
+    );
     currentPosts = [];
     return;
   }
@@ -266,7 +288,11 @@ async function refreshPostsIfNeeded(force = false) {
   try {
     const res = await fetch(POSTS_SHEET_URL);
     if (!res.ok) {
-      console.error("[Sheet] Błąd HTTP przy pobieraniu CSV:", res.status, res.statusText);
+      console.error(
+        "[Sheet] Błąd HTTP przy pobieraniu CSV:",
+        res.status,
+        res.statusText
+      );
       currentPosts = [];
       return;
     }
@@ -275,7 +301,9 @@ async function refreshPostsIfNeeded(force = false) {
     const newPosts = parseSheetCsv(csvText);
 
     if (!newPosts.length) {
-      console.warn("[Sheet] Arkusz nie zwrócił żadnych AKTYWNYCH postów (sprawdź active / TRUE).");
+      console.warn(
+        "[Sheet] Arkusz nie zwrócił żadnych AKTYWNYCH postów (sprawdź active / TRUE)."
+      );
       currentPosts = [];
       return;
     }
@@ -284,7 +312,9 @@ async function refreshPostsIfNeeded(force = false) {
     const newJson = JSON.stringify(newPosts);
 
     if (oldJson !== newJson) {
-      console.log(`[Sheet] Lista postów zmieniona – było ${currentPosts.length}, teraz ${newPosts.length}.`);
+      console.log(
+        `[Sheet] Lista postów zmieniona – było ${currentPosts.length}, teraz ${newPosts.length}.`
+      );
       currentPosts = newPosts;
     } else {
       console.log("[Sheet] Lista postów bez zmian.");
@@ -338,15 +368,6 @@ function flushCacheToDisk() {
 
 const isDev = process.env.NODE_ENV !== "production";
 
-function getExecutablePath() {
-  const p =
-    process.env.PUPPETEER_EXECUTABLE_PATH ||
-    process.env.CHROME_PATH ||
-    process.env.CHROMIUM_PATH ||
-    "";
-  return String(p || "").trim() || undefined;
-}
-
 async function startWatcher() {
   console.log(
     "[Watcher] Monitoring startuje. Sprawdzanie co",
@@ -360,28 +381,20 @@ async function startWatcher() {
     let hadNavErrorThisRound = false;
 
     try {
-      console.log("[Watcher] ==== Nowy cykl watchera – startuję świeżą przeglądarkę ====");
-
-      const wantHeadless = envBool("HEADLESS_BROWSER", true);
-      const headlessMode = wantHeadless ? (isDev ? true : "new") : false;
-
-      const linux = process.platform === "linux";
-      const executablePath = getExecutablePath();
-
-      const args = [
-        "--disable-notifications",
-        "--disable-blink-features=AutomationControlled",
-      ];
-
-      if (linux) {
-        args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
-      }
+      console.log(
+        "[Watcher] ==== Nowy cykl watchera – startuję świeżą przeglądarkę ===="
+      );
 
       browser = await puppeteer.launch({
-        headless: headlessMode,
+        headless: isDev ? true : "new",
         defaultViewport: null,
-        executablePath,
-        args,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-notifications",
+          "--disable-blink-features=AutomationControlled",
+        ],
         ignoreDefaultArgs: ["--enable-automation"],
       });
 
@@ -395,7 +408,9 @@ async function startWatcher() {
 
       // cookies + login
       await loadCookies(page);
-      await page.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
+      await page
+        .goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 })
+        .catch(() => {});
 
       let loggedIn = await checkIfLogged(page);
       if (!loggedIn) {
@@ -407,7 +422,9 @@ async function startWatcher() {
           console.log("[FB] Logowanie udane – zapisuję cookies.");
           await saveCookies(page);
         } else {
-          console.error("[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone).");
+          console.error(
+            "[FB] Logowanie NIEUDANE – nie zapisuję cookies (prawdopodobnie 2FA nieukończone)."
+          );
         }
       } else {
         console.log("[FB] Użyto istniejącej sesji FB (cookies).");
@@ -423,13 +440,16 @@ async function startWatcher() {
           const cacheKey = getCacheKey(post);
 
           try {
+            // zawsze prepare przed liczeniem/scrollowaniem/ekstrakcją
             await prepare(page, post.url);
 
             const count = await getCommentCount(page, post.url);
             const hasCount = typeof count === "number" && Number.isFinite(count);
 
             if (!hasCount) {
-              console.log(`[Watcher] Post ${post.id}: Nie udało się odczytać licznika -> tryb awaryjny (jadę po ID).`);
+              console.log(
+                `[Watcher] Post ${post.id}: Nie udało się odczytać licznika -> tryb awaryjny (jadę po ID).`
+              );
             }
 
             const prev = lastCounts.has(cacheKey) ? lastCounts.get(cacheKey) : null;
@@ -447,33 +467,51 @@ async function startWatcher() {
               );
 
               if (EXPAND_COMMENTS) {
-                await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }, post.url).catch(() => {});
+                await loadAllComments(
+                  page,
+                  { expectedTotal: hasCount ? count : undefined },
+                  post.url
+                ).catch(() => {});
+
                 const snap = await extractCommentsData(page, post.url).catch(() => []);
                 for (const c of snap) if (c?.id) knownSet.add(c.id);
-                console.log(`[Watcher] Post ${post.id}: Zapamiętano ${snap.length} istniejących komentarzy.`);
+                console.log(
+                  `[Watcher] Post ${post.id}: Zapamiętano ${snap.length} istniejących komentarzy.`
+                );
               } else {
-                console.log(`[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam ekstrakcję.`);
+                console.log(
+                  `[Watcher] Post ${post.id}: EXPAND_COMMENTS=false – pomijam ekstrakcję.`
+                );
               }
 
               continue;
             }
 
+            // licznik: aktualizuj tylko jeśli mamy twarde dane
             if (hasCount) {
               if (count !== prev) {
-                console.log(`[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`);
+                console.log(
+                  `[Watcher] Post ${post.id}: Zmiana liczby komentarzy ${prev} -> ${count}`
+                );
                 lastCounts.set(cacheKey, count);
               } else {
                 console.log(`[Watcher] Post ${post.id}: Bez zmian (${count} komentarzy).`);
               }
             } else {
-              console.log(`[Watcher] Post ${post.id}: Brak licznika -> pomijam porównanie count, lecę po ID.`);
+              console.log(
+                `[Watcher] Post ${post.id}: Brak licznika -> pomijam porównanie count, lecę po ID.`
+              );
             }
 
             if (!EXPAND_COMMENTS) continue;
 
-            await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(() => {});
-            const snapshot = await extractCommentsData(page, post.url).catch(() => []);
+            await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(
+              () => {}
+            );
 
+            let snapshot = await extractCommentsData(page, post.url).catch(() => []);
+
+            // nowe ID
             const newComments = [];
             for (const c of snapshot) {
               if (!c?.id) continue;
@@ -483,32 +521,49 @@ async function startWatcher() {
               }
             }
 
+            // fallback "tail" tylko jeśli mamy wiarygodny licznik i wzrost
             if (hasCount && newComments.length === 0 && count > prev) {
               const diff = Math.max(1, count - prev);
               const tail = snapshot.slice(-diff);
               for (const c of tail) if (c?.id) knownSet.add(c.id);
 
-              console.log(`[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} jako nowe.`);
+              console.log(
+                `[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} jako nowe.`
+              );
               await sendWebhook(post, tail, count, prev);
               await sendTelegramLeads(post, tail);
               continue;
             }
 
             if (newComments.length > 0) {
-              console.log(`[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`);
-              await sendWebhook(post, newComments, hasCount ? count : null, hasCount ? prev : null);
+              console.log(
+                `[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`
+              );
+              await sendWebhook(
+                post,
+                newComments,
+                hasCount ? count : null,
+                hasCount ? prev : null
+              );
               await sendTelegramLeads(post, newComments);
             } else {
-              console.log(`[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`);
+              console.log(
+                `[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`
+              );
             }
           } catch (err) {
-            console.error(`[Watcher] Błąd przy sprawdzaniu ${post.id}:`, err?.message || err);
+            console.error(
+              `[Watcher] Błąd przy sprawdzaniu ${post.id}:`,
+              err?.message || err
+            );
             if (err?.stack) console.error("[Watcher] Stack:", err.stack);
 
             if (isNavigationError(err)) {
               hadNavErrorThisRound = true;
               navErrorCount++;
-              console.log(`[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`);
+              console.log(
+                `[Watcher] Kolejny błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`
+              );
             }
           }
         }
@@ -519,7 +574,9 @@ async function startWatcher() {
       flushCacheToDisk();
 
       if (!hadNavErrorThisRound && navErrorCount > 0) {
-        console.log(`[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`);
+        console.log(
+          `[Watcher] Runda bez błędów nawigacji – reset licznika (było ${navErrorCount}).`
+        );
         navErrorCount = 0;
       }
 
@@ -539,7 +596,9 @@ async function startWatcher() {
 
       const jitter = Math.floor(Math.random() * 5000);
       const delay = CHECK_INTERVAL_MS + jitter;
-      console.log(`[Watcher] Kolejny cykl za około ${Math.round(delay / 1000)} sekund.`);
+      console.log(
+        `[Watcher] Kolejny cykl za około ${Math.round(delay / 1000)} sekund.`
+      );
       setTimeout(loop, delay);
     }
   };
