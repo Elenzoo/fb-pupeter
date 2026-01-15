@@ -2,42 +2,21 @@
 import { sleepRandom } from "../utils/sleep.js";
 
 /**
- * FB login helpers – PRO (NO COOLDOWN)
- *
- * Najważniejsze:
- * - Główne logowanie: https://www.facebook.com/login.php?next=<postUrl>
- * - Best-effort (zero throw, zero crashy)
- * - Dwa tryby:
- *    1) login.php?next (najstabilniejsze)
- *    2) fallback: loginViaVisibleForm (overlay / różne layouty)
- *
- * Kompatybilność:
- * - eksportujemy też clickByText, acceptLoginCookies, loginViaVisibleForm (jak w wersji lokalnej)
- */
-
-function norm(s) {
-  return String(s || "")
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Cookies popup – wersja "mark + click" (jak lokalnie), ale best-effort.
+ * Akceptuje popup cookies na stronie logowania FB.
+ * Szuka przycisku po tekście, oznacza go data-atrybutem i klika z poziomu Puppeteera.
  */
 async function acceptLoginCookies(page) {
   try {
     console.log("[FB][login-cookies] Szukam popupu cookies...");
 
-    await sleepRandom(300, 900);
+    // chwila na pojawienie się popupu
+    await sleepRandom(800, 1300);
 
     const found = await page.evaluate(() => {
       const wanted = [
         "Zezwól na wszystkie pliki cookie",
         "Zezwól na wszystkie pliki",
         "Allow all cookies",
-        "Accept all cookies",
-        "Akceptuj wszystkie",
         "Odrzuć opcjonalne pliki cookie",
         "Odrzuc opcjonalne pliki cookie",
       ].map((t) => t.toLowerCase());
@@ -46,6 +25,8 @@ async function acceptLoginCookies(page) {
         document.querySelectorAll("button, [role='button']")
       );
 
+      let marked = false;
+
       for (const btn of buttons) {
         const txt = (btn.innerText || btn.textContent || "").trim();
         if (!txt) continue;
@@ -53,155 +34,46 @@ async function acceptLoginCookies(page) {
 
         if (wanted.some((w) => low.includes(w))) {
           btn.setAttribute("data-fb-cookie-btn", "1");
-          return true;
+          marked = true;
+          break;
         }
       }
 
-      return false;
+      return marked;
     });
 
     if (!found) {
+      console.log(
+        "[FB][login-cookies] Nie znaleziono przycisku cookies (po tekście)."
+      );
       return false;
     }
 
-    await page
-      .click('[data-fb-cookie-btn="1"]')
-      .catch(() => {});
-
+    await page.click('[data-fb-cookie-btn="1"]');
     console.log(
-      '[FB][login-cookies] Kliknięto cookies (data-fb-cookie-btn="1").'
+      '[FB][login-cookies] Kliknięto przycisk cookies przez Puppeteera (data-fb-cookie-btn="1").'
     );
 
-    await sleepRandom(600, 1200);
+    await sleepRandom(1200, 2000);
     return true;
   } catch (err) {
-    console.log("[FB][login-cookies] Błąd (ignorowany):", err?.message || err);
+    console.log("[FB][login-cookies] Błąd:", err.message);
     return false;
   }
 }
 
 /**
- * Minimalne kliknięcie cookies bez markowania (czasem FB blokuje atrybuty).
- */
-async function acceptCookiesIfPresent(page) {
-  try {
-    await sleepRandom(250, 650);
-
-    const clicked = await page.evaluate(() => {
-      const wanted = [
-        "Zezwòl na wszystkie pliki cookie",
-        "Zezwól na wszystkie pliki cookie",
-        "Zezwòl na wszystkie pliki",
-        "Zezwól na wszystkie pliki",
-        "Allow all cookies",
-        "Accept all cookies",
-        "Akceptuj wszystkie",
-      ].map((x) => x.toLowerCase());
-
-      const btns = Array.from(
-        document.querySelectorAll("button, [role='button']")
-      );
-
-      for (const b of btns) {
-        const t = (b.innerText || b.textContent || "").trim();
-        if (!t) continue;
-        const low = t.toLowerCase();
-        if (wanted.some((w) => low.includes(w))) {
-          b.click();
-          return true;
-        }
-      }
-      return false;
-    });
-
-    if (clicked) {
-      console.log("[FB][cookies] Kliknięto accept cookies (fallback).");
-      await sleepRandom(500, 1100);
-    }
-    return !!clicked;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Pomocnik: wpisz login/hasło + kliknij login. Best-effort.
- */
-async function fillLoginFormBestEffort(page) {
-  const email = process.env.FB_EMAIL || "";
-  const password = process.env.FB_PASSWORD || "";
-
-  if (!email || !password) {
-    console.log("[FB][login] Brak FB_EMAIL / FB_PASSWORD – pomijam login.");
-    return false;
-  }
-
-  const emailSel = [
-    "input#email",
-    "input[name='email']",
-    "input[name='email_or_phone']",
-    "input[type='text']",
-  ].join(",");
-
-  const passSel = [
-    "input#pass",
-    "input[name='pass']",
-    "input[type='password']",
-  ].join(",");
-
-  const emailInput = await page.$(emailSel).catch(() => null);
-  const passInput = await page.$(passSel).catch(() => null);
-
-  if (!emailInput || !passInput) {
-    console.log("[FB][login] Brak pól email/hasło na stronie login.");
-    return false;
-  }
-
-  console.log("[FB][login] Wpisuję email i hasło...");
-
-  await emailInput.click({ clickCount: 3 }).catch(() => {});
-  await page.keyboard.press("Backspace").catch(() => {});
-  await emailInput.type(email, { delay: 35 }).catch(() => {});
-
-  await passInput.click({ clickCount: 3 }).catch(() => {});
-  await page.keyboard.press("Backspace").catch(() => {});
-  await passInput.type(password, { delay: 35 }).catch(() => {});
-
-  const loginButton =
-    (await page.$('button[name="login"]')) ||
-    (await page.$('button[type="submit"]')) ||
-    (await page.$('div[role="button"][tabindex="0"]')) ||
-    (await page.$("button")) ||
-    null;
-
-  if (!loginButton) {
-    console.log("[FB][login] Brak przycisku logowania – kończę próbę.");
-    return false;
-  }
-
-  console.log("[FB][login] Klikam logowanie…");
-
-  await Promise.all([
-    loginButton.click().catch(() => {}),
-    page
-      .waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 })
-      .catch(() => {}),
-  ]);
-
-  await sleepRandom(1400, 2400);
-  return true;
-}
-
-/**
- * Próba logowania na dowolnym widocznym formularzu (z lokalnej wersji),
- * ale z lekkimi ulepszeniami i bez crashy.
+ * Pr próba zalogowania się na **dowolnym widocznym formularzu logowania**:
+ * - pasek u góry,
+ * - pełna strona logowania,
+ * - popup "Wyświetl więcej na Facebooku".
  */
 async function loginViaVisibleForm(page, context = "visible-form") {
   try {
     console.log(`[FB][login-form] Szukam formularza logowania (${context})...`);
 
+    // Spróbuj ogarnąć ewentualne cookies na logowaniu
     await acceptLoginCookies(page).catch(() => {});
-    await acceptCookiesIfPresent(page).catch(() => {});
 
     const emailSelector = [
       "input#email",
@@ -212,7 +84,6 @@ async function loginViaVisibleForm(page, context = "visible-form") {
       "input[placeholder*='adres e-mail']",
       "input[placeholder*='Email']",
       "input[placeholder*='email']",
-      "input[type='text']",
     ].join(",");
 
     const passSelector = [
@@ -223,11 +94,10 @@ async function loginViaVisibleForm(page, context = "visible-form") {
       "input[placeholder*='hasło']",
       "input[placeholder*='Password']",
       "input[placeholder*='password']",
-      "input[type='password']",
     ].join(",");
 
-    const emailInput = await page.$(emailSelector).catch(() => null);
-    const passInput = await page.$(passSelector).catch(() => null);
+    const emailInput = await page.$(emailSelector);
+    const passInput = await page.$(passSelector);
 
     if (!emailInput || !passInput) {
       console.log(
@@ -236,78 +106,126 @@ async function loginViaVisibleForm(page, context = "visible-form") {
       return false;
     }
 
-    const ok = await fillLoginFormBestEffort(page);
-    if (!ok) return false;
+    const email = process.env.FB_EMAIL || "";
+    const password = process.env.FB_PASSWORD || "";
 
+    if (!email || !password) {
+      console.error(
+        "[FB][login-form] Brak FB_EMAIL / FB_PASSWORD w zmiennych środowiskowych."
+      );
+      return false;
+    }
+
+    console.log("[FB][login-form] Wypełniam email/hasło...");
+
+    // wyczyść i wpisz email
+    await emailInput.click({ clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    await emailInput.type(email, { delay: 50 });
+
+    // wyczyść i wpisz hasło
+    await passInput.click({ clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    await passInput.type(password, { delay: 50 });
+
+    const loginButton =
+      (await page.$("button[name='login']")) ||
+      (await page.$("button[type='submit']"));
+
+    if (!loginButton) {
+      console.log("[FB][login-form] Nie znalazłem przycisku logowania.");
+      return false;
+    }
+
+    console.log("[FB][login-form] Klikam Zaloguj się…");
+
+    await Promise.all([
+      loginButton.click(),
+      page
+        .waitForNavigation({
+          waitUntil: "networkidle2",
+          timeout: 60000,
+        })
+        .catch(() => {}),
+    ]);
+
+    await sleepRandom(1500, 2500);
     console.log("[FB][login-form] Formularz logowania wysłany.");
     return true;
   } catch (err) {
-    console.error("[FB][login-form] Błąd (ignorowany):", err?.message || err);
+    console.error("[FB][login-form] Błąd:", err.message);
     return false;
   }
 }
 
 /**
- * Główne logowanie – NAJSTABILNIEJSZE: login.php?next=<URL>
- * Param nextUrl: URL posta, do którego FB ma wrócić po loginie.
+ * Główne logowanie na FB – klasyczne /login.
  */
-async function fbLogin(page, nextUrl = "") {
-  try {
-    console.log("[FB][login] Start logowania (best-effort)");
+async function fbLogin(page) {
+  console.log("[FB][login] Start logowania…");
 
-    const next = nextUrl ? `?next=${encodeURIComponent(nextUrl)}` : "";
-    const url = `https://www.facebook.com/login.php${next}`;
+  await page.goto("https://www.facebook.com/login", {
+    waitUntil: "networkidle2",
+    timeout: 60000,
+  });
 
-    await page
-      .goto(url, { waitUntil: "networkidle2", timeout: 60000 })
-      .catch(() => {});
+  // popup cookies – próbujemy go zamknąć zanim dotkniemy inputów
+  await acceptLoginCookies(page);
 
-    await sleepRandom(900, 1400);
+  console.log("[FB][login] Czekam na input email/pass...");
 
-    // cookies – dwie metody (mark+click oraz szybki fallback)
-    await acceptLoginCookies(page).catch(() => {});
-    await acceptCookiesIfPresent(page).catch(() => {});
+  await page.waitForSelector("#email", { timeout: 60000 });
+  await page.waitForSelector("#pass", { timeout: 60000 });
 
-    const ok = await fillLoginFormBestEffort(page);
-    if (!ok) return false;
+  // jeszcze raz sprawdź, czy cookies nie wyskoczyły ponownie
+  await acceptLoginCookies(page);
 
-    // FB czasem zostaje na tej samej stronie – dodatkowa pauza
-    await sleepRandom(1200, 2000);
+  console.log("[FB][login] Wpisuję email...");
+  await page.type("#email", process.env.FB_EMAIL || "", { delay: 60 });
 
-    return true;
-  } catch (e) {
-    console.log("[FB][login] Błąd (ignorowany):", e?.message || e);
-    return false;
-  }
+  console.log("[FB][login] Wpisuję hasło...");
+  await page.type("#pass", process.env.FB_PASSWORD || "", { delay: 60 });
+
+  console.log("[FB][login] Klikam Zaloguj się…");
+
+  await Promise.all([
+    page.click('button[name="login"]'),
+    page
+      .waitForNavigation({
+        waitUntil: "networkidle2",
+        timeout: 60000,
+      })
+      .catch(() => {}),
+  ]);
+
+  console.log("[FB] Po logowaniu:", page.url());
 }
 
 /**
- * Heurystyczny check sesji (jak serwer).
+ * Szybki check, czy jesteśmy zalogowani.
  */
 async function checkIfLogged(page) {
-  try {
-    return await page.evaluate(() => {
-      return !!(
-        document.querySelector('input[aria-label*="Szukaj"]') ||
-        document.querySelector('input[placeholder*="Szukaj"]') ||
-        document.querySelector('a[aria-label*="Profil"]') ||
-        document.querySelector('div[aria-label*="Konto"]')
-      );
-    });
-  } catch {
-    return false;
-  }
+  return page.evaluate(() => {
+    const selectors = [
+      'input[aria-label*="Szukaj"]',
+      'input[placeholder*="Szukaj"]',
+      'a[aria-label*="Profil"]',
+      'div[aria-label*="Konto"]',
+    ];
+    return selectors.some((sel) => document.querySelector(sel));
+  });
 }
 
 /**
- * Kliknięcie elementu po dokładnym tekście (lokalny helper).
+ * Kliknięcie elementu (button / link) po dokładnym tekście – po stronie DOM.
+ * Używane np. w nakładce „Wyświetl więcej na Facebooku”.
  */
 async function clickByText(page, text) {
   const res = await page.evaluate((label) => {
     const els = Array.from(
-      document.querySelectorAll("button, a, div[role='button'], span[role='button']")
+      document.querySelectorAll("button, a, div[role='button']")
     );
-    const lowLabel = String(label || "").toLowerCase();
+    const lowLabel = label.toLowerCase();
     for (const el of els) {
       const t = (el.innerText || el.textContent || "").trim().toLowerCase();
       if (!t) continue;
@@ -322,100 +240,77 @@ async function clickByText(page, text) {
 }
 
 /**
- * Heurystyka login-wall (serwerowa).
- * Uwaga: "Log In" czasem jest widoczne mimo, że da się czytać komentarze,
- * więc to powinno odpalać się dopiero gdy UI nie potrafi odczytać danych.
+ * Jeżeli na poście pojawi się nakładka z przyciskiem „Zaloguj się / Log In”
+ * – próbujemy zalogować się **na miejscu**.
  */
-async function looksLikeLoginWall(page) {
-  try {
-    return await page.evaluate(() => {
-      const txt = (document.body?.innerText || "").toLowerCase();
-      if (!txt) return false;
+async function ensureLoggedInOnPostOverlay(page) {
+  const overlayDetected = await page.evaluate(() => {
+    const texts = Array.from(
+      document.querySelectorAll("div, span, h1, h2, h3, button, a")
+    )
+      .map((el) => (el.textContent || "").trim())
+      .filter(Boolean);
 
-      const hasLoginWords =
-        txt.includes("log in") ||
-        txt.includes("sign up") ||
-        txt.includes("create new account") ||
-        txt.includes("zaloguj") ||
-        txt.includes("zarejestruj");
-
-      if (!hasLoginWords) return false;
-
-      const hasLoginForm =
-        !!document.querySelector("input[type='password']") ||
-        !!document.querySelector("input#email") ||
-        !!document.querySelector("input[name='email']");
-
-      const hasPostWords =
-        txt.includes("comment") ||
-        txt.includes("comments") ||
-        txt.includes("komentarz") ||
-        txt.includes("lubię to") ||
-        txt.includes("like") ||
-        txt.includes("reply") ||
-        txt.includes("replied");
-
-      return hasLoginForm || (hasLoginWords && !hasPostWords);
+    return texts.some((t) => {
+      const low = t.toLowerCase();
+      return (
+        low.includes("wyświetl więcej na facebooku") ||
+        low.includes("zobacz więcej na facebooku") ||
+        low.includes("see more on facebook")
+      );
     });
-  } catch {
-    return false;
-  }
-}
+  });
 
-/**
- * Główny „włącznik” do użycia w UI handlerach:
- * - jeśli wygląda na login-wall -> login.php?next -> wróć na post
- * - fallback: próba loginViaVisibleForm (gdyby FB zrobił overlay)
- *
- * Param postUrl: najlepiej podać URL posta (żeby next= działało idealnie)
- */
-async function ensureLoggedInOnPostOverlay(page, postUrl = "") {
-  try {
-    const cur = page.url();
-    const target = postUrl || cur;
+  if (!overlayDetected) return;
 
-    const wall = await looksLikeLoginWall(page);
-    if (!wall) return false;
+  console.log(
+    "[FB] Wykryto nakładkę / okno logowania na poście – próba zalogowania."
+  );
 
-    console.log(
-      "[FB][login] Wykryto login-wall -> login.php?next i próba logowania."
-    );
-
-    const tried = await fbLogin(page, target);
-
-    let logged = await checkIfLogged(page);
-    console.log("[FB][login] session after fbLogin:", logged ? "YES" : "NO");
-
-    // jeśli FB nie przerzucił automatycznie, wróć na post
-    if (target && norm(page.url()) !== norm(target)) {
-      await page
-        .goto(target, { waitUntil: "networkidle2", timeout: 60000 })
-        .catch(() => {});
-      await sleepRandom(900, 1400);
+  // 1) Najpierw spróbuj po prostu zalogować się na widocznym formularzu
+  const usedInline = await loginViaVisibleForm(page, "post-overlay-inline");
+  if (usedInline) {
+    const logged = await checkIfLogged(page);
+    if (logged) {
+      console.log(
+        "[FB] Udało się zalogować z poziomu nakładki posta (inline formularz)."
+      );
+      return;
     }
+  }
 
-    // jeszcze raz sprawdź sesję po powrocie
-    logged = await checkIfLogged(page);
+  // 2) Fallback – klikamy "Zaloguj się" / "Log In", jeśli jest osobny przycisk
+  let clicked = await clickByText(page, "Zaloguj się");
+  if (!clicked) {
+    clicked = await clickByText(page, "Log In");
+  }
 
-    // fallback: gdyby FB nadal siedział na overlayu, spróbuj visible-form
-    if (!logged) {
-      const usedInline = await loginViaVisibleForm(page, "post-overlay-inline");
-      if (usedInline) {
-        logged = await checkIfLogged(page);
+  if (clicked) {
+    console.log(
+      "[FB] Kliknięto przycisk logowania w nakładce posta. Czekam na przeładowanie..."
+    );
+    await sleepRandom(4000, 6000);
+
+    // Po przeładowaniu znowu spróbuj formularza, tym razem już na pełnej stronie logowania
+    const used = await loginViaVisibleForm(page, "post-overlay-after-click");
+    if (used) {
+      const logged = await checkIfLogged(page);
+      if (logged) {
+        console.log("[FB] Zalogowano po kliknięciu przycisku w nakładce.");
+      } else {
         console.log(
-          "[FB][login] session after loginViaVisibleForm:",
-          logged ? "YES" : "NO"
+          "[FB] Formularz po nakładce wysłany, ale nadal nie widać zalogowanej sesji."
         );
       }
+    } else {
+      console.log(
+        "[FB] Po kliknięciu przycisku w nakładce nie znalazłem formularza logowania."
+      );
     }
-
-    return tried && logged;
-  } catch (e) {
+  } else {
     console.log(
-      "[FB][login] ensureLoggedInOnPostOverlay error (ignored):",
-      e?.message || e
+      "[FB] Nie udało się znaleźć przycisku logowania w nakładce posta."
     );
-    return false;
   }
 }
 
