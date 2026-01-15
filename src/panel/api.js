@@ -620,7 +620,7 @@ http
       json(res, { ok: false, error: e.message }, 500);
     }
   })
-  .listen(PORT, "127.0.0.1", () => {
+  .listen(PORT, "0.0.0.0", () => {
     console.log(`[PANEL] listening on http://127.0.0.1:${PORT} (PM2_APP=${PM2_APP})`);
     console.log(`[PANEL] UI_DIR=${UI_DIR}`);
     console.log(`[PANEL] BASE_DIR=${BASE_DIR}`);

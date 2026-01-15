@@ -18,7 +18,7 @@ import {
 
 import { loadCookies, saveCookies } from "./fb/cookies.js";
 import { checkIfLogged, fbLogin } from "./fb/login.js";
-import { sendWebhook } from "./webhook.js";
+import { sendWebhook, parseFbRelativeTime, filterByAge } from "./webhook.js";
 import { loadCache, saveCache } from "./db/cache.js";
 import { sendTelegramLeads } from "./telegram.js";
 
@@ -71,6 +71,56 @@ function envBool(name, def = false) {
   return ["1", "true", "yes", "y", "tak", "on"].includes(raw);
 }
 
+// ================== TELEGRAM (FILTER AGE + AGE LOG) ==================
+async function sendTelegramIfFresh(post, comments, ctx = "normal") {
+  const list = Array.isArray(comments) ? comments : [];
+  if (list.length === 0) return;
+
+  const now = Date.now();
+
+  const normalized = list.map((c) => {
+    const rel = String(c?.fb_time_raw || c?.time || "").trim();
+    const abs = parseFbRelativeTime(rel);
+    const iso = abs ? abs.toISOString() : (c?.fb_time_iso || null);
+    const ageMin = abs ? Math.round(((now - abs.getTime()) / 60000) * 10) / 10 : null;
+
+    return {
+      ...c,
+      fb_time_raw: rel || null,
+      fb_time_iso: iso,
+      _ageMin: ageMin,
+    };
+  });
+
+  // log wieku KAŻDEGO komentarza (szybki debug)
+  for (const c of normalized) {
+    console.log("[TG][AGE]", {
+      ctx,
+      id: c?.id || null,
+      author: c?.author || c?.name || null,
+      rel: c?.fb_time_raw || null,
+      iso: c?.fb_time_iso || null,
+      ageMin: c?._ageMin,
+    });
+  }
+
+  const fresh = filterByAge(normalized);
+
+  console.log("[TG] Filtr wieku komentarzy:", {
+    ctx,
+    before: normalized.length,
+    after: fresh.length,
+    maxAgeMin: Number(process.env.WEBHOOK_MAX_AGE_MIN || 60),
+  });
+
+  if (fresh.length > 0) {
+    await sendTelegramLeads(post, fresh);
+  } else {
+    console.log("[TG] Brak świeżych komentarzy – nic nie wysyłam.");
+  }
+}
+// =====================================================================
+
 /* ============================================================
    ===============   STEALTH / UKRYWANIE BOTA   ===============
    ============================================================ */
@@ -113,6 +163,38 @@ function safeJsonParse(s) {
 }
 
 function normalizeUrl(u) {
+
+function makePostKey(url) {
+  try {
+    const u = new URL(String(url || "").trim());
+    for (const k of Array.from(u.searchParams.keys())) {
+      if (k.startsWith("__") || ["ref","notif_id","notif_t","refid"].includes(k)) {
+        u.searchParams.delete(k);
+      }
+    }
+    if (u.pathname.includes("permalink.php")) {
+      const s = u.searchParams.get("story_fbid");
+      const id = u.searchParams.get("id");
+      if (s && id) return `permalink:${id}:${s}`;
+    }
+    if (u.pathname.includes("story.php")) {
+      const s = u.searchParams.get("story_fbid");
+      const id = u.searchParams.get("id");
+      if (s && id) return `story:${id}:${s}`;
+    }
+    const mPosts = u.pathname.match(/\/posts\/([^/?#]+)/i);
+    if (mPosts?.[1]) return `posts:${mPosts[1]}`;
+    const v = u.searchParams.get("v");
+    if (u.pathname.includes("/watch") && v) return `watch:${v}`;
+    const mVid = u.pathname.match(/\/videos\/([^/?#]+)/i);
+    if (mVid?.[1]) return `videos:${mVid[1]}`;
+    const q = u.searchParams.toString();
+    return `url:${u.host}${u.pathname}${q ? "?" + q : ""}`;
+  } catch {
+    return `url:${String(url || "").trim()}`;
+  }
+}
+
   if (!u) return "";
   const x = String(u).trim();
   if (!/^https?:\/\/.+/i.test(x)) return "";
@@ -480,26 +562,57 @@ async function startWatcher() {
               if (!knownSet.has(c.id)) {
                 knownSet.add(c.id);
                 newComments.push(c);
+      c.__postId = post.id;
+      c.__postUrl = post.url;
               }
             }
 
-            if (hasCount && newComments.length === 0 && count > prev) {
+            
+            // ===== DEBUG: sanity-check skąd są komentarze =====
+            console.log("[DBG][POST_CTX]", {
+              postId: post?.id || null,
+              postUrl: post?.url || null,
+              snapshotLen: Array.isArray(snapshot) ? snapshot.length : null,
+              newLen: Array.isArray(newComments) ? newComments.length : null,
+              sample: (Array.isArray(newComments) ? newComments.slice(0, 3) : []).map((c) => ({
+                id: c?.id || null,
+                author: c?.author || c?.name || null,
+                time: c?.fb_time_raw || c?.time || null,
+                // poniższe pola mogą istnieć albo nie — ale jak istnieją, to nam powiedzą prawdę:
+                link: c?.link || c?.permalink || c?.url || null,
+                postRef: c?.postUrl || c?.post_url || c?.post || null,
+              })),
+            });
+            // ================================================
+if (hasCount && newComments.length === 0 && count > prev) {
               const diff = Math.max(1, count - prev);
               const tail = snapshot.slice(-diff);
               for (const c of tail) if (c?.id) knownSet.add(c.id);
 
               console.log(`[Watcher] Post ${post.id}: Fallback — brak nowych ID, biorę ostatnie ${diff} jako nowe.`);
               await sendWebhook(post, tail, count, prev);
-              await sendTelegramLeads(post, tail);
+
+              await sendTelegramIfFresh(post, tail, "fallback");
+
               continue;
             }
 
             if (newComments.length > 0) {
               console.log(`[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`);
               await sendWebhook(post, newComments, hasCount ? count : null, hasCount ? prev : null);
-              await sendTelegramLeads(post, newComments);
-            } else {
-              console.log(`[Watcher] Post ${post.id}: Brak nowych komentarzy (po ID i fallbacku).`);
+
+
+
+
+    const safeComments = newComments.filter(c => c.__postId === post.id);
+    if (safeComments.length !== newComments.length) {
+      console.warn("[WATCHER][GUARD] Odfiltrowano komentarze spoza posta", {
+        postId: post.id,
+        before: newComments.length,
+        after: safeComments.length
+      });
+    }
+                await sendTelegramIfFresh(post, safeComments, "normal");
             }
           } catch (err) {
             console.error(`[Watcher] Błąd przy sprawdzaniu ${post.id}:`, err?.message || err);

@@ -352,31 +352,27 @@ async function extractCommentsFromDOM(page) {
     );
 
     const extracted = nodes
-      .map((node, idx) => {
-        const author =
-          node.querySelector('a[role="link"] span span')?.textContent?.trim() || null;
-        const text = node.querySelector('div[dir="auto"]')?.textContent?.trim() || null;
+        .map((node, idx) => {
+          const author = node.querySelector("a[role=\"link\"] span span")?.textContent?.trim() || null;
+          const text = node.querySelector("div[dir=\"auto\"]")?.textContent?.trim() || null;
 
-        const linkEl =
-          node.querySelector("a[href*='reply_comment_id']") ||
-          node.querySelector("a[href*='comment_id']") ||
-          node.querySelector('a[role="link"]');
+          const linkEl = node.querySelector("a[href*=\"reply_comment_id\"]") ||
+                         node.querySelector("a[href*=\"comment_id\"]") ||
+                         node.querySelector("a[role=\"link\"]");
 
-        const href = linkEl?.getAttribute("href") || null;
-        const permalink = href ? (href.startsWith("http") ? href : `https://www.facebook.com${href}`) : null;
+          const href = linkEl?.getAttribute("href") || null;
+          const permalink = href ? (href.startsWith("http") ? href : `https://www.facebook.com`) : null;
 
-        const id_raw = permalink ? extractCommentIdRaw(permalink) : null;
+          const id_raw = permalink ? extractCommentIdRaw(permalink) : null;
+          const id = id_raw ? String(id_raw).trim() : null;
+          const id_num = id_raw ? idNumFromRaw(id_raw) : null;
+          const time = findTimeAround(linkEl, node);
 
-        const id = id_raw ? String(id_raw).trim() : null;
-        const id_num = id_raw ? idNumFromRaw(id_raw) : null;
+          if (!author || !text || !id) return null;
 
-        const time = findTimeAround(linkEl, node);
-
-        if (!author || !text) return null;
-
-        return { id, id_raw, id_num, author, text, time, permalink, pos: idx + 1 };
-      })
-      .filter(Boolean);
+          return { id, id_raw, id_num, author, text, time, permalink, pos: idx + 1 };
+        })
+        .filter(Boolean);
 
     return extracted;
   });
@@ -622,12 +618,81 @@ export async function extractCommentsData(page, url = null) {
   const finalUrl = url || page.url();
   const ui = pickUiHandler(finalUrl);
 
+  const getPostRef = (u) => {
+    if (!u) return null;
+    try {
+      const x = new URL(u);
+
+      // permalink.php?story_fbid=...
+      const story = x.searchParams.get("story_fbid");
+      if (story) return `story_fbid:${story}`;
+
+      // /.../posts/<id>  |  /.../videos/<id>  |  /.../photos/<id>
+      const parts = x.pathname.split("/").filter(Boolean);
+      for (let i = 0; i < parts.length - 1; i++) {
+        const k = parts[i];
+        if (k === "posts" || k === "videos" || k === "photos" || k === "reels") {
+          const v = parts[i + 1];
+          if (v) return `${k}:${v}`;
+        }
+      }
+
+      // fallback: brak stabilnego identyfikatora posta -> null (nie dedupujemy po ref)
+        return null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const postRef = getPostRef(finalUrl);
+
+  const filterByRef = (arr) => {
+    if (!Array.isArray(arr)) return [];
+    if (!postRef) return arr;
+
+    let dropped = 0;
+      const out = [];
+      let sampleLogged = 0;
+
+      // kontekst: do czego porownujemy
+      console.log(`[DEDUP][CTX] want= finalUrl=`);
+
+      for (const c of arr) {
+        const permalink = (c && typeof c === "object") ? (c.permalink || null) : null;
+        const cref = permalink ? getPostRef(permalink) : null;
+
+        // pokaz 3 pierwsze permalink->cref
+        if (sampleLogged < 3 && permalink) {
+          console.log(`[DEDUP][SAMPLE] permalink= cref=`);
+          sampleLogged += 1;
+        }
+
+        if (cref && cref !== postRef) {
+          dropped += 1;
+          continue;
+        }
+        if (c && typeof c === "object") c.postRef = postRef;
+        out.push(c);
+      }
+
+      if (dropped > 0) {
+        console.log(`[DEDUP] dropped= (ref mismatch) postRef=`);
+      }
+
+      if (arr.length > 0 && out.length === 0 && dropped === arr.length) {
+        out._dedupAllDropped = true;
+        console.log(`[DEDUP][ALL_DROPPED] all= want=`);
+      }
+
+      return out;
+  };
+
   if (ui?.extractComments) {
     console.log(`[FB][router] UI -> ${ui.type || "unknown"} extractComments`);
     const out = await ui.extractComments(page, finalUrl);
-    return Array.isArray(out) ? out : [];
+    return filterByRef(out);
   }
 
   const out = await extractCommentsFromDOM(page);
-  return Array.isArray(out) ? out : [];
+  return filterByRef(out);
 }

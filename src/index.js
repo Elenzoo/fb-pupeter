@@ -1,3 +1,15 @@
+if (process.env.__WATCHER_LOCKED__) {
+  console.error("WATCHER DUPLICATE START — EXIT");
+  process.exit(1);
+}
+process.env.__WATCHER_LOCKED__ = "1";
+
+const __log = console.log;
+console.log = (...args) => {
+  const ts = new Date().toISOString().replace("T"," ").replace("Z","");
+  __log(`[${ts}]`, ...args);
+};
+
 // src/index.js
 import "dotenv/config";
 import fs from "fs";
