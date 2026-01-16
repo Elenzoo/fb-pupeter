@@ -7,6 +7,8 @@ import {
   CHECK_INTERVAL_MS,
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,
+  FAST_MODE,
+  FAST_SKIP_AGE_MIN,
 } from "./config.js";
 
 import {
@@ -14,6 +16,8 @@ import {
   getCommentCount,
   loadAllComments,
   extractCommentsData,
+  switchCommentsSortToNewest,
+  loadRecentCommentsLight,
 } from "./fb/comments.js";
 
 import { loadCookies, saveCookies } from "./fb/cookies.js";
@@ -68,6 +72,12 @@ function isNavigationError(err) {
 function envBool(name, def = false) {
   const raw = String(process.env[name] ?? "").trim().toLowerCase();
   if (raw === "") return def;
+  return ["1", "true", "yes", "y", "tak", "on"].includes(raw);
+}
+
+// ===== NOWE: FAST MODE enable (z config FAST_MODE string) =====
+function isFastModeEnabled() {
+  const raw = String(FAST_MODE || "").trim().toLowerCase();
   return ["1", "true", "yes", "y", "tak", "on"].includes(raw);
 }
 
@@ -414,6 +424,28 @@ function flushCacheToDisk() {
   saveCache(out);
 }
 
+// ===== NOWE: helper FAST MODE — policz wiek najnowszego komentarza w snapshot’cie =====
+function getNewestAgeMin(snapshot) {
+  const list = Array.isArray(snapshot) ? snapshot : [];
+  const now = Date.now();
+
+  let best = null;
+  for (const c of list) {
+    const rel = String(c?.fb_time_raw || c?.time || "").trim();
+    if (!rel) continue;
+
+    const abs = parseFbRelativeTime(rel);
+    if (!abs) continue;
+
+    const ageMin = (now - abs.getTime()) / 60000;
+    if (!Number.isFinite(ageMin)) continue;
+
+    if (best == null || ageMin < best) best = ageMin;
+  }
+
+  return best;
+}
+
 /* ============================================================
    =====================   GŁÓWNY WATCHER   ===================
    ============================================================ */
@@ -433,7 +465,10 @@ async function startWatcher() {
   console.log(
     "[Watcher] Monitoring startuje. Sprawdzanie co",
     Math.round(CHECK_INTERVAL_MS / 1000),
-    "sekund."
+    "sekund.",
+    isFastModeEnabled()
+      ? `(FAST_MODE=true, skip>${FAST_SKIP_AGE_MIN} min)`
+      : ""
   );
 
   const loop = async () => {
@@ -529,7 +564,13 @@ async function startWatcher() {
               );
 
               if (EXPAND_COMMENTS) {
-                await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }, post.url).catch(() => {});
+                if (isFastModeEnabled()) {
+                  await switchCommentsSortToNewest(page, post.url).catch(() => false);
+                  await loadRecentCommentsLight(page, { rounds: 2, clicksPerRound: 4 }, post.url).catch(() => {});
+                } else {
+                  await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }, post.url).catch(() => {});
+                }
+
                 const snap = await extractCommentsData(page, post.url).catch(() => []);
                 for (const c of snap) if (c?.id) knownSet.add(c.id);
                 console.log(`[Watcher] Post ${post.id}: Zapamiętano ${snap.length} istniejących komentarzy.`);
@@ -553,7 +594,35 @@ async function startWatcher() {
 
             if (!EXPAND_COMMENTS) continue;
 
-            await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(() => {});
+            // ===== FAST MODE: Najnowsze + lekki load + skip jeśli za stare =====
+            if (isFastModeEnabled()) {
+              await switchCommentsSortToNewest(page, post.url).catch(() => false);
+              await loadRecentCommentsLight(page, { rounds: 2, clicksPerRound: 4 }, post.url).catch(() => {});
+
+              const fastSnap = await extractCommentsData(page, post.url).catch(() => []);
+
+              // zapamiętaj co widać (żeby nie mielić tych samych ID w kółko)
+              for (const c of fastSnap) if (c?.id) knownSet.add(c.id);
+
+              const newestAgeMin = getNewestAgeMin(fastSnap);
+
+              if (newestAgeMin != null && newestAgeMin > Number(FAST_SKIP_AGE_MIN || 180)) {
+                console.log("[Watcher][FAST] skip: zbyt stare komentarze", {
+                  postId: post.id,
+                  newestAgeMin: Math.round(newestAgeMin * 10) / 10,
+                  limitMin: Number(FAST_SKIP_AGE_MIN || 180),
+                  snapLen: fastSnap.length,
+                });
+                continue;
+              }
+              // jeśli nie skipujemy — lecimy dalej normalnie (dalej po ID), ale bez pełnego loadAllComments
+            }
+
+            // ===== normalny snapshot (FULL) albo FAST snapshot (jeśli nie skip) =====
+            if (!isFastModeEnabled()) {
+              await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(() => {});
+            }
+
             const snapshot = await extractCommentsData(page, post.url).catch(() => []);
 
             const newComments = [];
@@ -562,12 +631,11 @@ async function startWatcher() {
               if (!knownSet.has(c.id)) {
                 knownSet.add(c.id);
                 newComments.push(c);
-      c.__postId = post.id;
-      c.__postUrl = post.url;
+                c.__postId = post.id;
+                c.__postUrl = post.url;
               }
             }
 
-            
             // ===== DEBUG: sanity-check skąd są komentarze =====
             console.log("[DBG][POST_CTX]", {
               postId: post?.id || null,
@@ -578,13 +646,13 @@ async function startWatcher() {
                 id: c?.id || null,
                 author: c?.author || c?.name || null,
                 time: c?.fb_time_raw || c?.time || null,
-                // poniższe pola mogą istnieć albo nie — ale jak istnieją, to nam powiedzą prawdę:
                 link: c?.link || c?.permalink || c?.url || null,
-                postRef: c?.postUrl || c?.post_url || c?.post || null,
+                postRef: c?.postRef || null,
               })),
             });
             // ================================================
-if (hasCount && newComments.length === 0 && count > prev) {
+
+            if (hasCount && newComments.length === 0 && count > prev) {
               const diff = Math.max(1, count - prev);
               const tail = snapshot.slice(-diff);
               for (const c of tail) if (c?.id) knownSet.add(c.id);
@@ -601,18 +669,15 @@ if (hasCount && newComments.length === 0 && count > prev) {
               console.log(`[Watcher] Post ${post.id}: Znaleziono ${newComments.length} NOWYCH komentarzy.`);
               await sendWebhook(post, newComments, hasCount ? count : null, hasCount ? prev : null);
 
-
-
-
-    const safeComments = newComments.filter(c => c.__postId === post.id);
-    if (safeComments.length !== newComments.length) {
-      console.warn("[WATCHER][GUARD] Odfiltrowano komentarze spoza posta", {
-        postId: post.id,
-        before: newComments.length,
-        after: safeComments.length
-      });
-    }
-                await sendTelegramIfFresh(post, safeComments, "normal");
+              const safeComments = newComments.filter(c => c.__postId === post.id);
+              if (safeComments.length !== newComments.length) {
+                console.warn("[WATCHER][GUARD] Odfiltrowano komentarze spoza posta", {
+                  postId: post.id,
+                  before: newComments.length,
+                  after: safeComments.length
+                });
+              }
+              await sendTelegramIfFresh(post, safeComments, "normal");
             }
           } catch (err) {
             console.error(`[Watcher] Błąd przy sprawdzaniu ${post.id}:`, err?.message || err);
