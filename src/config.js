@@ -85,6 +85,14 @@ const USE_UI_HANDLERS =
 const INCLUDE_REPLIES =
   process.env.INCLUDE_REPLIES === "false" ? false : true;
 
+// NOWE: TRYB SZYBKI
+// FAST_MODE=true -> sortuj komentarze na "Najnowsze" i skipuj post, gdy najnowszy komentarz jest starszy niż limit
+const FAST_MODE = String(process.env.FAST_MODE || "")
+  .trim()
+  .toLowerCase();
+
+const FAST_SKIP_AGE_MIN = Number(process.env.FAST_SKIP_AGE_MIN || 180);
+
 // co ile sekund lecimy po postach (podstawowy interwał)
 // można nadpisać w .env: CHECK_INTERVAL_MS=60000
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
@@ -99,6 +107,10 @@ export {
   USE_UI_HANDLERS,
   INCLUDE_REPLIES,
   CHECK_INTERVAL_MS,
+
+  // tryb szybki
+  FAST_MODE,
+  FAST_SKIP_AGE_MIN,
 
   // źródła postów
   POSTS_JSON_PATH,
