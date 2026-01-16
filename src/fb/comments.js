@@ -30,7 +30,6 @@ function pickUiHandler(url) {
   return null;
 }
 
-
 /* ============================================================
    =======  PRZEŁĄCZANIE FILTRA / SORTOWANIA KOMENTARZY  =======
    ============================================================ */
@@ -58,7 +57,7 @@ async function openCommentsMenu(page) {
     );
 
     // Trigger to taki przycisk, który aktualnie pokazuje stan (Najtrafniejsze/Wszystkie/Najnowsze itd.)
-    // Możemy kliknąć go, żeby otworzyć menu – ALE później wybieramy TYLKO "Wszystkie komentarze".
+    // Możemy kliknąć go, żeby otworzyć menu – później wybieramy opcję.
     const btn = els.find((el) => {
       const t = norm(getLabel(el));
       return (
@@ -162,6 +161,32 @@ async function switchCommentsFilterToAllLegacy(page) {
   }
 
   console.log("[FB][filter] Nie udało się ustawić 'Wszystkie komentarze' (best-effort).");
+  return false;
+}
+
+// ===== NOWE (FAST MODE): sortowanie na "Najnowsze" (best-effort) =====
+async function switchCommentsSortToNewestLegacy(page) {
+  console.log("[FB][sort] Próba przełączenia sortowania komentarzy na: 'Najnowsze'…");
+
+  if (!(await page.evaluate(() => !!document.querySelector("div[role='menu']")))) {
+    const opened = await openCommentsMenu(page);
+    if (opened) await sleepRandom(250, 450);
+  }
+
+  const picked = await clickMenuOptionByPrefix(page, ["najnowsze", "newest"]);
+
+  if (picked?.ok) {
+    await sleepRandom(250, 450);
+    await page
+      .waitForFunction(() => !document.querySelector("div[role='menu']"), {
+        timeout: 2500,
+      })
+      .catch(() => {});
+    console.log("[FB][sort] Sortowanie komentarzy ustawione na: 'Najnowsze' / 'Newest'.");
+    return true;
+  }
+
+  console.log("[FB][sort] Nie udało się ustawić 'Najnowsze' (best-effort).");
   return false;
 }
 
@@ -575,124 +600,33 @@ async function loadAllCommentsLegacy(page, opts = {}) {
   console.log("[FB][load] done:", { anchors: finalAnchors, nodes: finalNodes });
 }
 
-/* ============================================================
-   ===================  PUBLIC API (ROUTED)  ===================
-   ============================================================ */
-
-export async function prepare(page, url) {
-  const ui = pickUiHandler(url);
-  if (ui?.prepare) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} prepare`);
-    return ui.prepare(page, url);
-  }
-  console.log("[FB][router] UI -> legacy prepare");
-  return prepareLegacy(page, url);
-}
-
-export async function getCommentCount(page, url) {
-  const ui = pickUiHandler(url || page.url());
-  if (ui?.getCommentCount) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} getCommentCount`);
-    return ui.getCommentCount(page, url);
-  }
-  console.log("[FB][router] UI -> legacy getCommentCount");
-  return getCommentCountLegacy(page);
-}
-
-export async function loadAllComments(page, opts = {}, url = null) {
+// ===== NOWE (FAST MODE): lekki load tylko świeżej porcji =====
+async function loadRecentCommentsLightLegacy(page, opts = {}) {
   if (!EXPAND_COMMENTS) return;
 
-  const finalUrl = url || page.url();
-  const ui = pickUiHandler(finalUrl);
+  const rounds = Number.isFinite(opts.rounds) ? Number(opts.rounds) : 2;
+  const clicksPerRound = Number.isFinite(opts.clicksPerRound) ? Number(opts.clicksPerRound) : 4;
 
-  if (ui?.loadAllComments) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} loadAllComments`);
-    return ui.loadAllComments(page, { expectedTotal: opts.expectedTotal });
-  }
+  console.log("[FB][fast-load] start", { rounds, clicksPerRound });
 
-  console.log("[FB][router] UI -> legacy loadAllComments");
-  return loadAllCommentsLegacy(page, opts);
-}
-
-export async function extractCommentsData(page, url = null) {
-  const finalUrl = url || page.url();
-  const ui = pickUiHandler(finalUrl);
-
-  const getPostRef = (u) => {
-    if (!u) return null;
-    try {
-      const x = new URL(u);
-
-      // permalink.php?story_fbid=...
-      const story = x.searchParams.get("story_fbid");
-      if (story) return `story_fbid:${story}`;
-
-      // /.../posts/<id>  |  /.../videos/<id>  |  /.../photos/<id>
-      const parts = x.pathname.split("/").filter(Boolean);
-      for (let i = 0; i < parts.length - 1; i++) {
-        const k = parts[i];
-        if (k === "posts" || k === "videos" || k === "photos" || k === "reels") {
-          const v = parts[i + 1];
-          if (v) return `${k}:${v}`;
-        }
-      }
-
-      // fallback: brak stabilnego identyfikatora posta -> null (nie dedupujemy po ref)
-        return null;
-    } catch (e) {
-      return null;
+  for (let r = 1; r <= rounds; r++) {
+    let clicks = 0;
+    for (let i = 0; i < clicksPerRound; i++) {
+      const did = await clickOneExpandButton(page).catch(() => false);
+      if (!did) break;
+      clicks++;
+      await sleepRandom(180, 320);
     }
-  };
 
-  const postRef = getPostRef(finalUrl);
+    await scrollPost(page, 180).catch(() => {});
+    await sleepRandom(300, 520);
 
-  const filterByRef = (arr) => {
-    if (!Array.isArray(arr)) return [];
-    if (!postRef) return arr;
-
-    let dropped = 0;
-      const out = [];
-      let sampleLogged = 0;
-
-      // kontekst: do czego porownujemy
-      console.log(`[DEDUP][CTX] want= finalUrl=`);
-
-      for (const c of arr) {
-        const permalink = (c && typeof c === "object") ? (c.permalink || null) : null;
-        const cref = permalink ? getPostRef(permalink) : null;
-
-        // pokaz 3 pierwsze permalink->cref
-        if (sampleLogged < 3 && permalink) {
-          console.log(`[DEDUP][SAMPLE] permalink= cref=`);
-          sampleLogged += 1;
-        }
-
-        if (cref && cref !== postRef) {
-          dropped += 1;
-          continue;
-        }
-        if (c && typeof c === "object") c.postRef = postRef;
-        out.push(c);
-      }
-
-      if (dropped > 0) {
-        console.log(`[DEDUP] dropped= (ref mismatch) postRef=`);
-      }
-
-      if (arr.length > 0 && out.length === 0 && dropped === arr.length) {
-        out._dedupAllDropped = true;
-        console.log(`[DEDUP][ALL_DROPPED] all= want=`);
-      }
-
-      return out;
-  };
-
-  if (ui?.extractComments) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} extractComments`);
-    const out = await ui.extractComments(page, finalUrl);
-    return filterByRef(out);
+    console.log(`[FB][fast-load] round ${r}: clicks=${clicks}`);
   }
 
-  const out = await extractCommentsFromDOM(page);
-  return filterByRef(out);
+  console.log("[FB][fast-load] done");
 }
+
+/* ============================================================
+   ===================  PUBLIC API (ROUTED)  ===================
+   =======================
