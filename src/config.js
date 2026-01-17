@@ -6,6 +6,20 @@ import "dotenv/config";
  */
 const POSTS_JSON_PATH = process.env.POSTS_JSON_PATH || "data/posts.json";
 
+/* ==================== PANEL API – ZDALNE POSTY ==================== */
+/**
+ * POSTS_API_URL – URL do API panelu (endpoint GET /api/posts)
+ * Np.: POSTS_API_URL=http://twoj-serwer:3180/api/posts
+ * Jeśli ustawione, watcher pobiera posty z panelu przez HTTP (priorytet nad plikiem i Sheets)
+ */
+const POSTS_API_URL = (process.env.POSTS_API_URL || "").trim();
+
+/**
+ * POSTS_API_TOKEN – Bearer token do autoryzacji API panelu
+ * Musi być taki sam jak PANEL_TOKEN na serwerze
+ */
+const POSTS_API_TOKEN = (process.env.POSTS_API_TOKEN || "").trim();
+
 /* ==================== GOOGLE SHEETS – NOWY SYSTEM ==================== */
 /**
  * POSTS_SHEET_URL – URL do opublikowanego jako CSV arkusza z postami.
@@ -89,6 +103,14 @@ const INCLUDE_REPLIES =
 // można nadpisać w .env: CHECK_INTERVAL_MS=60000
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
 
+// FAST_MODE: szybki tryb - sortowanie "Najnowsze", bez loadAllComments
+// FAST_MODE=true włącza, domyślnie false (stabilny tryb dedup)
+const FAST_MODE = process.env.FAST_MODE === "true";
+
+// FAST_MAX_AGE_MIN: limit wieku komentarzy w FAST_MODE (minuty)
+// Komentarze starsze niż limit → skip posta (jeśli sort=Najnowsze)
+const FAST_MAX_AGE_MIN = Number(process.env.FAST_MAX_AGE_MIN || 180);
+
 export {
   // stary system – optional
   POSTS,
@@ -100,8 +122,14 @@ export {
   INCLUDE_REPLIES,
   CHECK_INTERVAL_MS,
 
+  // FAST_MODE
+  FAST_MODE,
+  FAST_MAX_AGE_MIN,
+
   // źródła postów
   POSTS_JSON_PATH,
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,
+  POSTS_API_URL,
+  POSTS_API_TOKEN,
 };

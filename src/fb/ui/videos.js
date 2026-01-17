@@ -461,6 +461,186 @@ async function ensureAllCommentsFilter(page) {
 }
 
 /* ==========================================
+   ======= FAST_MODE: SORTOWANIE "NAJNOWSZE" ==
+   ========================================== */
+
+export async function switchCommentsFilterToNewestScoped(page) {
+  console.log("[FB][ui:videos][filter:newest] Próba przełączenia filtra na: 'Najnowsze'…");
+
+  // ZAWSZE najpierw spróbuj kliknąć "Pokaż wszystkie" żeby otworzyć pełny panel komentarzy
+  console.log("[FB][ui:videos][filter:newest] Próbuję otworzyć panel komentarzy (Pokaż wszystkie)...");
+
+  const clickedShowAll = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    function isVisible(el) {
+      if (!el) return false;
+      const st = getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden") return false;
+      const r = el.getBoundingClientRect();
+      return !!r && r.width > 5 && r.height > 5;
+    }
+
+    // Szukaj przycisku "Pokaż wszystkie" / "Show all"
+    const btns = Array.from(
+      document.querySelectorAll("div[role='button'][aria-label], button[aria-label], a[aria-label]")
+    ).filter(isVisible);
+
+    for (const btn of btns) {
+      const al = norm(btn.getAttribute("aria-label"));
+      if (al === "pokaż wszystkie" || al === "wyświetl wszystkie" || al === "show all" || al === "view all") {
+        try {
+          btn.scrollIntoView({ block: "center", inline: "nearest" });
+        } catch {}
+        try {
+          btn.click();
+          return { clicked: true, label: al };
+        } catch {}
+      }
+    }
+    return { clicked: false };
+  });
+
+  if (clickedShowAll?.clicked) {
+    console.log(`[FB][ui:videos][filter:newest] Kliknięto '${clickedShowAll.label}'.`);
+    await sleepRandom(1500, 2200);
+  } else {
+    console.log("[FB][ui:videos][filter:newest] Nie znaleziono 'Pokaż wszystkie' - może już rozwinięte.");
+  }
+
+  // Oznacz scope komentarzy
+  const mark = await markCommentsScope(page).catch(() => null);
+  console.log("[FB][ui:videos][filter:newest] markCommentsScope:", mark?.ok ? "OK" : mark?.reason);
+
+  if (!mark?.ok) {
+    console.log("[FB][ui:videos][filter:newest] Nie znaleziono sekcji komentarzy.");
+    return { ok: false, reason: "no-comments-scope" };
+  }
+
+  await sleepRandom(200, 400);
+
+  // Sprawdź czy już "Najnowsze"
+  const alreadyNewest = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const root = document.querySelector("[data-fbw-comments-root='1']") || document.body;
+    const rootTxt = norm(root.innerText || "");
+
+    // Szukamy przycisku z labelem "Najnowsze" jako aktywny filtr
+    const btns = Array.from(root.querySelectorAll("div[role='button'],span[role='button'],button"));
+    return btns.some((b) => {
+      const t = norm(b.textContent);
+      return t === "najnowsze" || t === "newest";
+    });
+  });
+
+  if (alreadyNewest) {
+    console.log("[FB][ui:videos][filter:newest] Filtr już ustawiony na 'Najnowsze' – pomijam.");
+    return { ok: true, state: "already-newest" };
+  }
+
+  // Otwórz menu sortowania
+  const openRes = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    function isVisible(el) {
+      if (!el) return false;
+      const st = getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden") return false;
+      const r = el.getBoundingClientRect();
+      return !!r && r.width > 5 && r.height > 5;
+    }
+
+    const root = document.querySelector("[data-fbw-comments-root='1']") || document.body;
+    const btns = Array.from(root.querySelectorAll("div[role='button'],span[role='button'],button")).filter(isVisible);
+
+    // Szukaj przycisku sortowania (Najtrafniejsze/Most relevant/Top comments/Wszystkie komentarze)
+    const sortBtn = btns.find((b) => {
+      const t = norm(b.textContent);
+      return (
+        t === "najtrafniejsze" ||
+        t === "most relevant" ||
+        t === "top comments" ||
+        t === "najlepsze" ||
+        t === "wszystkie komentarze" ||
+        t === "all comments"
+      );
+    });
+
+    if (!sortBtn) {
+      return { ok: false, reason: "no-sortbtn" };
+    }
+
+    try {
+      sortBtn.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {}
+    try {
+      sortBtn.click();
+    } catch {}
+
+    return { ok: true, action: "opened-menu" };
+  });
+
+  if (!openRes?.ok) {
+    console.log("[FB][ui:videos][filter:newest] Nie znaleziono przycisku sortowania.");
+    return { ok: false, reason: openRes?.reason || "no-sortbtn" };
+  }
+
+  await sleepRandom(400, 700);
+
+  // Wybierz "Najnowsze" z menu
+  const selectRes = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    function isVisible(el) {
+      if (!el) return false;
+      const st = getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden") return false;
+      const r = el.getBoundingClientRect();
+      return !!r && r.width > 5 && r.height > 5;
+    }
+
+    const menu = document.querySelector("div[role='menu']") || document.querySelector("div[role='dialog']");
+    if (!menu) return { ok: false, reason: "no-menu" };
+
+    const items = Array.from(menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio'], div[role='button']"))
+      .filter(isVisible);
+
+    // Szukaj "Najnowsze" / "Newest"
+    const target = items.find((el) => {
+      const t = norm(el.textContent);
+      return t.startsWith("najnowsze") || t.startsWith("newest") || t.startsWith("od najnowszych") || t.startsWith("most recent");
+    });
+
+    if (!target) {
+      return { ok: false, reason: "no-newest-option" };
+    }
+
+    try {
+      target.scrollIntoView({ block: "center", inline: "nearest" });
+    } catch {}
+    try {
+      target.click();
+    } catch {}
+
+    // Zamknij menu
+    try {
+      setTimeout(() => document.body.click(), 40);
+    } catch {}
+
+    return { ok: true, action: "clicked-newest" };
+  });
+
+  if (selectRes?.ok) {
+    console.log("[FB][ui:videos][filter:newest] Filtr ustawiony na: 'Najnowsze'.");
+    await sleepRandom(400, 700);
+    return { ok: true };
+  }
+
+  console.log("[FB][ui:videos][filter:newest] Nie udało się wybrać 'Najnowsze':", selectRes?.reason);
+  return { ok: false, reason: selectRes?.reason || "select-failed" };
+}
+
+/* ==========================================
    ======= SEQUENTIAL ACTION LOOP ============
    ========================================== */
 

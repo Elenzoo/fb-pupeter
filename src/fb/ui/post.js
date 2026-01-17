@@ -94,8 +94,51 @@ async function getPostScopeSelector(page) {
 }
 
 /* ============================================================
-   =========== PRZEŁĄCZANIE FILTRA: ALL COMMENTS ===============
+   =========== PRZEŁĄCZANIE FILTRA: WSZYSTKIE / NAJNOWSZE =======
    ============================================================ */
+
+async function clickMenuOptionByPattern(page, patterns) {
+  const result = await page.evaluate((patterns) => {
+    const norm = (s) =>
+      String(s || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
+    const menu = document.querySelector("div[role='menu']");
+    if (!menu) return { clicked: false, noMenu: true };
+
+    const items = Array.from(menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio']"));
+
+    const opt = items.find((el) => {
+      const t = norm(el.textContent);
+      return patterns.some((p) => t.startsWith(p));
+    });
+
+    if (!opt) return { clicked: false, noMenu: false, patterns };
+
+    try {
+      opt.scrollIntoView?.({ block: "center", inline: "nearest" });
+    } catch {}
+
+    try {
+      opt.click();
+      return { clicked: true, noMenu: false };
+    } catch {
+      return { clicked: false, noMenu: false };
+    }
+  }, patterns);
+
+  if (result.clicked) {
+    await sleepRandom(250, 450);
+    await page
+      .waitForFunction(() => !document.querySelector("div[role='menu']"), { timeout: 2500 })
+      .catch(() => {});
+  }
+
+  return result;
+}
 
 async function clickAllCommentsInMenu(page) {
   const result = await page.evaluate(() => {
@@ -372,6 +415,192 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
     menuResult
   );
   return false;
+}
+
+/* ============================================================
+   =========== PRZEŁĄCZANIE FILTRA: NAJNOWSZE (FAST_MODE) =======
+   ============================================================ */
+
+async function openFilterMenuScoped(page, scopeSel = "document") {
+  const pre = await page.evaluate(
+    (scopeSel, code) => {
+      const norm = (s) =>
+        String(s || "")
+          .replace(/\u00a0/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+
+      // eslint-disable-next-line no-eval
+      eval(code);
+      // @ts-ignore
+      const root = typeof getPostRoot === "function" ? getPostRoot() : null;
+
+      function getLabel(el) {
+        if (!el) return "";
+        const aria = el.getAttribute?.("aria-label");
+        if (aria) return aria;
+        return el.textContent || "";
+      }
+
+      function isVisibleEnough(el) {
+        try {
+          if (!el) return false;
+          const st = window.getComputedStyle(el);
+          if (!st) return true;
+          if (st.display === "none" || st.visibility === "hidden") return false;
+          const r = el.getBoundingClientRect();
+          if (!r || r.width < 8 || r.height < 8) return false;
+          return true;
+        } catch {
+          return true;
+        }
+      }
+
+      // Jeśli menu już otwarte
+      if (document.querySelector("div[role='menu']")) {
+        return { ok: true, state: "menu-already-open" };
+      }
+
+      const scopeEl = scopeSel === "document" ? document : document.querySelector(scopeSel);
+      const scopes = [scopeEl, root, document].filter(Boolean);
+
+      // Szukamy przycisku filtra (Najtrafniejsze/Wszystkie/Najnowsze)
+      const filterLabels = [
+        "najtrafniejsze", "most relevant",
+        "wszystkie komentarze", "all comments",
+        "najnowsze", "newest",
+        "pokaż wszystkie", "show all"
+      ];
+
+      for (const sc of scopes) {
+        const clickables = Array.from(
+          sc.querySelectorAll("button,div[role='button'],span[role='button'],a[role='button']")
+        );
+
+        const candidates = [];
+        for (const el of clickables) {
+          const t = norm(getLabel(el));
+          if (!filterLabels.some((f) => t.startsWith(f))) continue;
+          if (!isVisibleEnough(el)) continue;
+
+          let dist = 999999;
+          try {
+            const r = el.getBoundingClientRect();
+            dist = Math.abs(r.top - window.innerHeight / 2);
+          } catch {}
+
+          candidates.push({ el, dist, label: t });
+        }
+
+        if (candidates.length) {
+          candidates.sort((a, b) => a.dist - b.dist);
+          const picked = candidates[0].el;
+
+          try {
+            picked.scrollIntoView?.({ block: "center", inline: "nearest" });
+          } catch {}
+
+          try {
+            picked.click();
+            return { ok: true, state: "clicked-filter", label: candidates[0].label };
+          } catch {}
+        }
+      }
+
+      return { ok: false, state: "not-found" };
+    },
+    scopeSel,
+    postRootScript()
+  );
+
+  return pre;
+}
+
+export async function switchCommentsFilterToNewestScoped(page, scopeSel = "document") {
+  console.log("[FB][ui:post][filter:newest] Próba przełączenia filtra na: 'Najnowsze'…");
+  console.log("[FB][ui:post][filter:newest] scope=", scopeSel);
+
+  // 0) Jeśli menu już otwarte -> wybierz "Najnowsze"
+  const menuAlreadyOpen = await page.evaluate(() => !!document.querySelector("div[role='menu']"));
+  if (menuAlreadyOpen) {
+    console.log("[FB][ui:post][filter:newest] Menu już otwarte – wybieram 'Najnowsze'.");
+    const r = await clickMenuOptionByPattern(page, ["najnowsze", "newest", "od najnowszych", "most recent"]);
+    if (r?.clicked) {
+      console.log("[FB][ui:post][filter:newest] Filtr ustawiony na: 'Najnowsze'.");
+      return { ok: true };
+    }
+    return { ok: false, reason: "option-not-found-in-open-menu" };
+  }
+
+  // 1) Sprawdź czy już ustawione na "Najnowsze"
+  const alreadyNewest = await page.evaluate(() => {
+    const norm = (s) =>
+      String(s || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
+    const btns = Array.from(
+      document.querySelectorAll("button,div[role='button'],span[role='button'],a[role='button']")
+    );
+
+    return btns.some((el) => {
+      const t = norm(el.getAttribute?.("aria-label") || el.textContent || "");
+      return t === "najnowsze" || t === "newest" || t === "od najnowszych" || t === "most recent";
+    });
+  });
+
+  if (alreadyNewest) {
+    console.log("[FB][ui:post][filter:newest] Filtr już ustawiony na 'Najnowsze' – pomijam.");
+    return { ok: true, state: "already-newest" };
+  }
+
+  // 2) Otwórz menu filtra
+  const openResult = await openFilterMenuScoped(page, scopeSel);
+  if (!openResult?.ok) {
+    console.log("[FB][ui:post][filter:newest] Nie udało się otworzyć menu filtra.");
+    return { ok: false, reason: "menu-not-opened" };
+  }
+
+  // WAŻNE: po kliknięciu filtra daj chwilę na render menu
+  await sleepRandom(350, 650);
+
+  // 3) Wybierz "Najnowsze" z menu
+  const menuResult = await clickMenuOptionByPattern(page, ["najnowsze", "newest", "od najnowszych", "most recent"]);
+
+  if (menuResult?.clicked) {
+    console.log("[FB][ui:post][filter:newest] Filtr ustawiony na: 'Najnowsze'.");
+    return { ok: true };
+  }
+
+  // 4) Fallback: sprawdź label po kliknięciu
+  const afterLabelIsNewest = await page.evaluate(() => {
+    const norm = (s) =>
+      String(s || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
+    const els = Array.from(
+      document.querySelectorAll("button,div[role='button'],span[role='button'],a[role='button']")
+    );
+
+    return els.some((el) => {
+      const t = norm(el.getAttribute?.("aria-label") || el.textContent || "");
+      return t === "najnowsze" || t === "newest" || t === "od najnowszych" || t === "most recent";
+    });
+  });
+
+  if (afterLabelIsNewest) {
+    console.log("[FB][ui:post][filter:newest] Przełączyło się bez menu na 'Najnowsze'.");
+    return { ok: true };
+  }
+
+  console.log("[FB][ui:post][filter:newest] Nie udało się ustawić filtra na 'Najnowsze'. menuResult=", menuResult);
+  return { ok: false, reason: menuResult?.noMenu ? "no-menu" : "option-not-found" };
 }
 
 
@@ -797,6 +1026,7 @@ export async function getCommentCount(page, url) {
   console.log("[FB][ui:post] getCommentCount…");
 
   // FB często robi auto-scroll / reflow tuż po wejściu – nie klikamy filtra w trakcie ruchu
+  await waitForScrollStop(page, { timeoutMs: 2400, stableMs: 320 });
   await waitForScrollStop(page, { timeoutMs: 2400, stableMs: 320 });
 
   const scopeSel = await getPostScopeSelector(page);

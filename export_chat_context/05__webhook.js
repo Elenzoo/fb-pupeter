@@ -56,6 +56,12 @@ function filterByAge(comments) {
     if (!abs) return false;
 
     const ageMinutes = (now - abs.getTime()) / 60000;
+      console.log("[Webhook][AGE]", { 
+        raw: rel, 
+        iso: abs.toISOString(), 
+        ageMin: Math.round(ageMinutes * 100) / 100, 
+        maxAgeMin: MAX_AGE_MIN 
+      });
     return ageMinutes <= MAX_AGE_MIN;
   });
 }
@@ -173,4 +179,4 @@ async function sendWebhook(post, newComments, newCount, oldCount) {
   }
 }
 
-export { sendWebhook };
+export { sendWebhook, parseFbRelativeTime, filterByAge };

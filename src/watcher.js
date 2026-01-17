@@ -7,6 +7,10 @@ import {
   CHECK_INTERVAL_MS,
   POSTS_SHEET_URL,
   POSTS_REFRESH_MS,
+  FAST_MODE,
+  FAST_MAX_AGE_MIN,
+  POSTS_API_URL,
+  POSTS_API_TOKEN,
 } from "./config.js";
 
 import {
@@ -14,6 +18,7 @@ import {
   getCommentCount,
   loadAllComments,
   extractCommentsData,
+  switchCommentsFilterToNewest,
 } from "./fb/comments.js";
 
 import { loadCookies, saveCookies } from "./fb/cookies.js";
@@ -69,6 +74,14 @@ function envBool(name, def = false) {
   const raw = String(process.env[name] ?? "").trim().toLowerCase();
   if (raw === "") return def;
   return ["1", "true", "yes", "y", "tak", "on"].includes(raw);
+}
+
+// ================== FAST_MODE HELPER ==================
+function getCommentAgeMinutes(timeStr) {
+  if (!timeStr) return null;
+  const abs = parseFbRelativeTime(timeStr);
+  if (!abs) return null;
+  return (Date.now() - abs.getTime()) / 60000;
 }
 
 // ================== TELEGRAM (FILTER AGE + AGE LOG) ==================
@@ -305,7 +318,60 @@ function parseSheetCsv(text) {
 }
 
 /* ============================================================
-   ===============   POSTS REFRESH (PANEL -> SHEETS)   =========
+   ===============   POSTS FROM REMOTE API   ====================
+   ============================================================ */
+
+async function fetchPostsFromApi() {
+  if (!POSTS_API_URL) return { ok: false, reason: "no-url" };
+
+  console.log(`[API] Pobieram posty z: ${POSTS_API_URL}`);
+
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (POSTS_API_TOKEN) {
+      headers["Authorization"] = `Bearer ${POSTS_API_TOKEN}`;
+    }
+
+    const res = await fetch(POSTS_API_URL, {
+      method: "GET",
+      headers,
+      timeout: 10000,
+    });
+
+    if (!res.ok) {
+      console.error(`[API] Błąd HTTP: ${res.status} ${res.statusText}`);
+      return { ok: false, reason: "http-error", status: res.status };
+    }
+
+    const data = await res.json();
+
+    if (!data.ok || !Array.isArray(data.posts)) {
+      console.error("[API] Nieprawidłowa odpowiedź (brak ok/posts):", data);
+      return { ok: false, reason: "invalid-response" };
+    }
+
+    // Filtruj tylko aktywne posty i normalizuj
+    const posts = data.posts
+      .filter((p) => p.active !== false)
+      .map((p) => ({
+        id: String(p.id || "").trim(),
+        url: String(p.url || "").trim(),
+        active: true,
+        name: String(p.name || "").trim(),
+        image: String(p.image || "").trim(),
+        description: String(p.description || "").trim(),
+      }))
+      .filter((p) => p.url);
+
+    return { ok: true, posts, total: data.posts.length };
+  } catch (err) {
+    console.error("[API] Błąd pobierania postów:", err.message);
+    return { ok: false, reason: "fetch-error", error: err.message };
+  }
+}
+
+/* ============================================================
+   ===============   POSTS REFRESH (API -> PANEL -> SHEETS)   ==
    ============================================================ */
 
 async function refreshPostsIfNeeded(force = false) {
@@ -313,7 +379,30 @@ async function refreshPostsIfNeeded(force = false) {
   if (!force && now - lastRefreshAny < POSTS_REFRESH_MS) return;
   lastRefreshAny = now;
 
-  // 1) PRIMARY: panel posts.json
+  // 1) PRIMARY: Remote API (panel na serwerze)
+  if (POSTS_API_URL) {
+    const api = await fetchPostsFromApi();
+    if (api.ok && api.posts.length > 0) {
+      const newPosts = api.posts;
+
+      const oldJson = JSON.stringify(currentPosts);
+      const newJson = JSON.stringify(newPosts);
+
+      if (oldJson !== newJson) {
+        console.log(
+          `[Posts] Źródło: API (${POSTS_API_URL}) → aktywne: ${newPosts.length} (łącznie: ${api.total})`
+        );
+        currentPosts = newPosts;
+      } else {
+        console.log(`[Posts] API bez zmian (${newPosts.length} aktywnych).`);
+      }
+      return;
+    }
+
+    console.log(`[Posts] API nie dało postów (${api.reason || "unknown"}) → fallback: lokalny plik`);
+  }
+
+  // 2) SECONDARY: lokalny panel posts.json
   const panel = readPanelPosts();
   if (panel.ok && panel.posts.length > 0) {
     const newPosts = panel.posts;
@@ -336,7 +425,7 @@ async function refreshPostsIfNeeded(force = false) {
     `[Posts] PANEL nie dał aktywnych postów (${panel.path}) → fallback: Sheets`
   );
 
-  // 2) FALLBACK: Sheets
+  // 3) FALLBACK: Sheets
   if (!POSTS_SHEET_URL) {
     console.warn("[Sheet] POSTS_SHEET_URL nie ustawiony – brak źródła postów z arkusza.");
     currentPosts = [];
@@ -506,6 +595,82 @@ async function startWatcher() {
 
           try {
             await prepare(page, post.url);
+
+            // ==================== FAST_MODE BRANCH ====================
+            if (FAST_MODE) {
+              const knownSet = getKnownSetForPost(cacheKey);
+              const isFirstRun = !lastCounts.has(cacheKey);
+
+              // 1. Próba przełączenia na "Najnowsze"
+              const switchResult = await switchCommentsFilterToNewest(page, post.url).catch(() => ({ ok: false }));
+
+              if (!switchResult.ok) {
+                // FALLBACK: kontynuuj z normalnym flow dla tego posta
+                console.log(`[FAST_MODE] Post ${post.id}: Fallback do normalnego trybu (switch failed: ${switchResult.reason || "unknown"})`);
+                // nie robimy continue - przepada do normalnego flow poniżej
+              } else {
+                // 2. Czekaj na przeładowanie komentarzy po zmianie sortowania
+                await new Promise((r) => setTimeout(r, 600 + Math.random() * 400));
+
+                // 3. Ekstrakcja BEZ loadAllComments - tylko co widać
+                const snapshot = await extractCommentsData(page, post.url).catch(() => []);
+                const sample = snapshot.slice(0, 30); // max 30 komentarzy
+
+                console.log(`[FAST_MODE] Post ${post.id}: Pobrano ${sample.length} komentarzy (sort=Najnowsze)`);
+
+                // 4. Pierwszy cykl - inicjalizacja cache
+                if (isFirstRun) {
+                  lastCounts.set(cacheKey, sample.length);
+                  for (const c of sample) if (c?.id) knownSet.add(c.id);
+                  console.log(`[FAST_MODE] Post ${post.id}: Inicjalizacja - zapamiętano ${sample.length} komentarzy.`);
+                  continue;
+                }
+
+                // 5. Early skip - sprawdź najnowszy komentarz
+                if (sample.length > 0) {
+                  const newestTime = sample[0]?.time || sample[0]?.fb_time_raw;
+                  const newestAge = getCommentAgeMinutes(newestTime);
+
+                  if (newestAge !== null && newestAge > FAST_MAX_AGE_MIN) {
+                    console.log(`[FAST_MODE] Post ${post.id}: SKIP - najnowszy komentarz ma ${Math.round(newestAge)} min (limit: ${FAST_MAX_AGE_MIN})`);
+                    continue;
+                  }
+                }
+
+                // 6. Dedup (TEN SAM mechanizm co normalny tryb)
+                const newComments = [];
+                for (const c of sample) {
+                  if (!c?.id) continue;
+                  if (!knownSet.has(c.id)) {
+                    knownSet.add(c.id);
+                    newComments.push(c);
+                    c.__postId = post.id;
+                    c.__postUrl = post.url;
+                  }
+                }
+
+                // 7. Wysyłka (używa istniejących funkcji z filtrem wieku)
+                if (newComments.length > 0) {
+                  console.log(`[FAST_MODE] Post ${post.id}: ${newComments.length} nowych komentarzy`);
+                  await sendWebhook(post, newComments, null, null);
+
+                  const safeComments = newComments.filter((c) => c.__postId === post.id);
+                  if (safeComments.length !== newComments.length) {
+                    console.warn("[FAST_MODE][GUARD] Odfiltrowano komentarze spoza posta", {
+                      postId: post.id,
+                      before: newComments.length,
+                      after: safeComments.length,
+                    });
+                  }
+                  await sendTelegramIfFresh(post, safeComments, "fast");
+                } else {
+                  console.log(`[FAST_MODE] Post ${post.id}: Brak nowych komentarzy.`);
+                }
+
+                continue; // następny post (FAST_MODE zakończył przetwarzanie)
+              }
+            }
+            // ==================== KONIEC FAST_MODE ====================
 
             const count = await getCommentCount(page, post.url);
             const hasCount = typeof count === "number" && Number.isFinite(count);

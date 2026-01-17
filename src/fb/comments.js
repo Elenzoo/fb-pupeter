@@ -30,6 +30,13 @@ function pickUiHandler(url) {
   return null;
 }
 
+function resolveFastFlag(url, opts, ui) {
+  const wantFast = Boolean(opts && opts.fast);
+  if (!wantFast) return false;
+  // Minimalny zakres FAST: tylko UI "post" (permalink/story/posts)
+  if (!ui || ui.type !== "post") return false;
+  return true;
+}
 
 /* ============================================================
    =======  PRZEŁĄCZANIE FILTRA / SORTOWANIA KOMENTARZY  =======
@@ -163,6 +170,62 @@ async function switchCommentsFilterToAllLegacy(page) {
 
   console.log("[FB][filter] Nie udało się ustawić 'Wszystkie komentarze' (best-effort).");
   return false;
+}
+
+/* ============================================================
+   =======  FAST_MODE: SORTOWANIE "NAJNOWSZE"  =================
+   ============================================================ */
+
+export async function switchCommentsFilterToNewest(page, url = null) {
+  const finalUrl = url || page.url();
+  const ui = pickUiHandler(finalUrl);
+
+  // Dla UI "post" używamy scope-aware wersji
+  if (ui?.type === "post" && typeof uiPost.switchCommentsFilterToNewestScoped === "function") {
+    console.log("[FB][router] UI -> post switchCommentsFilterToNewestScoped");
+    return uiPost.switchCommentsFilterToNewestScoped(page);
+  }
+
+  // Dla UI "videos" używamy scope-aware wersji
+  if (ui?.type === "videos" && typeof uiVideos.switchCommentsFilterToNewestScoped === "function") {
+    console.log("[FB][router] UI -> videos switchCommentsFilterToNewestScoped");
+    return uiVideos.switchCommentsFilterToNewestScoped(page);
+  }
+
+  // Legacy/fallback dla innych UI
+  console.log("[FB][filter] Próba przełączenia filtra na: 'Najnowsze' (legacy)…");
+
+  // Otwórz menu jeśli zamknięte
+  if (!(await page.evaluate(() => !!document.querySelector("div[role='menu']")))) {
+    const opened = await openCommentsMenu(page);
+    if (!opened) {
+      console.log("[FB][filter] Nie udało się otworzyć menu sortowania.");
+      return { ok: false, reason: "menu-not-opened" };
+    }
+    await sleepRandom(250, 450);
+  }
+
+  // Kliknij "Najnowsze" / "Newest"
+  const picked = await clickMenuOptionByPrefix(page, [
+    "najnowsze",
+    "newest",
+    "od najnowszych",
+    "most recent",
+  ]);
+
+  if (picked?.ok) {
+    await sleepRandom(250, 450);
+    await page
+      .waitForFunction(() => !document.querySelector("div[role='menu']"), {
+        timeout: 2500,
+      })
+      .catch(() => {});
+    console.log("[FB][filter] Filtr ustawiony na: 'Najnowsze'.");
+    return { ok: true };
+  }
+
+  console.log("[FB][filter] Nie udało się wybrać 'Najnowsze'.");
+  return { ok: false, reason: picked?.reason || "option-not-found" };
 }
 
 /* ============================================================
@@ -352,27 +415,31 @@ async function extractCommentsFromDOM(page) {
     );
 
     const extracted = nodes
-        .map((node, idx) => {
-          const author = node.querySelector("a[role=\"link\"] span span")?.textContent?.trim() || null;
-          const text = node.querySelector("div[dir=\"auto\"]")?.textContent?.trim() || null;
+      .map((node, idx) => {
+        const author = node.querySelector("a[role=\"link\"] span span")?.textContent?.trim() || null;
+        const text = node.querySelector("div[dir=\"auto\"]")?.textContent?.trim() || null;
 
-          const linkEl = node.querySelector("a[href*=\"reply_comment_id\"]") ||
-                         node.querySelector("a[href*=\"comment_id\"]") ||
-                         node.querySelector("a[role=\"link\"]");
+        const linkEl = node.querySelector("a[href*=\"reply_comment_id\"]") ||
+          node.querySelector("a[href*=\"comment_id\"]") ||
+          node.querySelector("a[role=\"link\"]");
 
-          const href = linkEl?.getAttribute("href") || null;
-          const permalink = href ? (href.startsWith("http") ? href : `https://www.facebook.com`) : null;
+        const href = linkEl?.getAttribute("href") || null;
+        const permalink = href
+          ? href.startsWith("http")
+            ? href
+            : `https://www.facebook.com${href}`
+          : null;
 
-          const id_raw = permalink ? extractCommentIdRaw(permalink) : null;
-          const id = id_raw ? String(id_raw).trim() : null;
-          const id_num = id_raw ? idNumFromRaw(id_raw) : null;
-          const time = findTimeAround(linkEl, node);
+        const id_raw = permalink ? extractCommentIdRaw(permalink) : null;
+        const id = id_raw ? String(id_raw).trim() : null;
+        const id_num = id_raw ? idNumFromRaw(id_raw) : null;
+        const time = findTimeAround(linkEl, node);
 
-          if (!author || !text || !id) return null;
+        if (!author || !text || !id) return null;
 
-          return { id, id_raw, id_num, author, text, time, permalink, pos: idx + 1 };
-        })
-        .filter(Boolean);
+        return { id, id_raw, id_num, author, text, time, permalink, pos: idx + 1 };
+      })
+      .filter(Boolean);
 
     return extracted;
   });
@@ -580,22 +647,31 @@ async function loadAllCommentsLegacy(page, opts = {}) {
    ============================================================ */
 
 export async function prepare(page, url) {
+  const opts = arguments.length >= 3 ? arguments[2] : undefined;
   const ui = pickUiHandler(url);
+  const fast = resolveFastFlag(url, opts, ui);
+
   if (ui?.prepare) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} prepare`);
-    return ui.prepare(page, url);
+    console.log(`[FB][router] UI -> ${ui.type || "unknown"} prepare`, { fast });
+    return ui.prepare(page, url, { ...(opts || {}), fast });
   }
-  console.log("[FB][router] UI -> legacy prepare");
+
+  console.log("[FB][router] UI -> legacy prepare", { fast: false });
   return prepareLegacy(page, url);
 }
 
 export async function getCommentCount(page, url) {
-  const ui = pickUiHandler(url || page.url());
+  const opts = arguments.length >= 3 ? arguments[2] : undefined;
+  const finalUrl = url || page.url();
+  const ui = pickUiHandler(finalUrl);
+  const fast = resolveFastFlag(finalUrl, opts, ui);
+
   if (ui?.getCommentCount) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} getCommentCount`);
-    return ui.getCommentCount(page, url);
+    console.log(`[FB][router] UI -> ${ui.type || "unknown"} getCommentCount`, { fast });
+    return ui.getCommentCount(page, finalUrl, { ...(opts || {}), fast });
   }
-  console.log("[FB][router] UI -> legacy getCommentCount");
+
+  console.log("[FB][router] UI -> legacy getCommentCount", { fast: false });
   return getCommentCountLegacy(page);
 }
 
@@ -604,10 +680,11 @@ export async function loadAllComments(page, opts = {}, url = null) {
 
   const finalUrl = url || page.url();
   const ui = pickUiHandler(finalUrl);
+  const fast = resolveFastFlag(finalUrl, opts, ui);
 
   if (ui?.loadAllComments) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} loadAllComments`);
-    return ui.loadAllComments(page, { expectedTotal: opts.expectedTotal });
+    console.log(`[FB][router] UI -> ${ui.type || "unknown"} loadAllComments`, { fast });
+    return ui.loadAllComments(page, { expectedTotal: opts.expectedTotal, ...(opts || {}), fast });
   }
 
   console.log("[FB][router] UI -> legacy loadAllComments");
@@ -615,8 +692,10 @@ export async function loadAllComments(page, opts = {}, url = null) {
 }
 
 export async function extractCommentsData(page, url = null) {
+  const opts = arguments.length >= 3 ? arguments[2] : undefined;
   const finalUrl = url || page.url();
   const ui = pickUiHandler(finalUrl);
+  const fast = resolveFastFlag(finalUrl, opts, ui);
 
   const getPostRef = (u) => {
     if (!u) return null;
@@ -638,7 +717,7 @@ export async function extractCommentsData(page, url = null) {
       }
 
       // fallback: brak stabilnego identyfikatora posta -> null (nie dedupujemy po ref)
-        return null;
+      return null;
     } catch (e) {
       return null;
     }
@@ -651,45 +730,45 @@ export async function extractCommentsData(page, url = null) {
     if (!postRef) return arr;
 
     let dropped = 0;
-      const out = [];
-      let sampleLogged = 0;
+    const out = [];
+    let sampleLogged = 0;
 
-      // kontekst: do czego porownujemy
-      console.log(`[DEDUP][CTX] want= finalUrl=`);
+    // kontekst: do czego porownujemy
+    console.log(`[DEDUP][CTX] want=${postRef || "null"} finalUrl=${finalUrl}`);
 
-      for (const c of arr) {
-        const permalink = (c && typeof c === "object") ? (c.permalink || null) : null;
-        const cref = permalink ? getPostRef(permalink) : null;
+    for (const c of arr) {
+      const permalink = c && typeof c === "object" ? c.permalink || null : null;
+      const cref = permalink ? getPostRef(permalink) : null;
 
-        // pokaz 3 pierwsze permalink->cref
-        if (sampleLogged < 3 && permalink) {
-          console.log(`[DEDUP][SAMPLE] permalink= cref=`);
-          sampleLogged += 1;
-        }
-
-        if (cref && cref !== postRef) {
-          dropped += 1;
-          continue;
-        }
-        if (c && typeof c === "object") c.postRef = postRef;
-        out.push(c);
+      // pokaz 3 pierwsze permalink->cref
+      if (sampleLogged < 3 && permalink) {
+        console.log(`[DEDUP][SAMPLE] permalink=${permalink} cref=${cref || "null"}`);
+        sampleLogged += 1;
       }
 
-      if (dropped > 0) {
-        console.log(`[DEDUP] dropped= (ref mismatch) postRef=`);
+      if (cref && cref !== postRef) {
+        dropped += 1;
+        continue;
       }
+      if (c && typeof c === "object") c.postRef = postRef;
+      out.push(c);
+    }
 
-      if (arr.length > 0 && out.length === 0 && dropped === arr.length) {
-        out._dedupAllDropped = true;
-        console.log(`[DEDUP][ALL_DROPPED] all= want=`);
-      }
+    if (dropped > 0) {
+      console.log(`[DEDUP] dropped=${dropped} (ref mismatch) postRef=${postRef}`);
+    }
 
-      return out;
+    if (arr.length > 0 && out.length === 0 && dropped === arr.length) {
+      out._dedupAllDropped = true;
+      console.log(`[DEDUP][ALL_DROPPED] all=${arr.length} want=${postRef}`);
+    }
+
+    return out;
   };
 
   if (ui?.extractComments) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} extractComments`);
-    const out = await ui.extractComments(page, finalUrl);
+    console.log(`[FB][router] UI -> ${ui.type || "unknown"} extractComments`, { fast });
+    const out = await ui.extractComments(page, finalUrl, { ...(opts || {}), fast });
     return filterByRef(out);
   }
 

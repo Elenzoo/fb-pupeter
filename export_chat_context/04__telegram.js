@@ -1,6 +1,61 @@
 // src/telegram.js
 import axios from "axios";
 
+/* ============================================================
+   FILTR WIEKU KOMENTARZA (TELEGRAM)
+   ============================================================ */
+
+function parseFbRelativeTime(raw) {
+  if (!raw) return null;
+  const t = String(raw).toLowerCase().trim();
+  const now = new Date();
+
+  if (t.includes("przed chwilą")) return now;
+  if (t.includes("właśnie teraz") || t === "teraz" || t === "now" || t === "just now") return now;
+
+  if (t.includes("wczoraj") || t.includes("yesterday")) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    return d;
+  }
+
+  // Obsługujemy polskie i angielskie skróty
+  // np: 15 sek., 5 min, 2 godz., 1 dzień, 4 tyg., 4 weeks
+  const m = t.match(/(\d+)\s*(sek\.?|s|sec|secs|second|seconds|min\.?|m|minut|minuty|minutę|godz\.?|h|hr|hour|hours|dni|dzień|d|tyg\.?|week|weeks)\b/);
+  if (!m) return null;
+
+  const value = parseInt(m[1], 10);
+  if (!Number.isFinite(value)) return null;
+
+  const unit = m[2];
+  const d = new Date(now);
+
+  if (unit.startsWith("sek") || unit === "s" || unit.startsWith("sec") || unit.startsWith("second")) d.setSeconds(d.getSeconds() - value);
+  else if (unit.startsWith("min") || unit === "m") d.setMinutes(d.getMinutes() - value);
+  else if (unit.startsWith("godz") || unit === "h" || unit === "hr" || unit.startsWith("hour")) d.setHours(d.getHours() - value);
+  else if (unit.startsWith("dni") || unit.startsWith("dzie") || unit === "d") d.setDate(d.getDate() - value);
+  else if (unit.startsWith("tyg") || unit.startsWith("week")) d.setDate(d.getDate() - 7 * value);
+
+  return d;
+}
+
+function shouldSendByAge(comment) {
+  // ENV:
+  // TELEGRAM_MAX_AGE_MIN=60
+  // TELEGRAM_DROP_IF_NO_TIME=1  (domyślnie: 1)
+  const maxAgeMin = Number(process.env.TELEGRAM_MAX_AGE_MIN || process.env.WEBHOOK_MAX_AGE_MIN || 60);
+  const dropIfNoTime = envBool("TELEGRAM_DROP_IF_NO_TIME", true);
+
+  const rel = String(comment?.fb_time_raw || comment?.time || comment?.relative_time || "").trim();
+  if (!rel) return !dropIfNoTime;
+
+  const abs = parseFbRelativeTime(rel);
+  if (!abs) return !dropIfNoTime;
+
+  const ageMinutes = (Date.now() - abs.getTime()) / 60000;
+  return ageMinutes <= maxAgeMin;
+}
+
 function envBool(name, def = false) {
   const v = String(process.env[name] ?? "").trim().toLowerCase();
   if (!v) return def;
@@ -87,6 +142,15 @@ function getTargets() {
   const clientChat = String(process.env.TELEGRAM_CHAT_ID_CLIENT || "").trim();
 
   const targets = [];
+  console.log("[TG][TARGETS]", {
+    sendOwner,
+    sendClient,
+    ownerToken: ownerToken ? ownerToken.slice(0, 12) + "..." : null,
+    ownerChat: ownerChat || null,
+    clientToken: clientToken ? clientToken.slice(0, 12) + "..." : null,
+    clientChat: clientChat || null,
+  });
+
 
   if (sendOwner && ownerToken && ownerChat) {
     targets.push({ label: "OWNER", token: ownerToken, chat_id: ownerChat });
