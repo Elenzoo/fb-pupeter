@@ -37,8 +37,25 @@ async function loadCookies(page) {
 }
 
 /**
+ * Atomic write dla plików JSON - zapisuje do tmp, potem rename
+ * @param {string} targetPath - docelowa ścieżka pliku
+ * @param {string} content - zawartość do zapisania
+ */
+async function atomicWriteFile(targetPath, content) {
+  const dir = path.dirname(targetPath);
+  const basename = path.basename(targetPath, ".json");
+  const tmpFile = path.join(dir, `.${basename}.${Date.now()}.tmp`);
+
+  // 1. Zapisz do pliku tymczasowego
+  await fs.writeFile(tmpFile, content, "utf8");
+
+  // 2. Atomic rename
+  await fs.rename(tmpFile, targetPath);
+}
+
+/**
  * Zapisuje aktualne cookies z przeglądarki do pliku cookies.json
- * w katalogu roboczym procesu (tam, skąd odpalasz node).
+ * Używa atomic write dla bezpieczeństwa.
  */
 async function saveCookies(page) {
   if (COOKIES_READ_ONLY) {
@@ -48,16 +65,25 @@ async function saveCookies(page) {
 
   try {
     const cookies = await page.cookies();
+    const content = JSON.stringify(cookies, null, 2);
 
-    await fs.writeFile(
-      "cookies.json",
-      JSON.stringify(cookies, null, 2),
-      "utf8"
-    );
+    await atomicWriteFile("cookies.json", content);
 
     log.dev("COOKIES", `Zapisano ${cookies.length} cookies do pliku`);
   } catch (e) {
     log.warn("COOKIES", `Błąd zapisu cookies.json: ${e?.message || e}`);
+
+    // Cleanup tmp files
+    try {
+      const files = await fs.readdir(".");
+      for (const f of files) {
+        if (f.startsWith(".cookies.") && f.endsWith(".tmp")) {
+          await fs.unlink(f);
+        }
+      }
+    } catch {
+      // Ignoruj błędy cleanup
+    }
   }
 }
 
@@ -267,6 +293,7 @@ async function restoreNextAvailableCookies(startFromIndex = 1) {
 
 /**
  * Zapisuje cookies jako backup z określonym numerem
+ * Używa atomic write dla bezpieczeństwa.
  * @param {Page} page - Puppeteer page
  * @param {number} index - numer pliku (1, 2, 3...)
  * @returns {Promise<boolean>}
@@ -284,7 +311,9 @@ async function saveCookiesAsBackup(page, index) {
     await fs.mkdir(backupDir, { recursive: true });
 
     const filePath = path.join(backupDir, `cookies_${index}.json`);
-    await fs.writeFile(filePath, JSON.stringify(cookies, null, 2), "utf8");
+    const content = JSON.stringify(cookies, null, 2);
+
+    await atomicWriteFile(filePath, content);
 
     log.success("COOKIES", `Zapisano cookies_${index}.json (${cookies.length} cookies)`);
     return true;

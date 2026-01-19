@@ -161,7 +161,7 @@ const log = {
   },
 
   /** Podsumowanie cyklu (poziom 1+) */
-  cycleSummary({ cycle, posts, newComments, duration, errors = 0 }) {
+  cycleSummary({ cycle, posts, newComments, duration, errors = 0, cacheSize = 0, cacheEntries = 0, totalKnownIds = 0 }) {
     if (LOG_LEVEL < 1) return;
     const prefix = timestamp() + formatModule("WATCHER");
     const status = errors > 0 ? c(colors.yellow, `⚠ ${errors} err`) : c(colors.green, "✓");
@@ -169,6 +169,14 @@ const log = {
     console.log(
       `${prefix} Cykl #${cycle} done: ${posts} postów, ${c(colors.green, `+${newComments}`)} nowych${durationStr} ${status}`
     );
+
+    // Metryki cache (poziom 2+ - DEV)
+    if (LOG_LEVEL >= 2 && (cacheSize > 0 || totalKnownIds > 0)) {
+      const cacheSizeStr = cacheSize > 0 ? `${Math.round(cacheSize / 1024)}KB` : "0KB";
+      console.log(
+        `${prefix} ${c(colors.dim, `Cache: ${cacheSizeStr}, ${cacheEntries} postów, ${totalKnownIds} knownIds`)}`
+      );
+    }
   },
 
   /** Aktualny poziom logowania */

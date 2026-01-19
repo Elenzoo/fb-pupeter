@@ -38,7 +38,7 @@ import {
 import { checkIfLogged, fbLogin } from "./fb/login.js";
 import { isCheckpoint, getCheckpointType } from "./fb/checkpoint.js";
 import { parseFbRelativeTime, filterByAge } from "./utils/time.js";
-import { loadCache, saveCache } from "./db/cache.js";
+import { loadCache, saveCache, getCacheSize, getCacheEntryCount } from "./db/cache.js";
 import { sendTelegramLeads, sendOwnerAlert } from "./telegram.js";
 import log from "./utils/logger.js";
 
@@ -56,10 +56,17 @@ const commentsCache = loadCache();
 const lastCounts = new Map();
 const knownCommentsPerPost = new Map();
 
+// Limity dla knownIds - zapobiega memory leak
+const MAX_KNOWN_IDS_PER_POST = 1000;  // max komentarzy na post w pamięci
+const KNOWN_IDS_TRIM_TO = 800;        // do ilu przycinać gdy przekroczy limit
+
 for (const [url, entry] of Object.entries(commentsCache)) {
   if (typeof entry?.lastCount === "number") lastCounts.set(url, entry.lastCount);
-  if (Array.isArray(entry?.knownIds))
-    knownCommentsPerPost.set(url, new Set(entry.knownIds));
+  if (Array.isArray(entry?.knownIds)) {
+    // Przytnij podczas ładowania jeśli za dużo
+    const ids = entry.knownIds.slice(-MAX_KNOWN_IDS_PER_POST);
+    knownCommentsPerPost.set(url, new Set(ids));
+  }
 }
 
 let currentPosts = [];
@@ -75,8 +82,8 @@ let checkpointRetryCount = 0; // ile razy próbowaliśmy w tej serii
 let lastCheckpointTime = 0;
 const CHECKPOINT_RETRY_RESET_MS = 30 * 60 * 1000; // 30 minut - reset licznika po tym czasie
 
-// Soft ban detection - 0 komentarzy na wielu postach
-let consecutiveZeroPosts = 0; // ile postów z rzędu miało 0 komentarzy
+// Soft ban detection - per-post tracking (Map zamiast global counter)
+const consecutiveZeroPerPost = new Map(); // { cacheKey => licznik zer z rzędu }
 let softBanTriggered = false; // czy już wykryliśmy soft ban w tym cyklu
 
 function isNavigationError(err) {
@@ -468,6 +475,71 @@ function getKnownSetForPost(cacheKey) {
   return set;
 }
 
+/**
+ * Przycina Set knownIds gdy przekroczy limit (FIFO - usuwa najstarsze).
+ * Zapobiega memory leak przy długim działaniu.
+ */
+function cleanupKnownIds(set) {
+  if (set.size <= MAX_KNOWN_IDS_PER_POST) return;
+
+  const arr = Array.from(set);
+  const toRemove = arr.slice(0, arr.length - KNOWN_IDS_TRIM_TO);
+  for (const id of toRemove) {
+    set.delete(id);
+  }
+
+  log.debug("CACHE", `Przycięto knownIds: ${arr.length} → ${set.size}`);
+}
+
+/**
+ * Sprawdza i aktualizuje stan soft ban dla danego posta.
+ * Zwraca true jeśli należy uruchomić handleSoftBan.
+ */
+function checkSoftBanForPost(cacheKey, currentCount, prevCount, postLabel) {
+  if (!SOFT_BAN_DETECTION || softBanTriggered) return false;
+  if (prevCount === null) return false; // pierwszy run
+
+  const zeroCount = consecutiveZeroPerPost.get(cacheKey) || 0;
+
+  // Post miał komentarze, a teraz ma 0 = podejrzane
+  if (currentCount === 0 && prevCount > 0) {
+    const newZeroCount = zeroCount + 1;
+    consecutiveZeroPerPost.set(cacheKey, newZeroCount);
+
+    log.dev("SOFT_BAN", `${postLabel}: 0 komentarzy (było ${prevCount}), streak: ${newZeroCount}/${SOFT_BAN_THRESHOLD}`);
+
+    // Sprawdź czy globalnie mamy wystarczająco dużo postów z zerami
+    let totalZeroPosts = 0;
+    for (const count of consecutiveZeroPerPost.values()) {
+      if (count >= SOFT_BAN_THRESHOLD) totalZeroPosts++;
+    }
+
+    // Trigger soft ban gdy >= 3 posty mają streak >= threshold
+    if (totalZeroPosts >= 3 || newZeroCount >= SOFT_BAN_THRESHOLD) {
+      return true;
+    }
+  } else if (currentCount > 0) {
+    // Reset licznika gdy post ma komentarze
+    if (zeroCount > 0) {
+      log.dev("SOFT_BAN", `${postLabel}: reset streak (było ${zeroCount})`);
+      consecutiveZeroPerPost.set(cacheKey, 0);
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Zwraca całkowitą liczbę knownIds w pamięci (dla monitoringu)
+ */
+function getTotalKnownIdsCount() {
+  let total = 0;
+  for (const set of knownCommentsPerPost.values()) {
+    total += set.size;
+  }
+  return total;
+}
+
 function flushCacheToDisk() {
   const out = { ...commentsCache };
 
@@ -497,7 +569,13 @@ function flushCacheToDisk() {
 async function handleSoftBan() {
   const totalBackups = getBackupCookiesCount();
 
-  log.warn("SOFT_BAN", `Wykryto soft ban (${consecutiveZeroPosts} postów z 0 komentarzy)`, {
+  // Policz ile postów ma problemy
+  let postsWithZeros = 0;
+  for (const count of consecutiveZeroPerPost.values()) {
+    if (count >= SOFT_BAN_THRESHOLD) postsWithZeros++;
+  }
+
+  log.warn("SOFT_BAN", `Wykryto soft ban (${postsWithZeros} postów z serią 0 komentarzy)`, {
     threshold: SOFT_BAN_THRESHOLD,
     currentIndex: currentCookiesIndex,
     totalBackups
@@ -518,14 +596,15 @@ async function handleSoftBan() {
     });
 
     currentCookiesIndex = restoreResult.usedIndex + 1;
-    consecutiveZeroPosts = 0;
+    // Reset wszystkich liczników per-post
+    consecutiveZeroPerPost.clear();
     softBanTriggered = true;
 
     // Alert Telegram
     if (CHECKPOINT_ALERT_TELEGRAM) {
       await sendOwnerAlert(
         "SOFT BAN - Rotacja cookies",
-        `Wykryto soft ban (${SOFT_BAN_THRESHOLD} postów z 0 komentarzy).\n\n` +
+        `Wykryto soft ban (${postsWithZeros} postów z serią 0 komentarzy).\n\n` +
         `Przełączono na: cookies_${restoreResult.usedIndex}.json\n` +
         `Pozostało backupów: ${restoreResult.remaining}`
       );
@@ -785,28 +864,17 @@ async function startWatcher() {
 
                 log.dev("FAST", `${postLabel}: ${sample.length} komentarzy (sort=Najnowsze)`);
 
-                // === SOFT BAN DETECTION ===
-                if (SOFT_BAN_DETECTION && !isFirstRun && !softBanTriggered) {
+                // === SOFT BAN DETECTION (per-post) ===
+                if (!isFirstRun) {
                   const prevCount = lastCounts.get(cacheKey) || 0;
+                  const shouldTriggerSoftBan = checkSoftBanForPost(cacheKey, sample.length, prevCount, postLabel);
 
-                  // Post miał komentarze, a teraz ma 0 = podejrzane
-                  if (sample.length === 0 && prevCount > 0) {
-                    consecutiveZeroPosts++;
-                    log.dev("SOFT_BAN", `${postLabel}: 0 komentarzy (było ${prevCount}), streak: ${consecutiveZeroPosts}/${SOFT_BAN_THRESHOLD}`);
-
-                    if (consecutiveZeroPosts >= SOFT_BAN_THRESHOLD) {
-                      const softBanResult = await handleSoftBan();
-                      if (softBanResult.shouldRestart) {
-                        if (browser) await browser.close().catch(() => {});
-                        setTimeout(loop, 2000);
-                        return;
-                      }
-                    }
-                  } else if (sample.length > 0) {
-                    // Reset licznika gdy post ma komentarze
-                    if (consecutiveZeroPosts > 0) {
-                      log.dev("SOFT_BAN", `Reset streak (było ${consecutiveZeroPosts})`);
-                      consecutiveZeroPosts = 0;
+                  if (shouldTriggerSoftBan) {
+                    const softBanResult = await handleSoftBan();
+                    if (softBanResult.shouldRestart) {
+                      if (browser) await browser.close().catch(() => {});
+                      setTimeout(loop, 2000);
+                      return;
                     }
                   }
                 }
@@ -843,6 +911,9 @@ async function startWatcher() {
                   }
                 }
 
+                // Cleanup knownIds jeśli za dużo (zapobiega memory leak)
+                cleanupKnownIds(knownSet);
+
                 // Wysyłka
                 if (newComments.length > 0) {
                   log.success("FAST", `${postLabel}: +${newComments.length} nowych`);
@@ -875,26 +946,16 @@ async function startWatcher() {
             const prev = lastCounts.has(cacheKey) ? lastCounts.get(cacheKey) : null;
             const knownSet = getKnownSetForPost(cacheKey);
 
-            // === SOFT BAN DETECTION (normalny tryb) ===
-            if (SOFT_BAN_DETECTION && prev !== null && !softBanTriggered && hasCount) {
-              // Post miał komentarze, a teraz ma 0 = podejrzane
-              if (count === 0 && prev > 0) {
-                consecutiveZeroPosts++;
-                log.dev("SOFT_BAN", `${postLabel}: 0 komentarzy (było ${prev}), streak: ${consecutiveZeroPosts}/${SOFT_BAN_THRESHOLD}`);
+            // === SOFT BAN DETECTION (per-post, normalny tryb) ===
+            if (hasCount && prev !== null) {
+              const shouldTriggerSoftBan = checkSoftBanForPost(cacheKey, count, prev, postLabel);
 
-                if (consecutiveZeroPosts >= SOFT_BAN_THRESHOLD) {
-                  const softBanResult = await handleSoftBan();
-                  if (softBanResult.shouldRestart) {
-                    if (browser) await browser.close().catch(() => {});
-                    setTimeout(loop, 2000);
-                    return;
-                  }
-                }
-              } else if (count > 0) {
-                // Reset licznika gdy post ma komentarze
-                if (consecutiveZeroPosts > 0) {
-                  log.dev("SOFT_BAN", `Reset streak (było ${consecutiveZeroPosts})`);
-                  consecutiveZeroPosts = 0;
+              if (shouldTriggerSoftBan) {
+                const softBanResult = await handleSoftBan();
+                if (softBanResult.shouldRestart) {
+                  if (browser) await browser.close().catch(() => {});
+                  setTimeout(loop, 2000);
+                  return;
                 }
               }
             }
@@ -941,6 +1002,9 @@ async function startWatcher() {
                 c.__postUrl = post.url;
               }
             }
+
+            // Cleanup knownIds jeśli za dużo (zapobiega memory leak)
+            cleanupKnownIds(knownSet);
 
             log.debug("DEDUP", `${postLabel}: context`, {
               snapshotLen: snapshot.length,
@@ -1006,13 +1070,25 @@ async function startWatcher() {
       }
 
       const duration = Date.now() - cycleStart;
+      const cacheSize = getCacheSize();
+      const cacheEntries = getCacheEntryCount();
+      const totalKnownIds = getTotalKnownIdsCount();
+
       log.cycleSummary({
         cycle: cycleNumber,
         posts: currentPosts.length,
         newComments: newCommentsTotal,
         duration,
         errors: errorsCount,
+        cacheSize,
+        cacheEntries,
+        totalKnownIds,
       });
+
+      // Alert jeśli cache przekroczył 10MB
+      if (cacheSize > 10 * 1024 * 1024) {
+        log.warn("CACHE", `Rozmiar cache przekroczył 10MB: ${Math.round(cacheSize / 1024 / 1024)}MB`);
+      }
 
       if (navErrorCount >= MAX_NAV_ERRORS) {
         log.error("WATCHER", "Za dużo błędów nawigacji – kończę proces");
