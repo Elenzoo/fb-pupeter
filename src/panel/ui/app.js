@@ -608,13 +608,14 @@
   }
 
   async function hardRefresh() {
-    await loadStatus();
-    await loadEnv();
-    await loadPosts();
+    // Parallel requests for better performance
+    const promises = [loadStatus(), loadEnv(), loadPosts()];
 
     if (elLogs.value && elLogs.value.trim().length > 0) {
-      await loadLogs(lastLogMode);
+      promises.push(loadLogs(lastLogMode));
     }
+
+    await Promise.all(promises);
   }
 
   // ---------- init ----------

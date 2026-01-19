@@ -18,11 +18,22 @@ const UI_DIR = process.pkg
   ? path.join(BASE_DIR, "ui")
   : path.join(BASE_DIR, "src", "panel", "ui");
 
+// New React UI: dev -> src/panel/web/dist, exe -> ./web
+const NEW_UI_DIR = process.pkg
+  ? path.join(BASE_DIR, "web")
+  : path.join(BASE_DIR, "src", "panel", "web", "dist");
+
 const PORT = Number(process.env.PANEL_PORT || 3180);
 const TOKEN = process.env.PANEL_TOKEN;
 
 const PM2_APP = process.env.PM2_APP || "fbwatcher";
 const DEV_PROJECT_DIR = process.env.PROJECT_DIR || ""; // local override
+
+// ---- CACHE (performance) ----
+let cachedProjectDir = null;
+let cachedNodeVersion = null;
+let cachedPm2Version = null;
+let cachedLogPaths = null;
 
 if (!TOKEN) {
   console.error("[PANEL] PANEL_TOKEN is required (set it in .env or env vars)");
@@ -60,6 +71,7 @@ function sh(cmd) {
 
 async function getProjectDir() {
   if (DEV_PROJECT_DIR) return DEV_PROJECT_DIR;
+  if (cachedProjectDir) return cachedProjectDir;
 
   const r = await sh(`pm2 describe ${PM2_APP}`);
   const m = r.stdout.match(/exec cwd\s+([^\n]+)/);
@@ -67,7 +79,8 @@ async function getProjectDir() {
     throw new Error(
       `Cannot detect PROJECT_DIR from pm2 (set PROJECT_DIR in .env for local tests)`
     );
-  return m[1].trim();
+  cachedProjectDir = m[1].trim();
+  return cachedProjectDir;
 }
 
 function readBody(req) {
@@ -119,6 +132,10 @@ function normalizeOptionalUrl(u) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function stripAnsi(str) {
+  return (str || "").replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 function setEnvKey(envText, key, value) {
@@ -186,6 +203,8 @@ async function getPm2LogPaths(appName) {
   const envErr = (process.env.PM2_LOG_ERR || "").trim();
   if (envOut || envErr) return { out: envOut, err: envErr, source: "env" };
 
+  if (cachedLogPaths) return cachedLogPaths;
+
   const d = await sh(`pm2 describe ${appName}`);
   if (!d.ok)
     return {
@@ -196,7 +215,8 @@ async function getPm2LogPaths(appName) {
     };
 
   const p = parsePm2LogPaths(d.stdout);
-  return { out: p.out || "", err: p.err || "", source: "pm2_describe" };
+  cachedLogPaths = { out: p.out || "", err: p.err || "", source: "pm2_describe" };
+  return cachedLogPaths;
 }
 
 async function readTailLog(filePath, lines) {
@@ -233,8 +253,33 @@ async function readTailLog(filePath, lines) {
       };
     }
 
-    
-    // fallback JS
+    // Use tail command on Linux (fast, doesn't load entire file into memory)
+    const tailResult = await sh(`tail -n ${lines} "${filePath}"`);
+    if (tailResult.ok && tailResult.stdout) {
+      const txt = (tailResult.stdout || "").trim();
+      if (txt) {
+        return { ok: true, log: tailResult.stdout, path: filePath, via: "tail" };
+      }
+    }
+
+    // Fallback: read last portion of file (max 512KB) for large files
+    const MAX_READ = 512 * 1024;
+    if (st.size > MAX_READ) {
+      const fd = fs.openSync(filePath, "r");
+      const buffer = Buffer.alloc(MAX_READ);
+      fs.readSync(fd, buffer, 0, MAX_READ, st.size - MAX_READ);
+      fs.closeSync(fd);
+      const raw = buffer.toString("utf8");
+      const arr = raw.split(/\r?\n/);
+      // Skip first line (might be partial)
+      const slice = arr.slice(Math.max(1, arr.length - lines)).join("\n");
+      const txt = (slice || "").trim();
+      if (txt) {
+        return { ok: true, log: slice, path: filePath, via: "partial" };
+      }
+    }
+
+    // Small files: read entirely
     const raw = fs.readFileSync(filePath, "utf8");
     const arr = raw.split(/\r?\n/);
     const slice = arr.slice(Math.max(0, arr.length - lines)).join("\n");
@@ -260,7 +305,46 @@ http
 }
 
 
-    // ---------- PUBLIC UI ----------
+    // ---------- NEW REACT UI (/new/) ----------
+    if (req.method === "GET" && pathname.startsWith("/new")) {
+      const MIME_TYPES = {
+        ".html": "text/html",
+        ".js": "application/javascript",
+        ".css": "text/css",
+        ".json": "application/json",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".svg": "image/svg+xml",
+        ".ico": "image/x-icon",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+      };
+
+      // Remove /new prefix
+      let filePath = pathname.replace(/^\/new\/?/, "") || "index.html";
+
+      // Try to serve the file
+      let fullPath = path.join(NEW_UI_DIR, filePath);
+
+      // If file doesn't exist and it's not a static asset, serve index.html (SPA fallback)
+      if (!fs.existsSync(fullPath) || fs.statSync(fullPath).isDirectory()) {
+        const ext = path.extname(filePath);
+        if (!ext || ext === ".html") {
+          fullPath = path.join(NEW_UI_DIR, "index.html");
+        }
+      }
+
+      if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+        const ext = path.extname(fullPath);
+        const contentType = MIME_TYPES[ext] || "application/octet-stream";
+        const content = fs.readFileSync(fullPath);
+        res.writeHead(200, { "Content-Type": `${contentType}; charset=utf-8` });
+        res.end(content);
+        return;
+      }
+    }
+
+    // ---------- PUBLIC UI (legacy) ----------
     if (req.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
       const p = path.join(UI_DIR, "index.html");
       const html = fs.readFileSync(p, "utf8");
@@ -290,8 +374,15 @@ http
 
       // ===== STATUS =====
       if (req.method === "GET" && pathname === "/api/status") {
-        const node = await sh("node -v");
-        const pm2v = await sh("pm2 -v");
+        // Cache node/pm2 versions (don't change during runtime)
+        if (!cachedNodeVersion) {
+          const node = await sh("node -v");
+          cachedNodeVersion = node.stdout;
+        }
+        if (!cachedPm2Version) {
+          const pm2v = await sh("pm2 -v");
+          cachedPm2Version = pm2v.stdout;
+        }
         const pm2s = await sh(`pm2 status ${PM2_APP}`);
         json(res, {
           ok: true,
@@ -299,9 +390,9 @@ http
           envPath: ENV_PATH,
           cookiesPath: COOKIES_PATH,
           postsPath: POSTS_PATH,
-          node: node.stdout,
-          pm2: pm2v.stdout,
-          pm2Status: pm2s.stdout,
+          node: cachedNodeVersion,
+          pm2: cachedPm2Version,
+          pm2Status: stripAnsi(pm2s.stdout),
           time: nowIso(),
         });
         return;
@@ -315,14 +406,40 @@ http
         }
         const raw = fs.readFileSync(ENV_PATH, "utf8");
         const wanted = [
+          // Facebook
           "FB_EMAIL",
           "FB_PASSWORD",
-          "WEBHOOK_URL",
+          // Watcher
           "CHECK_INTERVAL_MS",
-          "POSTS_SHEET_URL",
+          "FAST_MODE",
+          "INCLUDE_REPLIES",
+          // Logi
+          "LOG_LEVEL",
+          // Puppeteer
           "HEADLESS_BROWSER",
           "USE_UI_HANDLERS",
-          "INCLUDE_REPLIES",
+          "COOKIES_READ_ONLY",
+          // Źródła postów
+          "POSTS_SHEET_URL",
+          "POSTS_API_URL",
+          "POSTS_API_TOKEN",
+          // Telegram Owner
+          "TELEGRAM_SEND_TO_OWNER",
+          "TELEGRAM_BOT_TOKEN_OWNER",
+          "TELEGRAM_CHAT_ID_OWNER",
+          // Telegram Client
+          "TELEGRAM_SEND_TO_CLIENT",
+          "TELEGRAM_BOT_TOKEN_CLIENT",
+          "TELEGRAM_CHAT_ID_CLIENT",
+          // Telegram Format
+          "TELEGRAM_USE_PHOTO",
+          "TELEGRAM_DISABLE_WEB_PAGE_PREVIEW",
+          // Telegram Alerty
+          "TG_ALERTS_ENABLED",
+          "TG_ALERTS_COOLDOWN_SEC",
+          "TG_ALERTS_MAXLEN",
+          // Legacy
+          "WEBHOOK_URL",
         ];
         const values = {};
         for (const k of wanted) {
@@ -540,8 +657,8 @@ http
 
       // ===== PM2 =====
       function okOrErr(r, fallbackErr = "Command failed") {
-        if (r.ok) return { ok: true, output: r.stdout || r.stderr || "" };
-        return { ok: false, error: r.stderr || r.stdout || fallbackErr };
+        if (r.ok) return { ok: true, output: stripAnsi(r.stdout || r.stderr || "") };
+        return { ok: false, error: stripAnsi(r.stderr || r.stdout || fallbackErr) };
       }
       async function pm2Describe(name) {
         return await sh(`pm2 describe ${name}`);
@@ -612,6 +729,158 @@ http
         const paths = await getPm2LogPaths(PM2_APP);
         const payload = await readTailLog(paths.err, lines);
         json(res, { ...payload, source: paths.source });
+        return;
+      }
+
+      // ===== COOKIES: STATUS =====
+      if (req.method === "GET" && pathname === "/api/cookies/status") {
+        const mainExists = fs.existsSync(COOKIES_PATH);
+        let mainAge = undefined;
+        let mainSize = undefined;
+
+        if (mainExists) {
+          const stat = fs.statSync(COOKIES_PATH);
+          mainSize = stat.size;
+          mainAge = (Date.now() - stat.mtimeMs) / (1000 * 60 * 60); // hours
+        }
+
+        // Find backup files (cookies_1.json, cookies_2.json, etc.)
+        const backups = [];
+        for (let i = 1; i <= 10; i++) {
+          const backupPath = path.join(PROJECT_DIR, `cookies_${i}.json`);
+          if (fs.existsSync(backupPath)) {
+            const stat = fs.statSync(backupPath);
+            backups.push({
+              index: i,
+              filename: `cookies_${i}.json`,
+              path: backupPath,
+              ageHours: (Date.now() - stat.mtimeMs) / (1000 * 60 * 60),
+              sizeBytes: stat.size,
+              isActive: false,
+            });
+          }
+        }
+
+        // Check which cookies file is currently active (via symlink or config)
+        // For now, assume main cookies.json is always active unless specified otherwise
+        const activeCookiesFile = "cookies.json";
+        const activeCookiesIndex = -1; // -1 = main
+
+        json(res, {
+          ok: true,
+          mainCookiesExists: mainExists,
+          mainCookiesAge: mainAge,
+          mainCookiesSize: mainSize,
+          activeCookiesFile,
+          activeCookiesIndex,
+          backups,
+          isLoggedIn: mainExists && mainSize > 10, // Rough check
+        });
+        return;
+      }
+
+      // ===== COOKIES: BACKUPS LIST =====
+      if (req.method === "GET" && pathname === "/api/cookies/backups") {
+        const backups = [];
+        for (let i = 1; i <= 10; i++) {
+          const backupPath = path.join(PROJECT_DIR, `cookies_${i}.json`);
+          if (fs.existsSync(backupPath)) {
+            const stat = fs.statSync(backupPath);
+            backups.push({
+              index: i,
+              filename: `cookies_${i}.json`,
+              path: backupPath,
+              ageHours: (Date.now() - stat.mtimeMs) / (1000 * 60 * 60),
+              sizeBytes: stat.size,
+              isActive: false,
+            });
+          }
+        }
+        json(res, { ok: true, backups });
+        return;
+      }
+
+      // ===== COOKIES: CREATE BACKUP =====
+      if (req.method === "POST" && pathname === "/api/cookies/backup") {
+        if (!fs.existsSync(COOKIES_PATH)) {
+          json(res, { ok: false, error: "Main cookies.json does not exist" }, 400);
+          return;
+        }
+
+        // Find next available backup slot
+        let nextIndex = 1;
+        for (let i = 1; i <= 10; i++) {
+          const backupPath = path.join(PROJECT_DIR, `cookies_${i}.json`);
+          if (!fs.existsSync(backupPath)) {
+            nextIndex = i;
+            break;
+          }
+          nextIndex = i + 1;
+        }
+
+        if (nextIndex > 10) {
+          json(res, { ok: false, error: "Maximum 10 backups reached. Delete some first." }, 400);
+          return;
+        }
+
+        const backupPath = path.join(PROJECT_DIR, `cookies_${nextIndex}.json`);
+        const content = fs.readFileSync(COOKIES_PATH, "utf8");
+        atomicWriteFile(backupPath, content);
+
+        json(res, { ok: true, savedIndex: nextIndex, path: backupPath });
+        return;
+      }
+
+      // ===== COOKIES: ACTIVATE BACKUP =====
+      const mActivate = req.method === "POST" ? match(pathname, "/api/cookies/activate/:index") : null;
+      if (mActivate) {
+        const index = parseInt(mActivate.index, 10);
+        const backupPath = path.join(PROJECT_DIR, `cookies_${index}.json`);
+
+        if (!fs.existsSync(backupPath)) {
+          json(res, { ok: false, error: `Backup cookies_${index}.json not found` }, 404);
+          return;
+        }
+
+        // Copy backup to main cookies.json
+        const content = fs.readFileSync(backupPath, "utf8");
+        atomicWriteFile(COOKIES_PATH, content);
+
+        json(res, { ok: true, activatedIndex: index });
+        return;
+      }
+
+      // ===== COOKIES: RESTORE BACKUP (same as activate) =====
+      const mRestore = req.method === "POST" ? match(pathname, "/api/cookies/restore/:index") : null;
+      if (mRestore) {
+        const index = parseInt(mRestore.index, 10);
+        const backupPath = path.join(PROJECT_DIR, `cookies_${index}.json`);
+
+        if (!fs.existsSync(backupPath)) {
+          json(res, { ok: false, error: `Backup cookies_${index}.json not found` }, 404);
+          return;
+        }
+
+        const content = fs.readFileSync(backupPath, "utf8");
+        atomicWriteFile(COOKIES_PATH, content);
+
+        json(res, { ok: true, restoredIndex: index });
+        return;
+      }
+
+      // ===== COOKIES: DELETE BACKUP =====
+      const mDelBackup = req.method === "DELETE" ? match(pathname, "/api/cookies/backup/:index") : null;
+      if (mDelBackup) {
+        const index = parseInt(mDelBackup.index, 10);
+        const backupPath = path.join(PROJECT_DIR, `cookies_${index}.json`);
+
+        if (!fs.existsSync(backupPath)) {
+          json(res, { ok: false, error: `Backup cookies_${index}.json not found` }, 404);
+          return;
+        }
+
+        fs.unlinkSync(backupPath);
+        json(res, { ok: true, deletedIndex: index });
         return;
       }
 

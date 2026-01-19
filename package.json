@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node src/index.js",
     "panel:exe": "npm run panel:build && npx @yao-pkg/pkg -t node20-win-x64 dist/panel-bundle.cjs -o dist/fbwatcher-panel.exe",
-    "panel:build": "npx esbuild src/panel/api.js --bundle --platform=node --format=cjs --outfile=dist/panel-bundle.cjs"
+    "panel:build": "npx esbuild src/panel/api.js --bundle --platform=node --format=cjs --outfile=dist/panel-bundle.cjs",
+    "panel:web:install": "cd src/panel/web && npm install",
+    "panel:web:dev": "cd src/panel/web && npm run dev",
+    "panel:web:build": "cd src/panel/web && npm run build"
   },
   "keywords": [],
   "author": "",
