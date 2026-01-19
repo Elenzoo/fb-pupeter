@@ -29,7 +29,6 @@
   const elNewPostUrl = $("newPostUrl");
   const elNewPostName = $("newPostName");
   const elNewPostImage = $("newPostImage");
-  const elNewPostDescription = $("newPostDescription");
   const elNewPostActive = $("newPostActive");
   const btnAddPost = $("addPost");
   const elPostsTbody = $("posts");
@@ -288,10 +287,6 @@
       }
       tr.appendChild(tdImg);
 
-      const tdDesc = document.createElement("td");
-      tdDesc.className = "col-desc";
-      tdDesc.textContent = p.description || "";
-      tr.appendChild(tdDesc);
 
       const tdActive = document.createElement("td");
       tdActive.className = "col-act";
@@ -333,8 +328,6 @@
               <input id="edit_name" value="${escapeHtml(p.name || "")}" />
               <label class="muted" style="display:block;margin:8px 0 6px;">URL zdjęcia</label>
               <input id="edit_img" value="${escapeHtml(p.image || "")}" />
-              <label class="muted" style="display:block;margin:8px 0 6px;">Opis</label>
-              <textarea id="edit_desc" style="height:90px;">${escapeHtml(p.description || "")}</textarea>
             </div>`,
           okText: "Zapisz",
           danger: false,
@@ -345,11 +338,10 @@
         const newUrl = (document.getElementById("edit_url")?.value || "").trim();
         const newName = (document.getElementById("edit_name")?.value || "").trim();
         const newImg = (document.getElementById("edit_img")?.value || "").trim();
-        const newDesc = (document.getElementById("edit_desc")?.value || "").trim();
 
         const rr = await api(`/api/posts/${encodeURIComponent(p.id)}`, {
           method: "PATCH",
-          body: { url: newUrl, name: newName, image: newImg, description: newDesc },
+          body: { url: newUrl, name: newName, image: newImg },
         });
 
         if (!rr.ok) {
@@ -400,12 +392,11 @@
     const url = (elNewPostUrl.value || "").trim();
     const name = (elNewPostName.value || "").trim();
     const image = (elNewPostImage.value || "").trim();
-    const description = (elNewPostDescription.value || "").trim();
     const active = !!elNewPostActive.checked;
 
     const r = await api("/api/posts", {
       method: "POST",
-      body: { url, name, image, description, active },
+      body: { url, name, image, active },
     });
 
     if (!r.ok) {
@@ -421,7 +412,6 @@
     elNewPostUrl.value = "";
     elNewPostName.value = "";
     elNewPostImage.value = "";
-    elNewPostDescription.value = "";
     elNewPostActive.checked = true;
 
     setHint(elEnvMsg, "Dodano post.", true);
@@ -505,7 +495,7 @@
       return;
     }
 
-    elLogs.value = (r.log || "").toString();
+    elLogs.value = (r.log || "").toString().replace(/\x1b\[[0-9;]*m/g, "");
     setHint(elLogHint, `Wczytano: ${mode.toUpperCase()} • ${fmtTime()} • ${lines} linii`, true);
 
     if (elLogAutoScroll.checked) {

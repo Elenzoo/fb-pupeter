@@ -75,7 +75,7 @@
     .sep { height:1px; background: var(--border); margin:10px 0; opacity:0.8; }
 
     .thumb {
-      width:64px; height:40px;
+      width:200px; height:120px;
       object-fit:cover;
       border-radius:10px;
       border:1px solid var(--border);
@@ -129,8 +129,7 @@
     th.col-id,  td.col-id  { width: 170px; }
     th.col-url, td.col-url { width: 620px; } /* szersza kolumna link */
     th.col-name,td.col-name{ width: 170px; }
-    th.col-img, td.col-img { width: 120px; }
-    th.col-desc,td.col-desc{ width: 260px; }
+    th.col-img, td.col-img { width: 220px; }
     th.col-act, td.col-act { width: 110px; text-align:center; }
     th.col-btn, td.col-btn { width: 210px; } /* miejsce na Edytuj + Usuń */
 
@@ -377,9 +376,6 @@
       </div>
     </div>
 
-    <label>Opis</label>
-    <textarea id="newPostDescription" placeholder="Krótki opis..."></textarea>
-
     <div class="row" style="margin-top:10px;">
       <div style="min-width:220px; display:flex; align-items:center; gap:10px;">
         <label style="margin:0; display:flex; align-items:center; gap:10px;">
@@ -397,7 +393,6 @@
             <th class="col-url">Link</th>
             <th class="col-name">Nazwa</th>
             <th class="col-img">Zdjęcie</th>
-            <th class="col-desc">Opis</th>
             <th class="col-act">Aktywny</th>
             <th class="col-btn">Akcje</th>
           </tr>
