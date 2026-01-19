@@ -7,6 +7,7 @@ import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "./login.js"
 import { clickOneExpandButton } from "./expandButtons.js";
 import { safeGoto } from "../utils/navigation.js";
 import { getUiCommentInfo } from "./uiCommentInfo.js";
+import log from "../utils/logger.js";
 
 import * as uiPhoto from "./ui/photo.js";
 import * as uiPost from "./ui/post.js";
@@ -141,7 +142,7 @@ async function clickMenuOptionByPrefix(page, prefixes) {
 }
 
 async function switchCommentsFilterToAllLegacy(page) {
-  console.log("[FB][filter] Próba przełączenia filtra komentarzy na: 'Wszystkie komentarze'…");
+  log.dev("FILTER", "Przełączam na 'Wszystkie komentarze'...");
 
   if (!(await page.evaluate(() => !!document.querySelector("div[role='menu']")))) {
     const opened = await openCommentsMenu(page);
@@ -164,11 +165,11 @@ async function switchCommentsFilterToAllLegacy(page) {
         timeout: 2500,
       })
       .catch(() => {});
-    console.log("[FB][filter] Filtr komentarzy ustawiony na: 'Wszystkie komentarze' / 'Pokaż wszystkie'.");
+    log.dev("FILTER", "Ustawiono 'Wszystkie komentarze'");
     return true;
   }
 
-  console.log("[FB][filter] Nie udało się ustawić 'Wszystkie komentarze' (best-effort).");
+  log.dev("FILTER", "Nie udało się ustawić 'Wszystkie komentarze'");
   return false;
 }
 
@@ -182,24 +183,24 @@ export async function switchCommentsFilterToNewest(page, url = null) {
 
   // Dla UI "post" używamy scope-aware wersji
   if (ui?.type === "post" && typeof uiPost.switchCommentsFilterToNewestScoped === "function") {
-    console.log("[FB][router] UI -> post switchCommentsFilterToNewestScoped");
+    log.dev("FILTER", "UI → post switchCommentsFilterToNewestScoped");
     return uiPost.switchCommentsFilterToNewestScoped(page);
   }
 
   // Dla UI "videos" używamy scope-aware wersji
   if (ui?.type === "videos" && typeof uiVideos.switchCommentsFilterToNewestScoped === "function") {
-    console.log("[FB][router] UI -> videos switchCommentsFilterToNewestScoped");
+    log.dev("FILTER", "UI → videos switchCommentsFilterToNewestScoped");
     return uiVideos.switchCommentsFilterToNewestScoped(page);
   }
 
   // Legacy/fallback dla innych UI
-  console.log("[FB][filter] Próba przełączenia filtra na: 'Najnowsze' (legacy)…");
+  log.dev("FILTER", "Przełączam na 'Najnowsze' (legacy)...");
 
   // Otwórz menu jeśli zamknięte
   if (!(await page.evaluate(() => !!document.querySelector("div[role='menu']")))) {
     const opened = await openCommentsMenu(page);
     if (!opened) {
-      console.log("[FB][filter] Nie udało się otworzyć menu sortowania.");
+      log.dev("FILTER", "Nie udało się otworzyć menu sortowania");
       return { ok: false, reason: "menu-not-opened" };
     }
     await sleepRandom(250, 450);
@@ -220,11 +221,11 @@ export async function switchCommentsFilterToNewest(page, url = null) {
         timeout: 2500,
       })
       .catch(() => {});
-    console.log("[FB][filter] Filtr ustawiony na: 'Najnowsze'.");
+    log.dev("FILTER", "Ustawiono 'Najnowsze'");
     return { ok: true };
   }
 
-  console.log("[FB][filter] Nie udało się wybrać 'Najnowsze'.");
+  log.dev("FILTER", "Nie udało się wybrać 'Najnowsze'");
   return { ok: false, reason: picked?.reason || "option-not-found" };
 }
 
@@ -262,7 +263,7 @@ async function getCommentCountLegacy(page) {
 
   if (uiCandidates.length) {
     const best = Math.max(...uiCandidates);
-    console.log("[FB][count] UI:", {
+    log.debug("EXTRACT", "UI count", {
       best,
       candidates: uiCandidates,
       source: ui?.source || "ui",
@@ -304,14 +305,14 @@ async function getCommentCountLegacy(page) {
     .catch(() => ({ count: null, sample: [] }));
 
   if (typeof uiLoose?.count === "number" && Number.isFinite(uiLoose.count)) {
-    console.log("[FB][count] UI-loose:", uiLoose.count);
+    log.debug("EXTRACT", `UI-loose count: ${uiLoose.count}`);
     return uiLoose.count;
   }
 
   if (ui) {
-    console.log("[FB][count] UI object (no number):", { keys: Object.keys(ui), ui });
+    log.debug("EXTRACT", "UI object (no number)", { keys: Object.keys(ui) });
   } else {
-    console.log("[FB][count] UI object: null (getUiCommentInfo failed or returned null)");
+    log.debug("EXTRACT", "UI object: null");
   }
 
   const anchors = await page.evaluate(() => {
@@ -329,7 +330,7 @@ async function getCommentCountLegacy(page) {
     return ids.size;
   });
 
-  if (anchors > 0) console.log("[FB][count] anchors-fallback:", anchors);
+  if (anchors > 0) log.debug("EXTRACT", `Anchors-fallback: ${anchors}`);
   return anchors > 0 ? anchors : null;
 }
 
@@ -461,12 +462,12 @@ async function prepareLegacy(page, url) {
 
   const currentUrl = page.url();
   if (currentUrl.includes("/login")) {
-    console.log("[FB] /login redirect → fbLogin() and back");
+    log.dev("LOGIN", "/login redirect → fbLogin()");
     await fbLogin(page);
     await sleepRandom(3000, 4500);
 
     const loggedAfterLogin = await checkIfLogged(page).catch(() => false);
-    console.log("[FB] session after fbLogin:", loggedAfterLogin ? "OK" : "NO");
+    log.dev("LOGIN", `Session after fbLogin: ${loggedAfterLogin ? "OK" : "NO"}`);
 
     if (loggedAfterLogin) {
       await safeGoto(page, url, "comments", {
@@ -505,7 +506,7 @@ async function loadAllCommentsLegacy(page, opts = {}) {
   const MAX_NO_PROGRESS = opts.maxNoProgress ?? 10;
   const CLICKS_PER_ROUND = opts.clicksPerRound ?? 10;
 
-  console.log("[FB][load] start", { expected });
+  log.dev("EXTRACT", "Load start", { expected });
 
   function uniqAnchorCountEval() {
     return page.evaluate(() => {
@@ -593,26 +594,30 @@ async function loadAllCommentsLegacy(page, opts = {}) {
       noProgress++;
     }
 
-    console.log(
-      `[FB][load] round ${round}: anchors ${anchors} -> ${nextAnchors}, nodes ${nodes} -> ${nextNodes}, clicks=${clicks}, stable=${stable}/${STABLE_ROUNDS}, moreBtns=${moreBtns}, noProgress=${noProgress}/${MAX_NO_PROGRESS}`
-    );
+    log.debug("EXTRACT", `Round ${round}`, {
+      anchors: `${anchors}→${nextAnchors}`,
+      nodes: `${nodes}→${nextNodes}`,
+      clicks,
+      stable: `${stable}/${STABLE_ROUNDS}`,
+      moreBtns,
+    });
 
     const stableEnough = stable >= STABLE_ROUNDS;
 
     if (!moreBtns && stableEnough) {
-      console.log("[FB][load] stop: no more buttons + stable");
+      log.dev("EXTRACT", "Stop: no more buttons + stable");
       break;
     }
 
     const reachedExpected =
       expected != null && Number.isFinite(expected) && expected >= 0 && nextNodes >= expected;
     if (reachedExpected && stableEnough && !moreBtns) {
-      console.log("[FB][load] stop: expected reached (by nodes) + stable + no more buttons");
+      log.dev("EXTRACT", "Stop: expected reached + stable");
       break;
     }
 
     if (stableEnough && moreBtns) {
-      console.log("[FB][load] rescue: stable but still buttons -> deep scroll + wait");
+      log.debug("EXTRACT", "Rescue: stable but buttons → deep scroll");
       await scrollPost(page, 520).catch(() => {});
       await sleepRandom(1000, 1600);
       stable = 0;
@@ -621,7 +626,7 @@ async function loadAllCommentsLegacy(page, opts = {}) {
 
     if (noProgress >= MAX_NO_PROGRESS) {
       if (moreBtns) {
-        console.log("[FB][load] last-rescue: no-progress but still buttons -> deep scroll + wait");
+        log.debug("EXTRACT", "Last-rescue: no-progress but buttons → deep scroll");
         await scrollPost(page, 650).catch(() => {});
         await sleepRandom(1400, 1900);
         stable = 0;
@@ -629,7 +634,7 @@ async function loadAllCommentsLegacy(page, opts = {}) {
         continue;
       }
 
-      console.log("[FB][load] stop: too many no-progress rounds");
+      log.dev("EXTRACT", "Stop: too many no-progress rounds");
       break;
     }
 
@@ -639,7 +644,7 @@ async function loadAllCommentsLegacy(page, opts = {}) {
 
   const finalAnchors = await uniqAnchorCountEval().catch(() => anchors);
   const finalNodes = await commentNodesCountEval().catch(() => nodes);
-  console.log("[FB][load] done:", { anchors: finalAnchors, nodes: finalNodes });
+  log.dev("EXTRACT", `Load done: ${finalAnchors} anchors, ${finalNodes} nodes`);
 }
 
 /* ============================================================
@@ -652,11 +657,11 @@ export async function prepare(page, url) {
   const fast = resolveFastFlag(url, opts, ui);
 
   if (ui?.prepare) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} prepare`, { fast });
+    log.dev("NAV", `UI → ${ui.type || "unknown"} prepare`, { fast });
     return ui.prepare(page, url, { ...(opts || {}), fast });
   }
 
-  console.log("[FB][router] UI -> legacy prepare", { fast: false });
+  log.dev("NAV", "UI → legacy prepare");
   return prepareLegacy(page, url);
 }
 
@@ -667,11 +672,11 @@ export async function getCommentCount(page, url) {
   const fast = resolveFastFlag(finalUrl, opts, ui);
 
   if (ui?.getCommentCount) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} getCommentCount`, { fast });
+    log.debug("EXTRACT", `UI → ${ui.type || "unknown"} getCommentCount`);
     return ui.getCommentCount(page, finalUrl, { ...(opts || {}), fast });
   }
 
-  console.log("[FB][router] UI -> legacy getCommentCount", { fast: false });
+  log.debug("EXTRACT", "UI → legacy getCommentCount");
   return getCommentCountLegacy(page);
 }
 
@@ -683,11 +688,11 @@ export async function loadAllComments(page, opts = {}, url = null) {
   const fast = resolveFastFlag(finalUrl, opts, ui);
 
   if (ui?.loadAllComments) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} loadAllComments`, { fast });
+    log.dev("EXTRACT", `UI → ${ui.type || "unknown"} loadAllComments`);
     return ui.loadAllComments(page, { expectedTotal: opts.expectedTotal, ...(opts || {}), fast });
   }
 
-  console.log("[FB][router] UI -> legacy loadAllComments");
+  log.dev("EXTRACT", "UI → legacy loadAllComments");
   return loadAllCommentsLegacy(page, opts);
 }
 
@@ -734,7 +739,7 @@ export async function extractCommentsData(page, url = null) {
     let sampleLogged = 0;
 
     // kontekst: do czego porownujemy
-    console.log(`[DEDUP][CTX] want=${postRef || "null"} finalUrl=${finalUrl}`);
+    log.debug("DEDUP", `Context: want=${postRef || "null"}`);
 
     for (const c of arr) {
       const permalink = c && typeof c === "object" ? c.permalink || null : null;
@@ -742,7 +747,7 @@ export async function extractCommentsData(page, url = null) {
 
       // pokaz 3 pierwsze permalink->cref
       if (sampleLogged < 3 && permalink) {
-        console.log(`[DEDUP][SAMPLE] permalink=${permalink} cref=${cref || "null"}`);
+        log.debug("DEDUP", `Sample: cref=${cref || "null"}`);
         sampleLogged += 1;
       }
 
@@ -755,19 +760,19 @@ export async function extractCommentsData(page, url = null) {
     }
 
     if (dropped > 0) {
-      console.log(`[DEDUP] dropped=${dropped} (ref mismatch) postRef=${postRef}`);
+      log.debug("DEDUP", `Dropped ${dropped} (ref mismatch)`);
     }
 
     if (arr.length > 0 && out.length === 0 && dropped === arr.length) {
       out._dedupAllDropped = true;
-      console.log(`[DEDUP][ALL_DROPPED] all=${arr.length} want=${postRef}`);
+      log.warn("DEDUP", `All ${arr.length} dropped (ref mismatch)`);
     }
 
     return out;
   };
 
   if (ui?.extractComments) {
-    console.log(`[FB][router] UI -> ${ui.type || "unknown"} extractComments`, { fast });
+    log.debug("EXTRACT", `UI → ${ui.type || "unknown"} extractComments`);
     const out = await ui.extractComments(page, finalUrl, { ...(opts || {}), fast });
     return filterByRef(out);
   }

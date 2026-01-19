@@ -5,6 +5,7 @@ import { scrollPost } from "../scroll.js";
 import { acceptCookies, saveCookies } from "../cookies.js";
 import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "../login.js";
 import { getUiCommentInfo } from "../uiCommentInfo.js";
+import log from "../../utils/logger.js";
 
 export const type = "photo";
 
@@ -125,7 +126,7 @@ async function clickAllCommentsInMenu(page) {
 }
 
 async function switchCommentsFilterToAll(page) {
-  console.log("[FB][ui:photo][filter] switch -> all comments");
+  log.debug("UI:photo", "Przełączam filtr → wszystkie komentarze");
 
   const menuAlreadyOpen = await page.evaluate(() => !!document.querySelector("div[role='menu']"));
   if (menuAlreadyOpen) {
@@ -322,13 +323,13 @@ async function getCommentsScrollHandle(page, rootHandle) {
 /* ======================================================================== */
 
 export async function prepare(page, url) {
-  console.log(`[FB][ui:photo] prepare: ${url}`);
+  log.dev("UI:photo", `Prepare: ${url}`);
 
   const ok = await safeGoto(page, url, "photo", { waitUntil: "networkidle2", timeout: 90000 });
   if (!ok) throw new Error("safeGoto-failed");
 
   if (page.url().includes("/login")) {
-    console.log("[FB][ui:photo] /login – fbLogin + re-enter.");
+    log.dev("UI:photo", "/login – fbLogin + re-enter");
     await fbLogin(page);
     await sleepRandom(2500, 4000);
     await safeGoto(page, url, "photo", { waitUntil: "networkidle2", timeout: 90000 });
@@ -338,7 +339,7 @@ export async function prepare(page, url) {
 
   const logged = await checkIfLogged(page).catch(() => false);
   if (!logged) {
-    console.log("[FB][ui:photo] not logged – fbLogin().");
+    log.dev("UI:photo", "Brak sesji – fbLogin()");
     await fbLogin(page);
     await sleepRandom(2500, 4000);
   }
@@ -495,13 +496,13 @@ async function getPhotoUiCountFromChip(page, rootHandle) {
 }
 
 export async function getCommentCount(page, url) {
-  console.log("[FB][ui:photo] getCommentCount…");
+  log.dev("UI:photo", "Liczę komentarze...");
 
   await scrollPost(page, 220);
   await sleepRandom(220, 420);
 
   const okFilter = await switchCommentsFilterToAll(page).catch(() => false);
-  console.log(`[FB][ui:photo] filter all comments: ${okFilter}`);
+  log.debug("UI:photo", `Filtr all comments: ${okFilter}`);
 
   // mikro settle po filtrze (bez mulenia)
   await sleepRandom(220, 420);
@@ -510,7 +511,7 @@ export async function getCommentCount(page, url) {
 
   const chip = await getPhotoUiCountFromChip(page, rootHandle).catch(() => null);
   if (chip?.count != null) {
-    console.log("[FB][ui:photo] UI count (chip):", chip);
+    log.debug("UI:photo", "UI count (chip)", chip);
   }
 
   const uiInfo = await getUiCommentInfo(page).catch(() => null);
@@ -544,7 +545,7 @@ export async function getCommentCount(page, url) {
     source = "loaded-comment_id";
   }
 
-  console.log("[FB][ui:photo] UI comments:", {
+  log.debug("UI:photo", "UI comments", {
     source,
     chip: chip?.count ?? null,
     uiInfoSource: uiInfo?.source ?? null,
@@ -565,7 +566,7 @@ export async function getCommentCount(page, url) {
 }
 
 export async function loadAllComments(page, { expectedTotal } = {}) {
-  console.log(`[FB][ui:photo] loadAllComments… expectedTotal=${expectedTotal ?? "n/a"} pace=${PACE}`);
+  log.dev("UI:photo", `loadAllComments expectedTotal=${expectedTotal ?? "n/a"} pace=${PACE}`);
 
   const MAX_STEPS = 900;
   const MAX_NO_PROGRESS = 28;
@@ -625,9 +626,7 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
       }, rootHandle, scrollHandle, pixels);
 
       if (!info?.moved) {
-        console.log(
-          `[FB][ui:photo][scroll] NO-MOVE tag=${info?.tag} before=${info?.before} after=${info?.after}`
-        );
+        log.debug("UI:photo", `Scroll NO-MOVE tag=${info?.tag} ${info?.before}→${info?.after}`);
       }
     } catch {
       await page.evaluate((px) => window.scrollBy(0, px), pixels).catch(() => {});
@@ -1333,7 +1332,7 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
   };
 
   let cur = await countAnchors().catch(() => ({ commentsAnchors: 0, replyAnchors: 0, nodes: 0 }));
-  console.log("[FB][ui:photo] startCounts:", cur);
+  log.debug("UI:photo", "startCounts", cur);
 
   for (let step = 1; step <= MAX_STEPS; step++) {
     const before = cur;
@@ -1413,26 +1412,16 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
 
     const forceLog = progressed || clickInfo?.clicked || noProgress >= 10 || hb.stable >= 2;
     if (shouldLog(step, key, forceLog)) {
-      console.log(
-        `[FB][ui:photo] step=${step} action=${action} eff=${effectOk ? "OK" : "NO"} bonus=${bonus} ` +
-          `cA ${before.commentsAnchors}->${cur.commentsAnchors} ` +
-          `rA ${before.replyAnchors}->${cur.replyAnchors} ` +
-          `nodes ${before.nodes}->${cur.nodes} ` +
-          `np=${noProgress}/${MAX_NO_PROGRESS} ` +
-          `hb=${hb.atBottom ? "Y" : "N"} stable=${hb.stable}/${PACE_CFG.hardBottomStableNeed} more=${
-            hb.anyMore ? "Y" : "N"
-          } scroller=${hb.tag}` +
-          (clickInfo?.clicked ? ` btn="${shortBtn(clickInfo.text)}"` : "")
-      );
+      log.debug("UI:photo", `step=${step} ${action} cA ${before.commentsAnchors}→${cur.commentsAnchors} rA ${before.replyAnchors}→${cur.replyAnchors} np=${noProgress}/${MAX_NO_PROGRESS}`);
     }
 
     if (hb.stable >= Number(PACE_CFG.hardBottomStableNeed || 4)) {
-      console.log("[FB][ui:photo] stop: hard-bottom-stable (true bottom reached)");
+      log.debug("UI:photo", "Stop: hard-bottom-stable");
       break;
     }
 
     if (noProgress >= MAX_NO_PROGRESS) {
-      console.log("[FB][ui:photo] stop: too many no-progress steps (safety)");
+      log.debug("UI:photo", "Stop: too many no-progress steps");
       break;
     }
 
@@ -1442,17 +1431,17 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
 
   // FINAL + SWEEP (tylko jeśli coś jeszcze zostało do kliknięcia)
   let final = await countAnchors().catch(() => cur);
-  console.log("[FB][ui:photo] done:", final);
+  log.debug("UI:photo", "Done", final);
 
   const needSweep = await hasAnyReplyExpanders(page, rootHandle).catch(() => false);
   if (needSweep) {
-    console.log("[FB][ui:photo] sweep: wykryto jeszcze reply expanders -> odpalam sweep top-down…");
+    log.debug("UI:photo", "Sweep: reply expanders -> top-down...");
     const clicked = await sweepRepliesTopDown(page, rootHandle, scrollHandle).catch(() => 0);
-    console.log(`[FB][ui:photo] sweep: clicked=${clicked}`);
+    log.debug("UI:photo", `Sweep: clicked=${clicked}`);
     final = await countAnchors().catch(() => final);
-    console.log("[FB][ui:photo] after sweep:", final);
+    log.debug("UI:photo", "After sweep", final);
   } else {
-    console.log("[FB][ui:photo] sweep: brak reply expanders -> pomijam.");
+    log.debug("UI:photo", "Sweep: brak reply expanders");
   }
 
   try {

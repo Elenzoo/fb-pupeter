@@ -1,6 +1,7 @@
 // src/db/cache.js
 import fs from "fs";
 import path from "path";
+import log from "../utils/logger.js";
 
 const FILE = "./data/comments-cache.json";
 
@@ -22,7 +23,7 @@ export function loadCache() {
     if (!raw.trim()) return {};
     return JSON.parse(raw);
   } catch (e) {
-    console.error("[Cache] Błąd ładowania:", e.message);
+    log.warn("CACHE", `Błąd ładowania: ${e.message}`);
     return {};
   }
 }
@@ -32,6 +33,6 @@ export function saveCache(cache) {
     ensureDir();
     fs.writeFileSync(FILE, JSON.stringify(cache, null, 2), "utf8");
   } catch (e) {
-    console.error("[Cache] Błąd zapisu:", e.message);
+    log.warn("CACHE", `Błąd zapisu: ${e.message}`);
   }
 }

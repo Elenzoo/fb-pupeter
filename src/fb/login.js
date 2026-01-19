@@ -1,5 +1,6 @@
 // src/fb/login.js
 import { sleepRandom } from "../utils/sleep.js";
+import log from "../utils/logger.js";
 
 /**
  * FB login helpers – PRO (NO COOLDOWN)
@@ -27,7 +28,7 @@ function norm(s) {
  */
 async function acceptLoginCookies(page) {
   try {
-    console.log("[FB][login-cookies] Szukam popupu cookies...");
+    log.debug("LOGIN", "Szukam popupu cookies...");
 
     await sleepRandom(300, 900);
 
@@ -68,14 +69,12 @@ async function acceptLoginCookies(page) {
       .click('[data-fb-cookie-btn="1"]')
       .catch(() => {});
 
-    console.log(
-      '[FB][login-cookies] Kliknięto cookies (data-fb-cookie-btn="1").'
-    );
+    log.debug("LOGIN", "Kliknięto cookies popup");
 
     await sleepRandom(600, 1200);
     return true;
   } catch (err) {
-    console.log("[FB][login-cookies] Błąd (ignorowany):", err?.message || err);
+    log.debug("LOGIN", `Błąd cookies popup: ${err?.message || err}`);
     return false;
   }
 }
@@ -115,7 +114,7 @@ async function acceptCookiesIfPresent(page) {
     });
 
     if (clicked) {
-      console.log("[FB][cookies] Kliknięto accept cookies (fallback).");
+      log.debug("LOGIN", "Kliknięto accept cookies (fallback)");
       await sleepRandom(500, 1100);
     }
     return !!clicked;
@@ -132,7 +131,7 @@ async function fillLoginFormBestEffort(page) {
   const password = process.env.FB_PASSWORD || "";
 
   if (!email || !password) {
-    console.log("[FB][login] Brak FB_EMAIL / FB_PASSWORD – pomijam login.");
+    log.dev("LOGIN", "Brak FB_EMAIL / FB_PASSWORD – pomijam");
     return false;
   }
 
@@ -153,11 +152,11 @@ async function fillLoginFormBestEffort(page) {
   const passInput = await page.$(passSel).catch(() => null);
 
   if (!emailInput || !passInput) {
-    console.log("[FB][login] Brak pól email/hasło na stronie login.");
+    log.debug("LOGIN", "Brak pól email/hasło na stronie");
     return false;
   }
 
-  console.log("[FB][login] Wpisuję email i hasło...");
+  log.dev("LOGIN", "Wpisuję email i hasło...");
 
   await emailInput.click({ clickCount: 3 }).catch(() => {});
   await page.keyboard.press("Backspace").catch(() => {});
@@ -175,11 +174,11 @@ async function fillLoginFormBestEffort(page) {
     null;
 
   if (!loginButton) {
-    console.log("[FB][login] Brak przycisku logowania – kończę próbę.");
+    log.debug("LOGIN", "Brak przycisku logowania");
     return false;
   }
 
-  console.log("[FB][login] Klikam logowanie…");
+  log.dev("LOGIN", "Klikam logowanie...");
 
   await Promise.all([
     loginButton.click().catch(() => {}),
@@ -198,7 +197,7 @@ async function fillLoginFormBestEffort(page) {
  */
 async function loginViaVisibleForm(page, context = "visible-form") {
   try {
-    console.log(`[FB][login-form] Szukam formularza logowania (${context})...`);
+    log.debug("LOGIN", `Szukam formularza (${context})...`);
 
     await acceptLoginCookies(page).catch(() => {});
     await acceptCookiesIfPresent(page).catch(() => {});
@@ -230,19 +229,17 @@ async function loginViaVisibleForm(page, context = "visible-form") {
     const passInput = await page.$(passSelector).catch(() => null);
 
     if (!emailInput || !passInput) {
-      console.log(
-        "[FB][login-form] Brak pełnego formularza (email + hasło) na stronie."
-      );
+      log.debug("LOGIN", "Brak pełnego formularza na stronie");
       return false;
     }
 
     const ok = await fillLoginFormBestEffort(page);
     if (!ok) return false;
 
-    console.log("[FB][login-form] Formularz logowania wysłany.");
+    log.dev("LOGIN", "Formularz logowania wysłany");
     return true;
   } catch (err) {
-    console.error("[FB][login-form] Błąd (ignorowany):", err?.message || err);
+    log.debug("LOGIN", `Błąd formularza: ${err?.message || err}`);
     return false;
   }
 }
@@ -253,7 +250,7 @@ async function loginViaVisibleForm(page, context = "visible-form") {
  */
 async function fbLogin(page, nextUrl = "") {
   try {
-    console.log("[FB][login] Start logowania (best-effort)");
+    log.dev("LOGIN", "Start logowania...");
 
     const next = nextUrl ? `?next=${encodeURIComponent(nextUrl)}` : "";
     const url = `https://www.facebook.com/login.php${next}`;
@@ -276,7 +273,7 @@ async function fbLogin(page, nextUrl = "") {
 
     return true;
   } catch (e) {
-    console.log("[FB][login] Błąd (ignorowany):", e?.message || e);
+    log.debug("LOGIN", `Błąd logowania: ${e?.message || e}`);
     return false;
   }
 }
@@ -377,14 +374,12 @@ async function ensureLoggedInOnPostOverlay(page, postUrl = "") {
     const wall = await looksLikeLoginWall(page);
     if (!wall) return false;
 
-    console.log(
-      "[FB][login] Wykryto login-wall -> login.php?next i próba logowania."
-    );
+    log.dev("LOGIN", "Wykryto login-wall → próba logowania");
 
     const tried = await fbLogin(page, target);
 
     let logged = await checkIfLogged(page);
-    console.log("[FB][login] session after fbLogin:", logged ? "YES" : "NO");
+    log.dev("LOGIN", `Sesja po fbLogin: ${logged ? "OK" : "BRAK"}`);
 
     // jeśli FB nie przerzucił automatycznie, wróć na post
     if (target && norm(page.url()) !== norm(target)) {
@@ -402,19 +397,13 @@ async function ensureLoggedInOnPostOverlay(page, postUrl = "") {
       const usedInline = await loginViaVisibleForm(page, "post-overlay-inline");
       if (usedInline) {
         logged = await checkIfLogged(page);
-        console.log(
-          "[FB][login] session after loginViaVisibleForm:",
-          logged ? "YES" : "NO"
-        );
+        log.dev("LOGIN", `Sesja po visible-form: ${logged ? "OK" : "BRAK"}`);
       }
     }
 
     return tried && logged;
   } catch (e) {
-    console.log(
-      "[FB][login] ensureLoggedInOnPostOverlay error (ignored):",
-      e?.message || e
-    );
+    log.debug("LOGIN", `ensureLoggedInOnPostOverlay error: ${e?.message || e}`);
     return false;
   }
 }

@@ -1,5 +1,6 @@
 // src/utils/navigation.js
 import { sleepRandom } from "./sleep.js";
+import log from "./logger.js";
 
 /**
  * Bezpieczne page.goto z retry.
@@ -17,35 +18,27 @@ export async function safeGoto(page, url, label = "goto", options = {}) {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      console.log(
-        `[NAV] (${label}) próba ${attempt}/${MAX_ATTEMPTS}: ${url}`
-      );
+      log.debug("NAV", `[${label}] Próba ${attempt}/${MAX_ATTEMPTS}: ${url}`);
 
-  // === FORCE DESKTOP PROFILE (SERVER FIX) ===
-  await page.setViewport({ width: 1366, height: 768 });
-// DISABLED UA // === END FORCE DESKTOP PROFILE ===
+      // === FORCE DESKTOP PROFILE (SERVER FIX) ===
+      await page.setViewport({ width: 1366, height: 768 });
+      // DISABLED UA // === END FORCE DESKTOP PROFILE ===
 
       await page.goto(url, finalOptions);
 
-      console.log(`[NAV] (${label}) OK na próbie ${attempt}`);
+      log.debug("NAV", `[${label}] OK na próbie ${attempt}`);
       return true;
     } catch (err) {
-      console.error(
-        `[NAV] (${label}) błąd na próbie ${attempt}:`,
-        err.message
-      );
+      log.warn("NAV", `[${label}] Błąd próba ${attempt}: ${err.message}`);
 
       if (attempt === MAX_ATTEMPTS) {
-        // sygnał dla wyżej: to już nie jest chwilowy lag
         return false;
       }
 
-      // chwila przerwy
       await sleepRandom(3000, 7000);
 
-      // próba „przepłukania” sesji – wejście na FB
       try {
-        console.log("[NAV] próba odświeżenia FB (strona główna)...");
+        log.debug("NAV", "Próba odświeżenia FB...");
         await page
           .goto("https://www.facebook.com/", {
             waitUntil: "load",
@@ -53,10 +46,7 @@ export async function safeGoto(page, url, label = "goto", options = {}) {
           })
           .catch(() => {});
       } catch (e2) {
-        console.error(
-          "[NAV] odświeżenie FB też poleciało błędem:",
-          e2.message
-        );
+        log.warn("NAV", `Odświeżenie FB też błąd: ${e2.message}`);
       }
     }
   }

@@ -2,6 +2,7 @@
 import { EXPAND_COMMENTS } from "../../config.js";
 import { sleepRandom } from "../../utils/sleep.js";
 import { safeGoto } from "../../utils/navigation.js";
+import log from "../../utils/logger.js";
 
 import { scrollPost } from "../scroll.js";
 import { acceptCookies, saveCookies } from "../cookies.js";
@@ -190,16 +191,16 @@ async function clickAllCommentsInMenu(page) {
 }
 
 async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
-  console.log("[FB][ui:post][filter] Próba przełączenia filtra komentarzy…");
-  console.log("[FB][ui:post][filter] scope=", scopeSel);
+  log.dev("UI:post", "Przełączam filtr komentarzy...");
+  log.debug("UI:post", `Filter scope: ${scopeSel}`);
 
   // 0) Jeśli menu już otwarte -> wybierz "Wszystkie komentarze" / "Pokaż wszystkie"
   const menuAlreadyOpen = await page.evaluate(() => !!document.querySelector("div[role='menu']"));
   if (menuAlreadyOpen) {
-    console.log("[FB][ui:post][filter] Menu już otwarte – wybieram opcję.");
+    log.debug("UI:post", "Menu już otwarte – wybieram opcję");
     const r = await clickAllCommentsInMenu(page);
     if (r?.clicked)
-      console.log("[FB][ui:post][filter] Filtr komentarzy ustawiony na: 'Wszystkie komentarze' / 'Pokaż wszystkie'.");
+      log.dev("UI:post", "Filtr ustawiony: 'Wszystkie komentarze'");
     return !!r?.clicked;
   }
 
@@ -352,16 +353,16 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
   );
 
   if (!pre?.ok) {
-    console.log("[FB][ui:post][filter] Nie znaleziono przycisku filtra komentarzy.");
+    log.debug("UI:post", "Nie znaleziono przycisku filtra");
     return false;
   }
 
   if (pre.state === "already-all") {
-    console.log("[FB][ui:post][filter] Filtr już ustawiony na 'Wszystkie komentarze' / 'Pokaż wszystkie' – pomijam.");
+    log.debug("UI:post", "Filtr już ustawiony – pomijam");
     return true;
   }
 
-  console.log("[FB][ui:post][filter] Kliknięto filtr:", pre);
+  log.debug("UI:post", "Kliknięto filtr", pre);
 
   // WAŻNE: po kliknięciu filtra daj chwilę na render menu
   await sleepRandom(350, 650);
@@ -370,7 +371,7 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
   const menuResult = await clickAllCommentsInMenu(page);
 
   if (menuResult?.clicked) {
-    console.log("[FB][ui:post][filter] Filtr komentarzy ustawiony na: 'Wszystkie komentarze' / 'Pokaż wszystkie'.");
+    log.dev("UI:post", "Filtr ustawiony: 'Wszystkie komentarze'");
     return true;
   }
 
@@ -406,14 +407,11 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
   });
 
   if (afterLabelIsAll) {
-    console.log("[FB][ui:post][filter] Przełączyło się bez menu na 'Wszystkie komentarze' / 'Pokaż wszystkie'.");
+    log.debug("UI:post", "Przełączyło się bez menu");
     return true;
   }
 
-  console.log(
-    "[FB][ui:post][filter] Nie udało się ustawić filtra na 'Wszystkie komentarze' / 'Pokaż wszystkie'. menuResult=",
-    menuResult
-  );
+  log.debug("UI:post", "Nie udało się ustawić filtra", menuResult);
   return false;
 }
 
@@ -518,16 +516,16 @@ async function openFilterMenuScoped(page, scopeSel = "document") {
 }
 
 export async function switchCommentsFilterToNewestScoped(page, scopeSel = "document") {
-  console.log("[FB][ui:post][filter:newest] Próba przełączenia filtra na: 'Najnowsze'…");
-  console.log("[FB][ui:post][filter:newest] scope=", scopeSel);
+  log.dev("UI:post", "Przełączam na 'Najnowsze'...");
+  log.debug("UI:post", `Newest filter scope: ${scopeSel}`);
 
   // 0) Jeśli menu już otwarte -> wybierz "Najnowsze"
   const menuAlreadyOpen = await page.evaluate(() => !!document.querySelector("div[role='menu']"));
   if (menuAlreadyOpen) {
-    console.log("[FB][ui:post][filter:newest] Menu już otwarte – wybieram 'Najnowsze'.");
+    log.debug("UI:post", "Menu otwarte – wybieram 'Najnowsze'");
     const r = await clickMenuOptionByPattern(page, ["najnowsze", "newest", "od najnowszych", "most recent"]);
     if (r?.clicked) {
-      console.log("[FB][ui:post][filter:newest] Filtr ustawiony na: 'Najnowsze'.");
+      log.dev("UI:post", "Filtr ustawiony: 'Najnowsze'");
       return { ok: true };
     }
     return { ok: false, reason: "option-not-found-in-open-menu" };
@@ -553,14 +551,14 @@ export async function switchCommentsFilterToNewestScoped(page, scopeSel = "docum
   });
 
   if (alreadyNewest) {
-    console.log("[FB][ui:post][filter:newest] Filtr już ustawiony na 'Najnowsze' – pomijam.");
+    log.debug("UI:post", "Filtr już 'Najnowsze' – pomijam");
     return { ok: true, state: "already-newest" };
   }
 
   // 2) Otwórz menu filtra
   const openResult = await openFilterMenuScoped(page, scopeSel);
   if (!openResult?.ok) {
-    console.log("[FB][ui:post][filter:newest] Nie udało się otworzyć menu filtra.");
+    log.debug("UI:post", "Nie udało się otworzyć menu filtra");
     return { ok: false, reason: "menu-not-opened" };
   }
 
@@ -571,7 +569,7 @@ export async function switchCommentsFilterToNewestScoped(page, scopeSel = "docum
   const menuResult = await clickMenuOptionByPattern(page, ["najnowsze", "newest", "od najnowszych", "most recent"]);
 
   if (menuResult?.clicked) {
-    console.log("[FB][ui:post][filter:newest] Filtr ustawiony na: 'Najnowsze'.");
+    log.dev("UI:post", "Filtr ustawiony: 'Najnowsze'");
     return { ok: true };
   }
 
@@ -595,11 +593,11 @@ export async function switchCommentsFilterToNewestScoped(page, scopeSel = "docum
   });
 
   if (afterLabelIsNewest) {
-    console.log("[FB][ui:post][filter:newest] Przełączyło się bez menu na 'Najnowsze'.");
+    log.debug("UI:post", "Przełączyło się bez menu na 'Najnowsze'");
     return { ok: true };
   }
 
-  console.log("[FB][ui:post][filter:newest] Nie udało się ustawić filtra na 'Najnowsze'. menuResult=", menuResult);
+  log.debug("UI:post", "Nie udało się ustawić 'Najnowsze'", menuResult);
   return { ok: false, reason: menuResult?.noMenu ? "no-menu" : "option-not-found" };
 }
 
@@ -949,7 +947,7 @@ async function expandAllComments(page) {
    ============================================================ */
 
 export async function prepare(page, url) {
-  console.log(`[FB][ui:post] prepare: ${url}`);
+  log.dev("UI:post", `Prepare: ${url.slice(0, 60)}...`);
 
   const ok = await safeGoto(page, url, "post", {
     waitUntil: "networkidle2",
@@ -960,12 +958,12 @@ export async function prepare(page, url) {
 
   const currentUrl = page.url();
   if (currentUrl.includes("/login")) {
-    console.log("[FB][ui:post] /login redirect → fbLogin() and back");
+    log.dev("UI:post", "/login redirect → fbLogin()");
     await fbLogin(page);
     await sleepRandom(3000, 4500);
 
     const loggedAfterLogin = await checkIfLogged(page).catch(() => false);
-    console.log("[FB][ui:post] session after fbLogin:", loggedAfterLogin ? "OK" : "NO");
+    log.dev("UI:post", `Session after fbLogin: ${loggedAfterLogin ? "OK" : "NO"}`);
 
     if (loggedAfterLogin) {
       await safeGoto(page, url, "post", {
@@ -1023,7 +1021,7 @@ async function waitForScrollStop(page, { timeoutMs = 2000, stableMs = 250 } = {}
 }
 
 export async function getCommentCount(page, url) {
-  console.log("[FB][ui:post] getCommentCount…");
+  log.debug("UI:post", "getCommentCount...");
 
   // FB często robi auto-scroll / reflow tuż po wejściu – nie klikamy filtra w trakcie ruchu
   await waitForScrollStop(page, { timeoutMs: 2400, stableMs: 320 });
@@ -1032,7 +1030,7 @@ export async function getCommentCount(page, url) {
   const scopeSel = await getPostScopeSelector(page);
 
   const okFilter = await switchCommentsFilterToAllScoped(page, scopeSel).catch(() => false);
-  console.log("[FB][ui:post] filter all comments:", okFilter);
+  log.debug("UI:post", `Filter all comments: ${okFilter}`);
 
   // po filtrze DOM lubi się przebudować; nie scrollujemy — tylko chwila stabilizacji
   if (okFilter) {
@@ -1043,9 +1041,8 @@ export async function getCommentCount(page, url) {
   // KLUCZ: licz UI po root posta, nie po scope dialogu
   const ui = await getCommentCountFromUiPostRoot(page).catch(() => null);
 
-  console.log("[FB][ui:post] UI comments:", {
+  log.debug("UI:post", "UI comments", {
     source: ui?.source || "none",
-    raw: ui?.raw || null,
     comments: ui?.comments ?? null,
   });
 
@@ -1054,13 +1051,13 @@ export async function getCommentCount(page, url) {
   }
 
   const anchors = await getCurrentCommentAnchorCount(page);
-  console.log("[FB][ui:post] Fallback anchor count =", anchors);
+  log.debug("UI:post", `Fallback anchor count: ${anchors}`);
 
   return anchors > 0 ? anchors : null;
 }
 
 export async function loadAllComments(page, { expectedTotal } = {}) {
-  console.log(`[FB][ui:post] loadAllComments… expectedTotal=${expectedTotal ?? "n/a"}`);
+  log.dev("UI:post", `loadAllComments (expected: ${expectedTotal ?? "n/a"})`);
 
   await waitForScrollStop(page, { timeoutMs: 2400, stableMs: 320 });
 
@@ -1087,20 +1084,22 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
     lastAnchors = after;
 
     if (round === 1 || round % 25 === 0) {
-      console.log(
-        `[FB][ui:post] round=${round} container=${scrollInfo.container} scrollTop: ${scrollInfo.before}→${scrollInfo.after} anchors: ${before}→${after} clicks=${clicks} noProgress=${noProgress}`
-      );
+      log.debug("UI:post", `Round ${round}`, {
+        anchors: `${before}→${after}`,
+        clicks,
+        noProgress,
+      });
     }
 
     if (typeof expectedTotal === "number" && expectedTotal > 0) {
       if (after >= expectedTotal && noProgress >= 2) {
-        console.log("[FB][ui:post] stop reason=target-reached");
+        log.debug("UI:post", "Stop: target-reached");
         break;
       }
     }
 
     if (noProgress >= MAX_NO_PROGRESS) {
-      console.log("[FB][ui:post] stop reason=no-progress");
+      log.debug("UI:post", "Stop: no-progress");
       break;
     }
   }
@@ -1154,7 +1153,7 @@ export async function extractComments(page, url) {
     return extracted;
   });
 
-  console.log("[FB][ui:post] extractComments: count =", data?.length || 0);
+  log.debug("UI:post", `extractComments: ${data?.length || 0} komentarzy`);
   return Array.isArray(data) ? data : [];
 }
 

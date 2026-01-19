@@ -111,6 +111,64 @@ const FAST_MODE = process.env.FAST_MODE === "true";
 // Komentarze starsze niż limit → skip posta (jeśli sort=Najnowsze)
 const FAST_MAX_AGE_MIN = Number(process.env.FAST_MAX_AGE_MIN || 180);
 
+/* ==================== LOGOWANIE ==================== */
+/**
+ * LOG_LEVEL – poziom szczegółowości logów:
+ *   0 = SILENT - tylko błędy krytyczne
+ *   1 = PROD   - status cykli, nowe komentarze, błędy (domyślny, do pracy na serwerze)
+ *   2 = DEV    - szczegóły operacji, timings (do pracy przy kodzie)
+ *   3 = DEBUG  - pełne dumpy, payloady, DOM info (hard debug)
+ *
+ * LOG_TIMESTAMPS – czy dodawać [HH:MM:SS] prefix (domyślnie true)
+ * LOG_COLORS – czy kolorować logi w konsoli (domyślnie true)
+ */
+const LOG_LEVEL = Number(process.env.LOG_LEVEL ?? 1);
+const LOG_TIMESTAMPS = process.env.LOG_TIMESTAMPS !== "false";
+const LOG_COLORS = process.env.LOG_COLORS !== "false";
+
+/* ==================== CHECKPOINT RECOVERY ==================== */
+/**
+ * CHECKPOINT_DETECTION – czy włączyć automatyczne wykrywanie checkpointów FB
+ * Domyślnie: true
+ */
+const CHECKPOINT_DETECTION = process.env.CHECKPOINT_DETECTION !== "false";
+
+/**
+ * CHECKPOINT_MAX_RETRIES – ile razy próbować recovery z fresh cookies
+ * Domyślnie: 3
+ */
+const CHECKPOINT_MAX_RETRIES = Number(process.env.CHECKPOINT_MAX_RETRIES || 3);
+
+/**
+ * BACKUP_COOKIES_DIR – katalog z backup cookies
+ * Domyślnie: ./data/backup_cookies
+ */
+const BACKUP_COOKIES_DIR = process.env.BACKUP_COOKIES_DIR || "./data/backup_cookies";
+
+/**
+ * CHECKPOINT_ALERT_TELEGRAM – czy wysyłać alert Telegram przy checkpoint
+ * Domyślnie: true
+ */
+const CHECKPOINT_ALERT_TELEGRAM = process.env.CHECKPOINT_ALERT_TELEGRAM !== "false";
+
+/**
+ * SOFT_BAN_DETECTION – wykrywanie "soft ban" (0 komentarzy na wielu postach)
+ * Domyślnie: true
+ */
+const SOFT_BAN_DETECTION = process.env.SOFT_BAN_DETECTION !== "false";
+
+/**
+ * SOFT_BAN_THRESHOLD – ile postów z 0 komentarzami = soft ban
+ * Domyślnie: 3
+ */
+const SOFT_BAN_THRESHOLD = Number(process.env.SOFT_BAN_THRESHOLD || 3);
+
+/**
+ * SCP_COOKIES_TARGET – cel SCP dla upload cookies (user@host:/path)
+ * Np.: SCP_COOKIES_TARGET=user@server:/app/data/backup_cookies/
+ */
+const SCP_COOKIES_TARGET = (process.env.SCP_COOKIES_TARGET || "").trim();
+
 export {
   // stary system – optional
   POSTS,
@@ -132,4 +190,20 @@ export {
   POSTS_REFRESH_MS,
   POSTS_API_URL,
   POSTS_API_TOKEN,
+
+  // logowanie
+  LOG_LEVEL,
+  LOG_TIMESTAMPS,
+  LOG_COLORS,
+
+  // checkpoint recovery
+  CHECKPOINT_DETECTION,
+  CHECKPOINT_MAX_RETRIES,
+  BACKUP_COOKIES_DIR,
+  CHECKPOINT_ALERT_TELEGRAM,
+  SCP_COOKIES_TARGET,
+
+  // soft ban detection
+  SOFT_BAN_DETECTION,
+  SOFT_BAN_THRESHOLD,
 };

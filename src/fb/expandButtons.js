@@ -1,12 +1,13 @@
 // src/fb/expandButtons.js
-// Centralny „button classifier” dla wszystkich przycisków typu:
-// - „Wyświetl więcej komentarzy / zobacz więcej komentarzy / view more comments”
-// - „Wyświetl wszystkie X odpowiedzi / Wyświetl 1 odpowiedź / X replies”
-// - „Zobacz więcej / See more” (bez „Zobacz tłumaczenie”).
+// Centralny „button classifier" dla wszystkich przycisków typu:
+// - „Wyświetl więcej komentarzy / zobacz więcej komentarzy / view more comments"
+// - „Wyświetl wszystkie X odpowiedzi / Wyświetl 1 odpowiedź / X replies"
+// - „Zobacz więcej / See more" (bez „Zobacz tłumaczenie").
 // Obsługa PL + EN + ogólne wzorce (comment/reply/more).
 // Zwraca true, jeśli COŚ zostało kliknięte.
 
 import { INCLUDE_REPLIES } from "../config.js";
+import log from "../utils/logger.js";
 
 async function clickOneExpandButton(page) {
   const res = await page.evaluate((includeReplies) => {
@@ -171,9 +172,7 @@ async function clickOneExpandButton(page) {
   }, INCLUDE_REPLIES);
 
   if (res && res.clicked) {
-    console.log(
-      `[FB] -> klik expand '${res.text}' (kind=${res.kind})`
-    );
+    log.debug("EXPAND", `Klik '${res.text}' (${res.kind})`);
   }
   return !!(res && res.clicked);
 }

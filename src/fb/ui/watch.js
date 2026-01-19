@@ -4,6 +4,7 @@ import { sleepRandom } from "../../utils/sleep.js";
 import { acceptCookies, saveCookies } from "../cookies.js";
 import { fbLogin, checkIfLogged } from "../login.js";
 import { getUiCommentInfo } from "../uiCommentInfo.js";
+import log from "../../utils/logger.js";
 
 /** Typ handlera UI */
 export const type = "watch";
@@ -29,9 +30,9 @@ async function safeShot(page, path, clip = null) {
   try {
     const opts = clip ? { path, clip } : { path, fullPage: false };
     await page.screenshot(opts);
-    console.log(`[FB][ui:watch][DBG] screenshot -> ${path}`);
+    log.debug("UI:watch", `Screenshot → ${path}`);
   } catch (e) {
-    console.log("[FB][ui:watch][DBG] screenshot failed:", e?.message || e);
+    log.debug("UI:watch", `Screenshot failed: ${e?.message || e}`);
   }
 }
 
@@ -41,7 +42,7 @@ async function shotElement(page, handle, path) {
     if (!handle) return;
     const box = await handle.boundingBox().catch(() => null);
     if (!box || box.width < 5 || box.height < 5) {
-      console.log("[FB][ui:watch][DBG] shotElement: no bbox");
+      log.debug("UI:watch", "shotElement: no bbox");
       return;
     }
     const clip = {
@@ -52,7 +53,7 @@ async function shotElement(page, handle, path) {
     };
     await safeShot(page, path, clip);
   } catch (e) {
-    console.log("[FB][ui:watch][DBG] shotElement failed:", e?.message || e);
+    log.debug("UI:watch", `shotElement failed: ${e?.message || e}`);
   }
 }
 
@@ -414,7 +415,7 @@ async function getCommentRootsCount(page, outerHandle) {
    ============================================================ */
 
 export async function prepare(page, url) {
-  console.log(`[FB][ui:watch] Otwieranie wideo (Watch): ${url}`);
+  log.dev("UI:watch", `Prepare: ${url}`);
   const ok = await safeGoto(page, url, "watch", { waitUntil: "networkidle2", timeout: 90000 });
   if (!ok) throw new Error("safeGoto-failed");
 
@@ -422,28 +423,26 @@ export async function prepare(page, url) {
 
   const currentUrl = page.url();
   if (currentUrl.includes("/login")) {
-    console.log("[FB][ui:watch] Wymagane logowanie do Facebook – loguję...");
+    log.dev("UI:watch", "Login wymagany...");
     await fbLogin(page);
     await sleepRandom(3000, 4500);
     const loggedAfterLogin = await checkIfLogged(page).catch(() => false);
-    console.log(
-      `[FB][ui:watch] Stan sesji po fbLogin: ${loggedAfterLogin ? "ZALOGOWANY" : "NIEZALOGOWANY"}`
-    );
+    log.dev("UI:watch", `Sesja po login: ${loggedAfterLogin ? "OK" : "BRAK"}`);
     if (loggedAfterLogin) {
       await safeGoto(page, url, "watch", { waitUntil: "networkidle2", timeout: 90000 });
       await acceptCookies(page, "watch-post-login");
     } else {
-      console.log("[FB][ui:watch] Logowanie nie powiodło się – kontynuuję bez sesji.");
+      log.dev("UI:watch", "Login failed – kontynuuję bez sesji");
     }
   } else {
     const logged = await checkIfLogged(page).catch(() => false);
     if (!logged) {
-      console.log("[FB][ui:watch] Brak sesji – fbLogin().");
+      log.dev("UI:watch", "Brak sesji – fbLogin()");
       await fbLogin(page);
       await sleepRandom(3000, 4500);
       await acceptCookies(page, "watch-after-login");
       const logged2 = await checkIfLogged(page).catch(() => false);
-      console.log(`[FB][ui:watch] Stan sesji po fbLogin: ${logged2 ? "ZALOGOWANY" : "NIEZALOGOWANY"}`);
+      log.dev("UI:watch", `Sesja po login: ${logged2 ? "OK" : "BRAK"}`);
     }
   }
 
@@ -467,9 +466,9 @@ export async function prepare(page, url) {
         } catch {}
       }
     });
-    console.log("[FB][ui:watch] Wideo wstrzymane (pause).");
+    log.debug("UI:watch", "Wideo wstrzymane");
   } catch (e) {
-    console.log("[FB][ui:watch] Błąd wstrzymania wideo:", e?.message || e);
+    log.debug("UI:watch", `Błąd wstrzymania wideo: ${e?.message || e}`);
   }
 
   if (DEBUG_WATCH) {
@@ -496,7 +495,7 @@ export async function getCommentCount(page, url) {
 
   const totalComments = pickBestCount([parsedFromOuter, parsedFromUiRaw, uiDirect]);
 
-  console.log(`[FB][ui:watch][DBG] count sources:`, {
+  log.debug("UI:watch", "Count sources", {
     ui_source: uiInfo?.source || null,
     ui_viewType: uiInfo?.viewType || null,
     ui_comments: uiDirect,
@@ -507,29 +506,29 @@ export async function getCommentCount(page, url) {
 
   let final = totalComments;
 
-  console.log(`[FB][ui:watch] Liczba komentarzy wg UI: ${final !== null ? final : "brak danych"}`);
+  log.dev("UI:watch", `Liczba komentarzy: ${final ?? "brak danych"}`);
   return final;
 }
 
 export async function loadAllComments(page, { expectedTotal } = {}) {
-  console.log("[FB][ui:watch] Ładuję wszystkie komentarze (Watch)...");
+  log.dev("UI:watch", "Ładuję komentarze...");
 
   let maxCycles = 40;
   if (typeof expectedTotal === "number" && expectedTotal > 0) {
     maxCycles = Math.min(Math.max(30, Math.ceil(expectedTotal / 6)), 140);
   }
-  console.log(`[FB][ui:watch] Rozpoczynam sekwencyjne ładowanie komentarzy, maxCycles=${maxCycles}.`);
+  log.debug("UI:watch", `maxCycles=${maxCycles}`);
 
   const outer = await findCommentsOuter(page);
   if (!outer) {
-    console.log("[FB][ui:watch][DBG] OUTER NOT FOUND -> return");
+    log.debug("UI:watch", "OUTER NOT FOUND");
     if (DEBUG_WATCH) await safeShot(page, "watch-no-outer.png");
     return;
   }
 
   if (DEBUG_WATCH) {
     const stats = await debugOuterStats(page, outer);
-    console.log("[FB][ui:watch][DBG] OUTER stats:", stats);
+    log.debug("UI:watch", "OUTER stats", stats);
     await shotElement(page, outer, "watch-outer.png");
   }
 
@@ -538,10 +537,10 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
   if (DEBUG_WATCH) {
     if (scroller) {
       const sstats = await debugScrollerStats(page, scroller);
-      console.log("[FB][ui:watch][DBG] SCROLLER stats:", sstats);
+      log.debug("UI:watch", "SCROLLER stats", sstats);
       await shotElement(page, scroller, "watch-scroller.png");
     } else {
-      console.log("[FB][ui:watch][DBG] SCROLLER NOT FOUND -> fallback: window scroll");
+      log.debug("UI:watch", "SCROLLER NOT FOUND -> window scroll fallback");
       await safeShot(page, "watch-no-scroller.png");
     }
   }
@@ -609,28 +608,28 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
       noProgress++;
     }
 
-    console.log(
-      `[FB][ui:watch][DBG] cycle ${cycle}/${maxCycles}: clickedMore=${clicked}, wheel=${wheeled}, scrollTop ${beforeST} -> ${afterST}, roots=${curRoots}, anchors=${curAnchors}, noProgress=${noProgress}`
-    );
+    if (cycle === 1 || cycle % 10 === 0) {
+      log.debug("UI:watch", `cycle ${cycle}/${maxCycles}: anchors=${curAnchors}, roots=${curRoots}, np=${noProgress}`);
+    }
 
     if (DEBUG_WATCH && cycle === 5) {
       await safeShot(page, "watch-after-5.png");
     }
 
     if (noProgress >= 8) {
-      console.log("[FB][ui:watch] Brak postępu przez kilka cykli – przerywam.");
+      log.debug("UI:watch", "Brak postępu – przerywam");
       if (DEBUG_WATCH) await safeShot(page, "watch-stuck.png");
       break;
     }
   }
 
-  console.log("[FB][ui:watch] Załadowano wszystkie dostępne komentarze (Watch).");
+  log.dev("UI:watch", "Komentarze załadowane");
 }
 
 export async function extractComments(page, url) {
   const outer = await findCommentsOuter(page).catch(() => null);
   if (!outer) {
-    console.log("[FB][ui:watch][DBG] extractComments: OUTER NOT FOUND");
+    log.debug("UI:watch", "extractComments: OUTER NOT FOUND");
     if (DEBUG_WATCH) await safeShot(page, "watch-extract-no-outer.png");
     return [];
   }
@@ -745,7 +744,7 @@ export async function extractComments(page, url) {
     return out;
   }, outer);
 
-  console.log(`[FB][ui:watch] Wyekstrahowano komentarzy: ${comments.length}`);
+  log.debug("UI:watch", `Wyekstrahowano ${comments.length} komentarzy`);
   return comments;
 }
 
@@ -753,8 +752,8 @@ export async function debugSnapshot(page) {
   try {
     const path = `snapshot-watch.png`;
     await page.screenshot({ path });
-    console.log(`[FB][ui:watch] Zapisano zrzut ekranu: ${path}`);
+    log.debug("UI:watch", `Zapisano zrzut: ${path}`);
   } catch (e) {
-    console.error("[FB][ui:watch] Błąd zapisu zrzutu ekranu:", e);
+    log.error("UI:watch", `Błąd zapisu zrzutu: ${e?.message || e}`);
   }
 }

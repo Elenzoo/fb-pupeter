@@ -1,5 +1,6 @@
 import { safeGoto } from "../../utils/navigation.js";
 import { sleepRandom } from "../../utils/sleep.js";
+import log from "../../utils/logger.js";
 import { acceptCookies } from "../cookies.js";
 import { fbLogin, checkIfLogged } from "../login.js";
 import { getUiCommentInfo } from "../uiCommentInfo.js";
@@ -13,25 +14,23 @@ export function matchesUrl(url) {
 }
 
 export async function prepare(page, url) {
-  console.log(`[FB][ui:videos] Otwieranie posta wideo: ${url}`);
+  log.dev("UI:videos", `Prepare: ${url.slice(0, 50)}...`);
   const ok = await safeGoto(page, url, "videos", { waitUntil: "networkidle2", timeout: 90000 });
   if (!ok) throw new Error("safeGoto-failed");
 
   const currentUrl = page.url();
   if (currentUrl.includes("/login")) {
-    console.log("[FB][ui:videos] Wymagane logowanie – próbuję zalogować.");
+    log.dev("UI:videos", "Login required");
     await fbLogin(page);
     await sleepRandom(3000, 4500);
 
     const loggedAfterLogin = await checkIfLogged(page).catch(() => false);
-    console.log(
-      `[FB][ui:videos] Stan sesji po fbLogin: ${loggedAfterLogin ? "ZALOGOWANY" : "NIEZALOGOWANY"}`
-    );
+    log.dev("UI:videos", `Sesja po logowaniu: ${loggedAfterLogin ? "OK" : "BRAK"}`);
 
     if (loggedAfterLogin) {
       await safeGoto(page, url, "videos", { waitUntil: "networkidle2", timeout: 90000 });
     } else {
-      console.log("[FB][ui:videos] Logowanie nieudane – kontynuacja bez sesji.");
+      log.warn("UI:videos", "Login failed");
     }
   }
 
@@ -51,15 +50,15 @@ export async function prepare(page, url) {
         } catch {}
       }
     });
-    console.log("[FB][ui:videos] Wideo wstrzymane (autoplay wyłączony).");
+    log.debug("UI:videos", "Video paused");
   } catch (e) {
-    console.log("[FB][ui:videos] Błąd zatrzymania wideo:", e?.message || e);
+    log.debug("UI:videos", `Video pause error: ${e?.message || e}`);
   }
 }
 
 export async function getCommentCount(page, url) {
   const uiInfo = await getUiCommentInfo(page);
-  console.log(`[FB][ui:videos][DBG] UI info:`, {
+  log.debug("UI:videos", "UI info", {
     source: uiInfo?.source,
     raw: uiInfo?.raw,
     viewType: uiInfo?.viewType,
@@ -69,9 +68,7 @@ export async function getCommentCount(page, url) {
   let totalComments = null;
   if (uiInfo && typeof uiInfo.comments === "number" && uiInfo.comments > 0) totalComments = uiInfo.comments;
 
-  console.log(
-    `[FB][ui:videos] Liczba komentarzy wg UI: ${totalComments !== null ? totalComments : "brak danych"}`
-  );
+  log.dev("UI:videos", `Liczba komentarzy: ${totalComments ?? "brak danych"}`);
   return totalComments;
 }
 
@@ -126,7 +123,7 @@ async function debugDumpShowAllCandidates(page) {
     return { headers, showAll };
   });
 
-  console.log("[FB][ui:videos][DBG] candidates:", JSON.stringify(out, null, 2));
+  log.debug("UI:videos", "Candidates", out);
 }
 
 /* ==========================================
@@ -312,7 +309,7 @@ async function clickShowAllFromMarkedRow(page) {
     return { clicked: false, reason: "no-showall-in-row", dbg: candidates.slice(0, 4).map(pick) };
   });
 
-  console.log("[FB][ui:videos][DBG] show-all click:", JSON.stringify(res, null, 2));
+  log.debug("UI:videos", "Show-all click", res);
   return !!res?.clicked;
 }
 
@@ -384,7 +381,7 @@ async function ensureAllCommentsFilter(page) {
     return { ok: true, action: "opened-menu", dbg: pick(sortBtn) };
   });
 
-  console.log("[FB][ui:videos][DBG] filter step#1:", JSON.stringify(res, null, 2));
+  log.debug("UI:videos", "Filter step#1", res);
 
   if (!res?.ok || res.action !== "opened-menu") return false;
 
@@ -453,7 +450,7 @@ async function ensureAllCommentsFilter(page) {
     return { ok: true, action: "clicked-target", dbg: pick(target) };
   });
 
-  console.log("[FB][ui:videos][DBG] filter step#2:", JSON.stringify(res2, null, 2));
+  log.debug("UI:videos", "Filter step#2", res2);
 
   await sleepRandom(500, 900);
 
@@ -465,10 +462,10 @@ async function ensureAllCommentsFilter(page) {
    ========================================== */
 
 export async function switchCommentsFilterToNewestScoped(page) {
-  console.log("[FB][ui:videos][filter:newest] Próba przełączenia filtra na: 'Najnowsze'…");
+  log.dev("UI:videos", "Przełączam na 'Najnowsze'...");
 
   // ZAWSZE najpierw spróbuj kliknąć "Pokaż wszystkie" żeby otworzyć pełny panel komentarzy
-  console.log("[FB][ui:videos][filter:newest] Próbuję otworzyć panel komentarzy (Pokaż wszystkie)...");
+  log.debug("UI:videos", "Otwieranie panelu komentarzy...");
 
   const clickedShowAll = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -502,18 +499,18 @@ export async function switchCommentsFilterToNewestScoped(page) {
   });
 
   if (clickedShowAll?.clicked) {
-    console.log(`[FB][ui:videos][filter:newest] Kliknięto '${clickedShowAll.label}'.`);
+    log.debug("UI:videos", `Kliknięto '${clickedShowAll.label}'`);
     await sleepRandom(1500, 2200);
   } else {
-    console.log("[FB][ui:videos][filter:newest] Nie znaleziono 'Pokaż wszystkie' - może już rozwinięte.");
+    log.debug("UI:videos", "Nie znaleziono 'Pokaż wszystkie' - może już rozwinięte");
   }
 
   // Oznacz scope komentarzy
   const mark = await markCommentsScope(page).catch(() => null);
-  console.log("[FB][ui:videos][filter:newest] markCommentsScope:", mark?.ok ? "OK" : mark?.reason);
+  log.debug("UI:videos", `markCommentsScope: ${mark?.ok ? "OK" : mark?.reason}`);
 
   if (!mark?.ok) {
-    console.log("[FB][ui:videos][filter:newest] Nie znaleziono sekcji komentarzy.");
+    log.debug("UI:videos", "Nie znaleziono sekcji komentarzy");
     return { ok: false, reason: "no-comments-scope" };
   }
 
@@ -534,7 +531,7 @@ export async function switchCommentsFilterToNewestScoped(page) {
   });
 
   if (alreadyNewest) {
-    console.log("[FB][ui:videos][filter:newest] Filtr już ustawiony na 'Najnowsze' – pomijam.");
+    log.debug("UI:videos", "Filtr już 'Najnowsze' – pomijam");
     return { ok: true, state: "already-newest" };
   }
 
@@ -581,7 +578,7 @@ export async function switchCommentsFilterToNewestScoped(page) {
   });
 
   if (!openRes?.ok) {
-    console.log("[FB][ui:videos][filter:newest] Nie znaleziono przycisku sortowania.");
+    log.debug("UI:videos", "Nie znaleziono przycisku sortowania");
     return { ok: false, reason: openRes?.reason || "no-sortbtn" };
   }
 
@@ -631,12 +628,12 @@ export async function switchCommentsFilterToNewestScoped(page) {
   });
 
   if (selectRes?.ok) {
-    console.log("[FB][ui:videos][filter:newest] Filtr ustawiony na: 'Najnowsze'.");
+    log.dev("UI:videos", "Filtr ustawiony: 'Najnowsze'");
     await sleepRandom(400, 700);
     return { ok: true };
   }
 
-  console.log("[FB][ui:videos][filter:newest] Nie udało się wybrać 'Najnowsze':", selectRes?.reason);
+  log.debug("UI:videos", `Nie udało się wybrać 'Najnowsze': ${selectRes?.reason}`);
   return { ok: false, reason: selectRes?.reason || "select-failed" };
 }
 
@@ -780,7 +777,7 @@ async function oneSequentialAction(page) {
   });
 
   if (res?.dbg?.html) res.dbg.html = shortenHtml(res.dbg.html, 220);
-  console.log("[FB][ui:videos][DBG] step:", JSON.stringify(res, null, 2));
+  log.debug("UI:videos", "step", res);
   return res || { acted: false, action: "none", dbg: null };
 }
 
@@ -790,12 +787,12 @@ async function oneSequentialAction(page) {
  * Wczytuje wszystkie komentarze dla posta wideo.
  */
 export async function loadAllComments(page, { expectedTotal } = {}) {
-  console.log("[FB][ui:videos] Ładuję wszystkie komentarze (VIDEOS)...");
+  log.dev("UI:videos", "Ładuję komentarze...");
 
   await debugDumpShowAllCandidates(page).catch(() => {});
 
   const mark1 = await markCommentsScope(page).catch(() => null);
-  console.log("[FB][ui:videos][DBG] mark#1:", JSON.stringify(mark1, null, 2));
+  log.debug("UI:videos", "mark#1", mark1);
 
   await sleepRandom(250, 500);
 
@@ -804,14 +801,14 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
   if (clickedAll) {
     await sleepRandom(900, 1400);
     const mark2 = await markCommentsScope(page).catch(() => null);
-    console.log("[FB][ui:videos][DBG] mark#2:", JSON.stringify(mark2, null, 2));
+    log.debug("UI:videos", "mark#2", mark2);
   } else {
-    console.log("[FB][ui:videos] show-all: nie kliknięto (patrz DBG wyżej).");
+    log.debug("UI:videos", "show-all: nie kliknięto");
   }
 
   // po show-all spróbuj ustawić "Wszystkie komentarze" / "Najnowsze"
   const filterOk = await ensureAllCommentsFilter(page).catch(() => false);
-  console.log("[FB][ui:videos] filter ensure:", filterOk);
+  log.debug("UI:videos", `filter ensure: ${filterOk}`);
 
   // policz cykle dynamicznie
   let maxCycles = 180;
@@ -829,12 +826,12 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
     if (!didProgress) noProgress++;
     else noProgress = 0;
 
-    console.log(
-      `[FB][ui:videos] cycle ${i}/${maxCycles} action=${r?.action} acted=${!!r?.acted} noProgress=${noProgress}`
-    );
+    if (i === 1 || i % 20 === 0) {
+      log.debug("UI:videos", `Cycle ${i}/${maxCycles}`, { action: r?.action, acted: !!r?.acted, noProgress });
+    }
 
     if (noProgress >= 10) {
-      console.log("[FB][ui:videos] Brak postępu – kończę ładowanie.");
+      log.debug("UI:videos", "Brak postępu – kończę ładowanie");
       break;
     }
 
@@ -844,7 +841,7 @@ export async function loadAllComments(page, { expectedTotal } = {}) {
     else await sleepRandom(450, 850);
   }
 
-  console.log("[FB][ui:videos] Komentarze wideo załadowane.");
+  log.dev("UI:videos", "Komentarze załadowane");
 }
 
 /**
@@ -905,7 +902,7 @@ export async function extractComments(page, url) {
     return data;
   });
 
-  console.log(`[FB][ui:videos] Wyekstrahowano komentarzy: ${comments.length}`);
+  log.debug("UI:videos", `Wyekstrahowano ${comments.length} komentarzy`);
   return comments;
 }
 
@@ -913,8 +910,8 @@ export async function debugSnapshot(page) {
   try {
     const path = `snapshot-videos.png`;
     await page.screenshot({ path });
-    console.log(`[FB][ui:videos] Zapisano zrzut ekranu: ${path}`);
+    log.debug("UI:videos", `Zapisano zrzut: ${path}`);
   } catch (e) {
-    console.error("[FB][ui:videos] Błąd zapisu zrzutu ekranu:", e);
+    log.error("UI:videos", `Błąd zapisu zrzutu: ${e?.message || e}`);
   }
 }

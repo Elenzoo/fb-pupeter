@@ -1,5 +1,6 @@
 // src/telegram.js
 import axios from "axios";
+import log from "./utils/logger.js";
 
 /* ============================================================
    FILTR WIEKU KOMENTARZA (TELEGRAM)
@@ -43,7 +44,7 @@ function shouldSendByAge(comment) {
   // ENV:
   // TELEGRAM_MAX_AGE_MIN=60
   // TELEGRAM_DROP_IF_NO_TIME=1  (domyślnie: 1)
-  const maxAgeMin = Number(process.env.TELEGRAM_MAX_AGE_MIN || process.env.WEBHOOK_MAX_AGE_MIN || 60);
+  const maxAgeMin = Number(process.env.TELEGRAM_MAX_AGE_MIN || 60);
   const dropIfNoTime = envBool("TELEGRAM_DROP_IF_NO_TIME", true);
 
   const rel = String(comment?.fb_time_raw || comment?.time || comment?.relative_time || "").trim();
@@ -142,7 +143,7 @@ function getTargets() {
   const clientChat = String(process.env.TELEGRAM_CHAT_ID_CLIENT || "").trim();
 
   const targets = [];
-  console.log("[TG][TARGETS]", {
+  log.debug("TELEGRAM", "Targets config", {
     sendOwner,
     sendClient,
     ownerToken: ownerToken ? ownerToken.slice(0, 12) + "..." : null,
@@ -151,21 +152,16 @@ function getTargets() {
     clientChat: clientChat || null,
   });
 
-
   if (sendOwner && ownerToken && ownerChat) {
     targets.push({ label: "OWNER", token: ownerToken, chat_id: ownerChat });
   } else if (sendOwner) {
-    console.warn(
-      "[TG] OWNER włączony, ale brakuje TELEGRAM_BOT_TOKEN_OWNER lub TELEGRAM_CHAT_ID_OWNER."
-    );
+    log.warn("TELEGRAM", "OWNER włączony, ale brak tokena lub chat_id");
   }
 
   if (sendClient && clientToken && clientChat) {
     targets.push({ label: "CLIENT", token: clientToken, chat_id: clientChat });
   } else if (sendClient) {
-    console.warn(
-      "[TG] CLIENT włączony, ale brakuje TELEGRAM_BOT_TOKEN_CLIENT lub TELEGRAM_CHAT_ID_CLIENT."
-    );
+    log.warn("TELEGRAM", "CLIENT włączony, ale brak tokena lub chat_id");
   }
 
   return targets;
@@ -192,14 +188,11 @@ async function sendTelegramLead(post, comment) {
         parse_mode: "HTML",
       });
       if (r1.ok) {
-        console.log(`[TG] Wysłano lead (photo) -> ${t.label}`);
+        log.dev("TELEGRAM", `Wysłano lead (photo) → ${t.label}`);
         await new Promise((r) => setTimeout(r, 350));
         continue;
       }
-      console.warn(
-        `[TG] sendPhoto nie przeszło (${t.label}) -> fallback do sendMessage:`,
-        r1.error
-      );
+      log.dev("TELEGRAM", `sendPhoto failed (${t.label}) → fallback`, { error: r1.error });
     }
 
     const r2 = await sendMessage(t.token, t.chat_id, caption, {
@@ -207,8 +200,8 @@ async function sendTelegramLead(post, comment) {
       disable_web_page_preview: disablePreview,
     });
 
-    if (r2.ok) console.log(`[TG] Wysłano lead (message) -> ${t.label}`);
-    else console.error(`[TG] sendMessage error (${t.label}):`, r2.error);
+    if (r2.ok) log.dev("TELEGRAM", `Wysłano lead (message) → ${t.label}`);
+    else log.error("TELEGRAM", `sendMessage error (${t.label}): ${r2.error}`);
 
     await new Promise((r) => setTimeout(r, 350));
   }
@@ -302,7 +295,7 @@ async function sendOwnerAlert(title, message, opts = {}) {
 
   if (!r.ok) {
     // nie rób pętli error->alert->error
-    console.log("[TG ALERT] Nie udało się wysłać alertu:", r.error);
+    log.dev("TELEGRAM", `Alert nie wysłany: ${r.error}`);
   }
 }
 

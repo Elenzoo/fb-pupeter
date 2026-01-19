@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(node --check:*)",
+      "Bash(node -e:*)",
+      "Bash(node test-videos-newest.js:*)",
+      "Bash(git checkout:*)",
+      "Bash(git push:*)",
+      "Bash(ssh root@162.55.188.103 \"ls -la /opt/fb-watcher/data/backup_cookies/\")",
+      "Bash(ssh root@162.55.188.103 \"cat /opt/fb-watcher/.env\")",
+      "Bash(ssh root@162.55.188.103 \"cd /opt/fb-watcher && sed -i ''$d'' .env && cat >> .env << ''EOF''\n\n# === BACKUP COOKIES ===\nBACKUP_COOKIES_DIR=./data/backup_cookies\nCHECKPOINT_DETECTION=true\nCHECKPOINT_MAX_RETRIES=5\nEOF\")",
+      "Bash(ssh root@162.55.188.103 \"tail -15 /opt/fb-watcher/.env\")"
+    ]
+  }
+}
