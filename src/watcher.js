@@ -12,11 +12,6 @@ import {
   FAST_MAX_AGE_MIN,
   POSTS_API_URL,
   POSTS_API_TOKEN,
-  CHECKPOINT_DETECTION,
-  CHECKPOINT_MAX_RETRIES,
-  CHECKPOINT_ALERT_TELEGRAM,
-  SOFT_BAN_DETECTION,
-  SOFT_BAN_THRESHOLD,
   CAPTCHA_API_KEY,
   CAPTCHA_ENABLED,
 } from "./config.js";
@@ -43,16 +38,8 @@ import {
   switchCommentsFilterToNewest,
 } from "./fb/comments.js";
 
-import {
-  loadCookies,
-  saveCookies,
-  ensureBackupDir,
-  getBackupCookiesList,
-  getBackupCookiesCount,
-  hasAnyBackupCookies,
-  restoreNextAvailableCookies,
-} from "./fb/cookies.js";
-import { checkIfLogged, fbLogin, solveCaptchaIfPresent, hasCaptcha } from "./fb/login.js";
+import { loadCookies, saveCookies } from "./fb/cookies.js";
+import { checkIfLogged, fbLogin, solveCaptchaIfPresent } from "./fb/login.js";
 import { isCheckpoint, getCheckpointType } from "./fb/checkpoint.js";
 import { parseFbRelativeTime, filterByAge } from "./utils/time.js";
 import { loadCache, saveCache, getCacheSize, getCacheEntryCount } from "./db/cache.js";
@@ -92,16 +79,6 @@ let cycleNumber = 0;
 
 let navErrorCount = 0;
 const MAX_NAV_ERRORS = 5;
-
-// Checkpoint recovery state - rotacja cookies
-let currentCookiesIndex = 1; // aktualnie używany indeks cookies (1-based)
-let checkpointRetryCount = 0; // ile razy próbowaliśmy w tej serii
-let lastCheckpointTime = 0;
-const CHECKPOINT_RETRY_RESET_MS = 30 * 60 * 1000; // 30 minut - reset licznika po tym czasie
-
-// Soft ban detection - per-post tracking (Map zamiast global counter)
-const consecutiveZeroPerPost = new Map(); // { cacheKey => licznik zer z rzędu }
-let softBanTriggered = false; // czy już wykryliśmy soft ban w tym cyklu
 
 function isNavigationError(err) {
   if (!err) return false;
@@ -508,43 +485,6 @@ function cleanupKnownIds(set) {
   log.debug("CACHE", `Przycięto knownIds: ${arr.length} → ${set.size}`);
 }
 
-/**
- * Sprawdza i aktualizuje stan soft ban dla danego posta.
- * Zwraca true jeśli należy uruchomić handleSoftBan.
- */
-function checkSoftBanForPost(cacheKey, currentCount, prevCount, postLabel) {
-  if (!SOFT_BAN_DETECTION || softBanTriggered) return false;
-  if (prevCount === null) return false; // pierwszy run
-
-  const zeroCount = consecutiveZeroPerPost.get(cacheKey) || 0;
-
-  // Post miał komentarze, a teraz ma 0 = podejrzane
-  if (currentCount === 0 && prevCount > 0) {
-    const newZeroCount = zeroCount + 1;
-    consecutiveZeroPerPost.set(cacheKey, newZeroCount);
-
-    log.dev("SOFT_BAN", `${postLabel}: 0 komentarzy (było ${prevCount}), streak: ${newZeroCount}/${SOFT_BAN_THRESHOLD}`);
-
-    // Sprawdź czy globalnie mamy wystarczająco dużo postów z zerami
-    let totalZeroPosts = 0;
-    for (const count of consecutiveZeroPerPost.values()) {
-      if (count >= SOFT_BAN_THRESHOLD) totalZeroPosts++;
-    }
-
-    // Trigger soft ban gdy >= 3 posty mają streak >= threshold
-    if (totalZeroPosts >= 3 || newZeroCount >= SOFT_BAN_THRESHOLD) {
-      return true;
-    }
-  } else if (currentCount > 0) {
-    // Reset licznika gdy post ma komentarze
-    if (zeroCount > 0) {
-      log.dev("SOFT_BAN", `${postLabel}: reset streak (było ${zeroCount})`);
-      consecutiveZeroPerPost.set(cacheKey, 0);
-    }
-  }
-
-  return false;
-}
 
 /**
  * Zwraca całkowitą liczbę knownIds w pamięci (dla monitoringu)
@@ -573,78 +513,6 @@ function flushCacheToDisk() {
   Object.keys(commentsCache).forEach((k) => delete commentsCache[k]);
   Object.assign(commentsCache, out);
   saveCache(out);
-}
-
-/* ============================================================
-   =====================   SOFT BAN HANDLER   ==================
-   ============================================================ */
-
-/**
- * Obsługa soft ban - rotacja cookies gdy wykryto 0 komentarzy na wielu postach
- * @returns {Promise<{shouldRestart: boolean, ok: boolean}>}
- */
-async function handleSoftBan() {
-  const totalBackups = getBackupCookiesCount();
-
-  // Policz ile postów ma problemy
-  let postsWithZeros = 0;
-  for (const count of consecutiveZeroPerPost.values()) {
-    if (count >= SOFT_BAN_THRESHOLD) postsWithZeros++;
-  }
-
-  log.warn("SOFT_BAN", `Wykryto soft ban (${postsWithZeros} postów z serią 0 komentarzy)`, {
-    threshold: SOFT_BAN_THRESHOLD,
-    currentIndex: currentCookiesIndex,
-    totalBackups
-  });
-
-  if (totalBackups === 0) {
-    log.error("SOFT_BAN", "Brak backup cookies - nie można wykonać rotacji");
-    return { shouldRestart: false, ok: false };
-  }
-
-  // Próba rotacji cookies
-  const restoreResult = await restoreNextAvailableCookies(currentCookiesIndex);
-
-  if (restoreResult.ok) {
-    log.success("SOFT_BAN", `Przywrócono cookies_${restoreResult.usedIndex}.json`, {
-      remaining: restoreResult.remaining,
-      looped: restoreResult.looped
-    });
-
-    currentCookiesIndex = restoreResult.usedIndex + 1;
-    // Reset wszystkich liczników per-post
-    consecutiveZeroPerPost.clear();
-    softBanTriggered = true;
-
-    // Alert Telegram
-    if (CHECKPOINT_ALERT_TELEGRAM) {
-      await sendOwnerAlert(
-        "SOFT BAN - Rotacja cookies",
-        `Wykryto soft ban (${postsWithZeros} postów z serią 0 komentarzy).\n\n` +
-        `Przełączono na: cookies_${restoreResult.usedIndex}.json\n` +
-        `Pozostało backupów: ${restoreResult.remaining}`
-      );
-    }
-
-    return { shouldRestart: true, ok: true };
-  }
-
-  // Wszystkie cookies wyczerpane
-  log.error("SOFT_BAN", "Nie udało się przywrócić backup cookies");
-
-  if (CHECKPOINT_ALERT_TELEGRAM) {
-    await sendOwnerAlert(
-      "SOFT BAN - Wymagana interwencja",
-      `Wykryto soft ban i wyczerpano wszystkie backup cookies.\n\n` +
-      `Wymagane działanie:\n` +
-      `1. Uruchom: node scripts/generate-cookies.js\n` +
-      `2. Zaloguj się ręcznie\n` +
-      `3. Skopiuj pliki na serwer`
-    );
-  }
-
-  return { shouldRestart: false, ok: false };
 }
 
 /* ============================================================
@@ -677,9 +545,6 @@ async function startWatcher() {
     cycleNumber++;
     let newCommentsTotal = 0;
     let errorsCount = 0;
-
-    // Reset soft ban flag na początku cyklu
-    softBanTriggered = false;
 
     try {
       log.prod("WATCHER", `Cykl #${cycleNumber} start`, { posts: currentPosts.length });
@@ -715,110 +580,44 @@ async function startWatcher() {
       await page.setViewport({ width: 1280, height: 720 });
 
       // cookies + login
-      await ensureBackupDir();
       await loadCookies(page);
       await page.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
 
       let loggedIn = await checkIfLogged(page);
 
-      // === CHECKPOINT DETECTION Z ROTACJĄ COOKIES ===
-      if (CHECKPOINT_DETECTION) {
-        const checkpoint = await isCheckpoint(page);
+      // === CHECKPOINT DETECTION (tylko alert) ===
+      const checkpoint = await isCheckpoint(page);
+      if (checkpoint) {
+        const checkpointType = await getCheckpointType(page);
+        log.warn("CHECKPOINT", `Wykryto checkpoint: ${checkpointType}`);
 
-        if (checkpoint) {
-          const checkpointType = await getCheckpointType(page);
-          const backupList = getBackupCookiesList();
-          const totalBackups = backupList.length;
-
-          log.warn("CHECKPOINT", `Wykryto checkpoint: ${checkpointType}`);
-
-          // Reset licznika po 30 minutach bez checkpoint
-          const now = Date.now();
-          if (now - lastCheckpointTime > CHECKPOINT_RETRY_RESET_MS) {
-            checkpointRetryCount = 0;
-            currentCookiesIndex = 1;
-          }
-          lastCheckpointTime = now;
-          checkpointRetryCount++;
-
-          log.prod("CHECKPOINT", `Próba recovery ${checkpointRetryCount}/${totalBackups || CHECKPOINT_MAX_RETRIES}`, {
-            currentIndex: currentCookiesIndex,
-            totalBackups
-          });
-
-          // === CAPTCHA SOLVER - próba rozwiązania przed rotacją cookies ===
-          if (CAPTCHA_ENABLED) {
-            const captchaResult = await solveCaptchaIfPresent(page);
-            if (captchaResult.solved) {
-              log.success("CAPTCHA", "Captcha rozwiązana! Kontynuuję logowanie...");
-              await sleepRandom(2000, 3000);
-
-              // Sprawdź czy jesteśmy zalogowani po rozwiązaniu captcha
+        // Próba rozwiązania captcha (jeśli to captcha, nie 2FA)
+        if (CAPTCHA_ENABLED) {
+          const captchaResult = await solveCaptchaIfPresent(page);
+          if (captchaResult.solved) {
+            log.success("CAPTCHA", "Captcha rozwiązana!");
+            await new Promise(r => setTimeout(r, 2000));
+            loggedIn = await checkIfLogged(page);
+            if (!loggedIn) {
+              await fbLogin(page);
               loggedIn = await checkIfLogged(page);
-              if (loggedIn) {
-                log.success("LOGIN", "Zalogowano po rozwiązaniu captcha");
-                checkpointRetryCount = 0;
-              } else {
-                // Spróbuj wypełnić formularz logowania
-                await fbLogin(page);
-                loggedIn = await checkIfLogged(page);
-              }
-
-              if (loggedIn) {
-                // Sukces - kontynuuj normalnie
-              } else {
-                log.warn("LOGIN", "Nadal niezalogowany po captcha - próbuję rotację cookies");
-              }
             }
           }
+        }
 
-          // Jeśli nadal checkpoint lub niezalogowany, próba recovery z rotacją cookies
-          // (pomijamy jeśli captcha solver zadziałał)
-          if (!loggedIn && totalBackups > 0 && checkpointRetryCount <= totalBackups) {
-            const restoreResult = await restoreNextAvailableCookies(currentCookiesIndex);
-
-            if (restoreResult.ok) {
-              log.success("CHECKPOINT", `Przywrócono cookies_${restoreResult.usedIndex}.json`, {
-                remaining: restoreResult.remaining,
-                looped: restoreResult.looped
-              });
-
-              // Zwiększ indeks na następny plik
-              currentCookiesIndex = restoreResult.usedIndex + 1;
-
-              // Zamknij browser i restartuj cykl
-              if (browser) {
-                await browser.close().catch(() => {});
-              }
-
-              await new Promise((r) => setTimeout(r, 2000));
-              setTimeout(loop, 1000);
-              return;
-            }
-          }
-
-          // Wszystkie cookies wyczerpane lub brak backup (pomijamy jeśli zalogowano)
-          if (!loggedIn && CHECKPOINT_ALERT_TELEGRAM) {
-            const cookiesInfo = backupList.map((c) => `  - cookies_${c.index}.json (${c.age}h)`).join("\n") || "  (brak plików)";
-
-            await sendOwnerAlert(
-              "CHECKPOINT - Wymagana interwencja",
-              `Facebook wymaga weryfikacji tożsamości.\n\n` +
-              `Typ: ${checkpointType}\n` +
-              `Próby: ${checkpointRetryCount}\n` +
-              `Dostępne cookies:\n${cookiesInfo}\n\n` +
-              `Wymagane działanie:\n` +
-              `1. Uruchom: node scripts/generate-cookies.js --index=N\n` +
-              `2. Zaloguj się ręcznie (z 2FA)\n` +
-              `3. Skopiuj pliki cookies na serwer\n` +
-              `4. PM2 automatycznie wznowi pracę`
-            );
-          }
-
-          if (!loggedIn) {
-            log.error("CHECKPOINT", "Wyczerpano wszystkie backup cookies - zatrzymuję proces");
-            process.exit(1);
-          }
+        // Jeśli nadal nie zalogowany - alert i stop
+        if (!loggedIn) {
+          await sendOwnerAlert(
+            "CHECKPOINT - Wymagana interwencja",
+            `Facebook wymaga weryfikacji tożsamości.\n\n` +
+            `Typ: ${checkpointType}\n\n` +
+            `Wymagane działanie:\n` +
+            `1. Zaloguj się ręcznie i zaktualizuj cookies.json\n` +
+            `2. Zmień dane logowania w .env jeśli potrzeba\n` +
+            `3. PM2 automatycznie wznowi pracę`
+          );
+          log.error("CHECKPOINT", "Wymagana interwencja - zatrzymuję proces");
+          process.exit(1);
         }
       }
       // === KONIEC CHECKPOINT DETECTION ===
@@ -829,53 +628,26 @@ async function startWatcher() {
         loggedIn = await checkIfLogged(page);
 
         // Sprawdź checkpoint po próbie logowania
-        if (CHECKPOINT_DETECTION) {
-          const checkpointAfterLogin = await isCheckpoint(page);
-          if (checkpointAfterLogin) {
-            const checkpointType = await getCheckpointType(page);
-            const totalBackups = getBackupCookiesCount();
+        const checkpointAfterLogin = await isCheckpoint(page);
+        if (checkpointAfterLogin) {
+          const checkpointType = await getCheckpointType(page);
+          log.warn("CHECKPOINT", `Checkpoint po logowaniu: ${checkpointType}`);
 
-            log.warn("CHECKPOINT", `Checkpoint po logowaniu: ${checkpointType}`);
-
-            checkpointRetryCount++;
-
-            if (totalBackups > 0 && checkpointRetryCount <= totalBackups) {
-              const restoreResult = await restoreNextAvailableCookies(currentCookiesIndex);
-              if (restoreResult.ok) {
-                currentCookiesIndex = restoreResult.usedIndex + 1;
-                if (browser) await browser.close().catch(() => {});
-                setTimeout(loop, 2000);
-                return;
-              }
-            }
-
-            if (CHECKPOINT_ALERT_TELEGRAM) {
-              await sendOwnerAlert(
-                "CHECKPOINT po logowaniu",
-                `Facebook wymaga weryfikacji po próbie logowania.\n\nTyp: ${checkpointType}`
-              );
-            }
-            process.exit(1);
-          }
+          await sendOwnerAlert(
+            "CHECKPOINT po logowaniu",
+            `Facebook wymaga weryfikacji po próbie logowania.\n\nTyp: ${checkpointType}`
+          );
+          process.exit(1);
         }
 
         if (loggedIn) {
           log.success("LOGIN", "Zalogowano pomyślnie");
           await saveCookies(page);
-          // Reset po udanym logowaniu
-          checkpointRetryCount = 0;
-          currentCookiesIndex = 1;
         } else {
-          log.error("LOGIN", "Logowanie nieudane (sprawdź 2FA)");
+          log.error("LOGIN", "Logowanie nieudane");
         }
       } else {
         log.dev("LOGIN", "Użyto istniejącej sesji");
-        // Reset przy działającej sesji
-        if (checkpointRetryCount > 0) {
-          log.dev("CHECKPOINT", "Reset licznika - sesja działa");
-          checkpointRetryCount = 0;
-          currentCookiesIndex = 1;
-        }
       }
 
       // posts
@@ -909,22 +681,6 @@ async function startWatcher() {
                 const sample = snapshot.slice(0, 30);
 
                 log.dev("FAST", `${postLabel}: ${sample.length} komentarzy (sort=Najnowsze)`);
-
-                // === SOFT BAN DETECTION (per-post) ===
-                if (!isFirstRun) {
-                  const prevCount = lastCounts.get(cacheKey) || 0;
-                  const shouldTriggerSoftBan = checkSoftBanForPost(cacheKey, sample.length, prevCount, postLabel);
-
-                  if (shouldTriggerSoftBan) {
-                    const softBanResult = await handleSoftBan();
-                    if (softBanResult.shouldRestart) {
-                      if (browser) await browser.close().catch(() => {});
-                      setTimeout(loop, 2000);
-                      return;
-                    }
-                  }
-                }
-                // === KONIEC SOFT BAN DETECTION ===
 
                 // Inicjalizacja
                 if (isFirstRun) {
@@ -991,21 +747,6 @@ async function startWatcher() {
 
             const prev = lastCounts.has(cacheKey) ? lastCounts.get(cacheKey) : null;
             const knownSet = getKnownSetForPost(cacheKey);
-
-            // === SOFT BAN DETECTION (per-post, normalny tryb) ===
-            if (hasCount && prev !== null) {
-              const shouldTriggerSoftBan = checkSoftBanForPost(cacheKey, count, prev, postLabel);
-
-              if (shouldTriggerSoftBan) {
-                const softBanResult = await handleSoftBan();
-                if (softBanResult.shouldRestart) {
-                  if (browser) await browser.close().catch(() => {});
-                  setTimeout(loop, 2000);
-                  return;
-                }
-              }
-            }
-            // === KONIEC SOFT BAN DETECTION ===
 
             // Pierwsze wejście
             if (prev === null) {
