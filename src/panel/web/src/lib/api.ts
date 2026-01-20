@@ -142,22 +142,3 @@ export async function getCookiesStatus(): Promise<SessionStatus & { ok: boolean;
   return request<SessionStatus>('/api/cookies/status')
 }
 
-export async function getCookiesBackups(): Promise<{ ok: boolean; backups: SessionStatus['backups']; error?: string }> {
-  return request('/api/cookies/backups')
-}
-
-export async function activateCookiesBackup(index: number): Promise<{ ok: boolean; error?: string }> {
-  return request(`/api/cookies/activate/${index}`, { method: 'POST' })
-}
-
-export async function restoreCookiesBackup(index: number): Promise<{ ok: boolean; restoredIndex?: number; error?: string }> {
-  return request(`/api/cookies/restore/${index}`, { method: 'POST' })
-}
-
-export async function createCookiesBackup(): Promise<{ ok: boolean; savedIndex?: number; error?: string }> {
-  return request('/api/cookies/backup', { method: 'POST' })
-}
-
-export async function deleteCookiesBackup(index: number): Promise<{ ok: boolean; error?: string }> {
-  return request(`/api/cookies/backup/${index}`, { method: 'DELETE' })
-}

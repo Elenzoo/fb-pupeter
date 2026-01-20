@@ -66,20 +66,7 @@ export interface SessionStatus {
   mainCookiesExists: boolean
   mainCookiesAge?: number
   mainCookiesSize?: number
-  activeCookiesFile: string
-  activeCookiesIndex: number // -1 = main, 0+ = backup index
-  backups: CookieBackup[]
   isLoggedIn?: boolean
-}
-
-// Backup cookies
-export interface CookieBackup {
-  index: number
-  filename: string
-  path: string
-  ageHours: number
-  sizeBytes: number
-  isActive: boolean
 }
 
 // Źródło monitorowania (przyszłość)
