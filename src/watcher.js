@@ -613,7 +613,7 @@ async function startWatcher() {
           }
         }
 
-        // Jeśli nadal nie zalogowany - alert i stop
+        // Jeśli nadal nie zalogowany - alert i stop (lub czekaj przy remote debug)
         if (!loggedIn) {
           await sendOwnerAlert(
             "CHECKPOINT - Wymagana interwencja",
@@ -624,8 +624,30 @@ async function startWatcher() {
             `2. Zmień dane logowania w .env jeśli potrzeba\n` +
             `3. PM2 automatycznie wznowi pracę`
           );
-          log.error("CHECKPOINT", "Wymagana interwencja - zatrzymuję proces");
-          process.exit(1);
+
+          // Gdy remote debug - czekaj na ręczną interwencję zamiast wychodzić
+          if (REMOTE_DEBUG_PORT > 0) {
+            log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
+            log.warn("CHECKPOINT", "Przeglądarka czeka na ręczną interwencję.");
+            log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect, potem naciśnij Ctrl+C i uruchom ponownie.");
+            log.warn("CHECKPOINT", "Sprawdzam co 30s czy jesteś zalogowany...");
+
+            // Czekaj w pętli aż użytkownik ręcznie rozwiąże checkpoint
+            while (true) {
+              await new Promise(r => setTimeout(r, 30000));
+              const nowLogged = await checkIfLogged(page).catch(() => false);
+              if (nowLogged) {
+                log.success("CHECKPOINT", "Wykryto sesję! Zapisuję cookies i kontynuuję...");
+                await saveCookies(page);
+                loggedIn = true;
+                break;
+              }
+              log.dev("CHECKPOINT", "Nadal brak sesji - czekam...");
+            }
+          } else {
+            log.error("CHECKPOINT", "Wymagana interwencja - zatrzymuję proces");
+            process.exit(1);
+          }
         }
       }
       // === KONIEC CHECKPOINT DETECTION ===
@@ -645,7 +667,26 @@ async function startWatcher() {
             "CHECKPOINT po logowaniu",
             `Facebook wymaga weryfikacji po próbie logowania.\n\nTyp: ${checkpointType}`
           );
-          process.exit(1);
+
+          // Gdy remote debug - czekaj na ręczną interwencję
+          if (REMOTE_DEBUG_PORT > 0) {
+            log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
+            log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect. Sprawdzam co 30s...");
+
+            while (true) {
+              await new Promise(r => setTimeout(r, 30000));
+              const nowLogged = await checkIfLogged(page).catch(() => false);
+              if (nowLogged) {
+                log.success("CHECKPOINT", "Wykryto sesję! Zapisuję cookies i kontynuuję...");
+                await saveCookies(page);
+                loggedIn = true;
+                break;
+              }
+              log.dev("CHECKPOINT", "Nadal brak sesji - czekam...");
+            }
+          } else {
+            process.exit(1);
+          }
         }
 
         if (loggedIn) {
