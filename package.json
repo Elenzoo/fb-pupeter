@@ -20,7 +20,8 @@
     "dotenv": "^17.2.3",
     "puppeteer": "^24.31.0",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-recaptcha": "^3.6.8"
+    "puppeteer-extra-plugin-recaptcha": "^3.6.8",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.11.0",

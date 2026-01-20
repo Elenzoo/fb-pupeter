@@ -126,49 +126,6 @@ const LOG_LEVEL = Number(process.env.LOG_LEVEL ?? 1);
 const LOG_TIMESTAMPS = process.env.LOG_TIMESTAMPS !== "false";
 const LOG_COLORS = process.env.LOG_COLORS !== "false";
 
-/* ==================== CHECKPOINT RECOVERY ==================== */
-/**
- * CHECKPOINT_DETECTION – czy włączyć automatyczne wykrywanie checkpointów FB
- * Domyślnie: true
- */
-const CHECKPOINT_DETECTION = process.env.CHECKPOINT_DETECTION !== "false";
-
-/**
- * CHECKPOINT_MAX_RETRIES – ile razy próbować recovery z fresh cookies
- * Domyślnie: 3
- */
-const CHECKPOINT_MAX_RETRIES = Number(process.env.CHECKPOINT_MAX_RETRIES || 3);
-
-/**
- * BACKUP_COOKIES_DIR – katalog z backup cookies
- * Domyślnie: ./data/backup_cookies
- */
-const BACKUP_COOKIES_DIR = process.env.BACKUP_COOKIES_DIR || "./data/backup_cookies";
-
-/**
- * CHECKPOINT_ALERT_TELEGRAM – czy wysyłać alert Telegram przy checkpoint
- * Domyślnie: true
- */
-const CHECKPOINT_ALERT_TELEGRAM = process.env.CHECKPOINT_ALERT_TELEGRAM !== "false";
-
-/**
- * SOFT_BAN_DETECTION – wykrywanie "soft ban" (0 komentarzy na wielu postach)
- * Domyślnie: true
- */
-const SOFT_BAN_DETECTION = process.env.SOFT_BAN_DETECTION !== "false";
-
-/**
- * SOFT_BAN_THRESHOLD – ile postów z 0 komentarzami = soft ban
- * Domyślnie: 3
- */
-const SOFT_BAN_THRESHOLD = Number(process.env.SOFT_BAN_THRESHOLD || 3);
-
-/**
- * SCP_COOKIES_TARGET – cel SCP dla upload cookies (user@host:/path)
- * Np.: SCP_COOKIES_TARGET=user@server:/app/data/backup_cookies/
- */
-const SCP_COOKIES_TARGET = (process.env.SCP_COOKIES_TARGET || "").trim();
-
 /* ==================== CAPTCHA SOLVER ==================== */
 /**
  * CAPTCHA_API_KEY – klucz API do 2Captcha
@@ -208,17 +165,6 @@ export {
   LOG_LEVEL,
   LOG_TIMESTAMPS,
   LOG_COLORS,
-
-  // checkpoint recovery
-  CHECKPOINT_DETECTION,
-  CHECKPOINT_MAX_RETRIES,
-  BACKUP_COOKIES_DIR,
-  CHECKPOINT_ALERT_TELEGRAM,
-  SCP_COOKIES_TARGET,
-
-  // soft ban detection
-  SOFT_BAN_DETECTION,
-  SOFT_BAN_THRESHOLD,
 
   // captcha solver
   CAPTCHA_API_KEY,

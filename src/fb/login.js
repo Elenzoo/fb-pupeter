@@ -1,7 +1,385 @@
 // src/fb/login.js
 import { sleepRandom } from "../utils/sleep.js";
 import log from "../utils/logger.js";
-import { CAPTCHA_ENABLED } from "../config.js";
+import { CAPTCHA_ENABLED, CAPTCHA_API_KEY } from "../config.js";
+
+/**
+ * Diagnozuje typ captcha na stronie
+ * @param {import('puppeteer').Page} page
+ * @returns {Promise<{type: string, details: object}>}
+ */
+async function diagnoseCaptchaType(page) {
+  log.prod("CAPTCHA", "=== DIAGNOSTYKA TYPU CAPTCHA ===");
+
+  const frames = page.frames();
+  log.prod("CAPTCHA", `Liczba frames: ${frames.length}`);
+
+  const diagnosis = {
+    type: "unknown",
+    details: {
+      frames: [],
+      pageIndicators: [],
+      sitekey: null,
+      publicKey: null,
+    }
+  };
+
+  // Sprawdź wszystkie frames
+  for (const frame of frames) {
+    try {
+      const url = frame.url();
+      if (!url || url === "about:blank") continue;
+
+      const frameInfo = { url: url.substring(0, 120) };
+
+      // FunCaptcha / Arkose Labs
+      if (url.includes("arkoselabs") || url.includes("funcaptcha")) {
+        diagnosis.type = "funcaptcha";
+        frameInfo.type = "funcaptcha";
+
+        // Wyciągnij public key z URL
+        const pkMatch = url.match(/[?&]pk=([^&]+)/);
+        if (pkMatch) {
+          diagnosis.details.publicKey = pkMatch[1];
+          frameInfo.publicKey = pkMatch[1];
+        }
+      }
+      // reCAPTCHA
+      else if (url.includes("recaptcha") || url.includes("google.com/recaptcha")) {
+        diagnosis.type = diagnosis.type === "unknown" ? "recaptcha" : diagnosis.type;
+        frameInfo.type = "recaptcha";
+
+        if (url.includes("/enterprise/")) {
+          frameInfo.enterprise = true;
+        }
+
+        const keyMatch = url.match(/[?&]k=([^&]+)/);
+        if (keyMatch) {
+          diagnosis.details.sitekey = keyMatch[1];
+          frameInfo.sitekey = keyMatch[1];
+        }
+      }
+      // hCaptcha
+      else if (url.includes("hcaptcha")) {
+        diagnosis.type = diagnosis.type === "unknown" ? "hcaptcha" : diagnosis.type;
+        frameInfo.type = "hcaptcha";
+      }
+
+      if (frameInfo.type) {
+        diagnosis.details.frames.push(frameInfo);
+        log.prod("CAPTCHA", `Frame: ${frameInfo.type} - ${url.substring(0, 80)}...`);
+      }
+    } catch {
+      // Ignoruj błędy
+    }
+  }
+
+  // Sprawdź elementy na głównej stronie + użyj skryptu 2Captcha do wykrywania reCAPTCHA
+  const pageCheck = await page.evaluate(() => {
+    const indicators = [];
+
+    // FunCaptcha / Arkose Labs
+    if (document.querySelector('#FunCaptcha, [data-callback*="funcaptcha"], iframe[src*="arkoselabs"]')) {
+      indicators.push("funcaptcha_element");
+    }
+
+    // Szukaj enforcement script (Arkose)
+    const scripts = Array.from(document.querySelectorAll('script[src]'));
+    for (const s of scripts) {
+      if (s.src.includes('arkoselabs') || s.src.includes('funcaptcha')) {
+        indicators.push(`arkose_script: ${s.src.substring(0, 60)}`);
+      }
+    }
+
+    // Szukaj data-callback z arkose
+    const arkoseDiv = document.querySelector('[data-callback]');
+    if (arkoseDiv) {
+      indicators.push(`data-callback: ${arkoseDiv.getAttribute('data-callback')}`);
+    }
+
+    // reCAPTCHA - element na stronie
+    if (document.querySelector('.g-recaptcha, [data-sitekey]')) {
+      indicators.push("recaptcha_element");
+      const sitekey = document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey');
+      if (sitekey) indicators.push(`sitekey: ${sitekey.substring(0, 20)}...`);
+    }
+
+    // === SKRYPT 2CAPTCHA - wykrywanie reCAPTCHA clients ===
+    // eslint-disable-next-line camelcase
+    if (typeof ___grecaptcha_cfg !== 'undefined') {
+      try {
+        // eslint-disable-next-line camelcase, no-undef
+        const clients = Object.entries(___grecaptcha_cfg.clients).map(([cid, client]) => {
+          const data = { id: cid, version: cid >= 10000 ? 'V3' : 'V2' };
+          const objects = Object.entries(client).filter(([_, value]) => value && typeof value === 'object');
+
+          objects.forEach(([toplevelKey, toplevel]) => {
+            const found = Object.entries(toplevel).find(([_, value]) => (
+              value && typeof value === 'object' && 'sitekey' in value && 'size' in value
+            ));
+
+            if (typeof toplevel === 'object' && toplevel instanceof HTMLElement && toplevel['tagName'] === 'DIV') {
+              data.pageurl = toplevel.baseURI;
+            }
+
+            if (found) {
+              const [sublevelKey, sublevel] = found;
+              data.sitekey = sublevel.sitekey;
+              const callbackKey = data.version === 'V2' ? 'callback' : 'promise-callback';
+              const callback = sublevel[callbackKey];
+              if (callback) {
+                const keys = [cid, toplevelKey, sublevelKey, callbackKey].map((key) => `['${key}']`).join('');
+                data.callback = `___grecaptcha_cfg.clients${keys}`;
+              }
+            }
+          });
+          return data;
+        });
+
+        if (clients.length > 0) {
+          indicators.push(`grecaptcha_clients: ${JSON.stringify(clients)}`);
+        }
+      } catch (e) {
+        indicators.push(`grecaptcha_error: ${e.message}`);
+      }
+    }
+
+    // Tekst na stronie
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    if (bodyText.includes('arkose') || bodyText.includes('funcaptcha')) {
+      indicators.push("arkose_text");
+    }
+
+    return indicators;
+  });
+
+  diagnosis.details.pageIndicators = pageCheck;
+  if (pageCheck.length > 0) {
+    log.prod("CAPTCHA", `Wskaźniki na stronie: ${pageCheck.join(', ')}`);
+  }
+
+  // Jeśli znaleziono funcaptcha, ustaw typ
+  if (pageCheck.some(i => i.includes("funcaptcha") || i.includes("arkose"))) {
+    diagnosis.type = "funcaptcha";
+  }
+
+  // Parsuj dane z grecaptcha_clients (skrypt 2Captcha)
+  const grecaptchaMatch = pageCheck.find(i => i.startsWith("grecaptcha_clients:"));
+  if (grecaptchaMatch) {
+    try {
+      const jsonStr = grecaptchaMatch.replace("grecaptcha_clients: ", "");
+      const clients = JSON.parse(jsonStr);
+      if (clients.length > 0) {
+        diagnosis.type = "recaptcha";
+        diagnosis.details.grecaptchaClients = clients;
+        // Użyj pierwszego klienta z sitekey
+        const clientWithSitekey = clients.find(c => c.sitekey);
+        if (clientWithSitekey) {
+          diagnosis.details.sitekey = clientWithSitekey.sitekey;
+          diagnosis.details.callback = clientWithSitekey.callback;
+          diagnosis.details.version = clientWithSitekey.version;
+          log.prod("CAPTCHA", `Znaleziono reCAPTCHA ${clientWithSitekey.version} przez ___grecaptcha_cfg`);
+          log.prod("CAPTCHA", `Sitekey: ${clientWithSitekey.sitekey?.substring(0, 20)}...`);
+          if (clientWithSitekey.callback) {
+            log.prod("CAPTCHA", `Callback: ${clientWithSitekey.callback}`);
+          }
+        }
+      }
+    } catch (e) {
+      log.debug("CAPTCHA", `Błąd parsowania grecaptcha_clients: ${e.message}`);
+    }
+  }
+
+  log.prod("CAPTCHA", `=== WYKRYTY TYP: ${diagnosis.type.toUpperCase()} ===`);
+
+  return diagnosis;
+}
+
+/**
+ * Rozwiązuje FunCaptcha/Arkose Labs przez 2Captcha API
+ * @param {string} publicKey - klucz publiczny Arkose (parametr pk= z URL)
+ * @param {string} pageUrl - URL strony z captcha
+ * @param {string} surl - opcjonalny service URL
+ * @returns {Promise<{ok: boolean, token?: string, error?: string}>}
+ */
+async function solveFunCaptchaViaApi(publicKey, pageUrl, surl = null) {
+  if (!CAPTCHA_API_KEY || !publicKey) {
+    return { ok: false, error: "missing_params" };
+  }
+
+  log.prod("CAPTCHA", `Wysyłam FunCaptcha do 2Captcha (publicKey: ${publicKey.substring(0, 15)}...)`);
+
+  try {
+    const createTaskPayload = {
+      clientKey: CAPTCHA_API_KEY,
+      task: {
+        type: "FunCaptchaTaskProxyless",
+        websiteURL: pageUrl,
+        websitePublicKey: publicKey,
+      },
+    };
+
+    // Dodaj service URL jeśli podany
+    if (surl) {
+      createTaskPayload.task.funcaptchaApiJSSubdomain = surl;
+    }
+
+    log.debug("CAPTCHA", `Payload: ${JSON.stringify(createTaskPayload).substring(0, 200)}`);
+
+    const createRes = await fetch("https://api.2captcha.com/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createTaskPayload),
+    });
+    const createData = await createRes.json();
+
+    if (createData.errorId !== 0) {
+      log.error("CAPTCHA", `Błąd createTask: ${createData.errorCode} - ${createData.errorDescription}`);
+      return { ok: false, error: createData.errorCode || createData.errorDescription };
+    }
+
+    const taskId = createData.taskId;
+    log.dev("CAPTCHA", `FunCaptcha Task ID: ${taskId} - czekam na rozwiązanie...`);
+
+    // Polling - max 180 sekund
+    const maxAttempts = 36;
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+
+      const resultRes = await fetch("https://api.2captcha.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientKey: CAPTCHA_API_KEY,
+          taskId: taskId,
+        }),
+      });
+      const resultData = await resultRes.json();
+
+      if (resultData.errorId !== 0) {
+        log.error("CAPTCHA", `Błąd getTaskResult: ${resultData.errorCode}`);
+        return { ok: false, error: resultData.errorCode };
+      }
+
+      if (resultData.status === "ready") {
+        const token = resultData.solution?.token;
+        if (token) {
+          log.success("CAPTCHA", `FunCaptcha rozwiązana! (próba ${i + 1})`);
+          return { ok: true, token };
+        }
+        log.error("CAPTCHA", "Brak tokenu w odpowiedzi FunCaptcha");
+        return { ok: false, error: "no_token" };
+      }
+
+      log.debug("CAPTCHA", `Czekam na FunCaptcha... (${i + 1}/${maxAttempts})`);
+    }
+
+    return { ok: false, error: "timeout" };
+  } catch (err) {
+    log.error("CAPTCHA", `Błąd FunCaptcha API: ${err?.message}`);
+    return { ok: false, error: err?.message };
+  }
+}
+
+/**
+ * Rozwiązuje reCAPTCHA Enterprise przez API v2 2Captcha (createTask)
+ * @param {string} sitekey - klucz witryny reCAPTCHA (parametr k= z URL)
+ * @param {string} pageUrl - URL strony z captcha
+ * @param {object} options - dodatkowe opcje
+ * @param {boolean} options.isInvisible - czy to invisible captcha (domyślnie false)
+ * @param {boolean} options.isEnterprise - czy to Enterprise captcha (domyślnie true)
+ * @param {string} options.dataS - parametr data-s ze strony (dla Enterprise)
+ * @returns {Promise<{ok: boolean, token?: string, error?: string}>}
+ */
+async function solveRecaptchaViaApi(sitekey, pageUrl, options = {}) {
+  const { isInvisible = false, isEnterprise = true, dataS = null } = options;
+
+  if (!CAPTCHA_API_KEY || !sitekey) {
+    return { ok: false, error: "missing_params" };
+  }
+
+  log.prod("CAPTCHA", `Wysyłam do 2Captcha API v2 (sitekey: ${sitekey.substring(0, 10)}..., enterprise: ${isEnterprise}, dataS: ${dataS ? 'tak' : 'nie'})`);
+
+  try {
+    // 1. Wyślij zadanie do 2Captcha (API v2)
+    const taskType = isEnterprise
+      ? "RecaptchaV2EnterpriseTaskProxyless"
+      : "RecaptchaV2TaskProxyless";
+
+    const createTaskPayload = {
+      clientKey: CAPTCHA_API_KEY,
+      task: {
+        type: taskType,
+        websiteURL: pageUrl,
+        websiteKey: sitekey,
+        isInvisible: isInvisible,
+        // FB używa własnej domeny dla reCAPTCHA
+        apiDomain: "www.recaptcha.net",
+      },
+    };
+
+    // Dodaj enterprisePayload jeśli mamy data-s
+    if (isEnterprise && dataS) {
+      createTaskPayload.task.enterprisePayload = { s: dataS };
+      log.debug("CAPTCHA", `Dodano enterprisePayload.s: ${dataS.substring(0, 30)}...`);
+    }
+
+    log.debug("CAPTCHA", `Typ zadania: ${taskType}`);
+
+    const createRes = await fetch("https://api.2captcha.com/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createTaskPayload),
+    });
+    const createData = await createRes.json();
+
+    if (createData.errorId !== 0) {
+      log.error("CAPTCHA", `Błąd createTask: ${createData.errorCode} - ${createData.errorDescription}`);
+      return { ok: false, error: createData.errorCode || createData.errorDescription };
+    }
+
+    const taskId = createData.taskId;
+    log.dev("CAPTCHA", `Task ID: ${taskId} - czekam na rozwiązanie...`);
+
+    // 2. Polling - czekaj na rozwiązanie (max 180 sekund dla Enterprise)
+    const maxAttempts = 36; // 36 * 5s = 180s
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 5000)); // czekaj 5 sekund
+
+      const resultRes = await fetch("https://api.2captcha.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientKey: CAPTCHA_API_KEY,
+          taskId: taskId,
+        }),
+      });
+      const resultData = await resultRes.json();
+
+      if (resultData.errorId !== 0) {
+        log.error("CAPTCHA", `Błąd getTaskResult: ${resultData.errorCode}`);
+        return { ok: false, error: resultData.errorCode };
+      }
+
+      if (resultData.status === "ready") {
+        const token = resultData.solution?.gRecaptchaResponse;
+        if (token) {
+          log.success("CAPTCHA", `Rozwiązano! (próba ${i + 1})`);
+          return { ok: true, token };
+        }
+        log.error("CAPTCHA", "Brak tokenu w odpowiedzi");
+        return { ok: false, error: "no_token" };
+      }
+
+      log.debug("CAPTCHA", `Czekam... (${i + 1}/${maxAttempts})`);
+    }
+
+    return { ok: false, error: "timeout" };
+  } catch (err) {
+    log.error("CAPTCHA", `Błąd API: ${err?.message}`);
+    return { ok: false, error: err?.message };
+  }
+}
 
 /**
  * FB login helpers – PRO (NO COOLDOWN)
@@ -125,6 +503,116 @@ async function acceptCookiesIfPresent(page) {
 }
 
 /**
+ * Helper: kliknij przycisk submit po rozwiązaniu captcha
+ */
+async function clickSubmitButton(page) {
+  // Rozszerzone selektory dla FB two_step_verification
+  const submitSelectors = [
+    // FB specyficzne
+    'div[aria-label="Kontynuuj"]',
+    'div[aria-label="Continue"]',
+    'span[dir="auto"]:has-text("Kontynuuj")',
+    // Standardowe
+    'button[type="submit"]',
+    'input[type="submit"]',
+    'button[name="submit"]',
+    'div[role="button"][tabindex="0"]',
+    'button:not([type])',
+    '[data-testid="royal_login_button"]',
+  ];
+
+  let submitBtn = null;
+  for (const sel of submitSelectors) {
+    try {
+      submitBtn = await page.$(sel);
+      if (submitBtn) {
+        log.debug("CAPTCHA", `Znaleziono przycisk: ${sel}`);
+        break;
+      }
+    } catch {}
+  }
+
+  // Fallback - szukaj przycisku po tekście (rozszerzone dla FB)
+  if (!submitBtn) {
+    log.debug("CAPTCHA", "Szukam przycisku po tekście...");
+
+    // Diagnostyka - pokaż wszystkie klikalne elementy
+    const buttons = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll(
+        'button, div[role="button"], a[role="button"], span[role="button"], div[tabindex="0"]'
+      ));
+      return els.slice(0, 15).map(el => ({
+        tag: el.tagName,
+        text: (el.innerText || '').substring(0, 50).trim(),
+        role: el.getAttribute('role'),
+        ariaLabel: el.getAttribute('aria-label'),
+      })).filter(x => x.text || x.ariaLabel);
+    });
+    log.debug("CAPTCHA", `Dostępne przyciski: ${JSON.stringify(buttons, null, 2)}`);
+
+    submitBtn = await page.evaluateHandle(() => {
+      // Szukaj we wszystkich możliwych elementach
+      const allElements = Array.from(document.querySelectorAll(
+        'button, div[role="button"], a[role="button"], span[role="button"], ' +
+        'div[tabindex="0"], span[tabindex="0"], a[tabindex="0"]'
+      ));
+
+      const texts = [
+        'kontynuuj', 'continue', 'submit', 'dalej', 'wyślij', 'potwierdź',
+        'prześlij', 'zatwierdź', 'weryfikuj', 'verify', 'next', 'ok'
+      ];
+
+      for (const el of allElements) {
+        const t = (el.innerText || el.textContent || '').toLowerCase().trim();
+        if (!t) continue;
+
+        // Szukaj dokładnego dopasowania lub zawierania
+        if (texts.some(x => t === x || t.includes(x))) {
+          console.log('[Submit] Znaleziono:', t, el.tagName);
+          return el;
+        }
+      }
+
+      // Ostatnia szansa - szukaj niebieskiego przycisku FB (primary button)
+      const primaryBtn = document.querySelector(
+        'div[style*="background-color: rgb(24, 119, 242)"], ' +
+        'div[class*="primary"], ' +
+        'div[class*="layerConfirm"]'
+      );
+      if (primaryBtn) {
+        console.log('[Submit] Znaleziono primary button');
+        return primaryBtn;
+      }
+
+      return null;
+    });
+
+    if (submitBtn?.asElement()) {
+      submitBtn = submitBtn.asElement();
+    } else {
+      submitBtn = null;
+    }
+  }
+
+  if (submitBtn) {
+    log.prod("CAPTCHA", "Klikam przycisk submit...");
+    await submitBtn.click();
+    await sleepRandom(1000, 2000);
+    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
+    await sleepRandom(2000, 3000);
+  } else {
+    // Spróbuj kliknąć w środek ekranu gdzie zwykle jest przycisk
+    log.warn("CAPTCHA", "Nie znaleziono przycisku - próbuję Tab + Enter");
+    await page.keyboard.press('Tab');
+    await sleepRandom(300, 500);
+    await page.keyboard.press('Tab');
+    await sleepRandom(300, 500);
+    await page.keyboard.press('Enter');
+    await sleepRandom(3000, 4000);
+  }
+}
+
+/**
  * Pomocnik: wpisz login/hasło + kliknij login. Best-effort.
  */
 async function fillLoginFormBestEffort(page) {
@@ -189,6 +677,276 @@ async function fillLoginFormBestEffort(page) {
   ]);
 
   await sleepRandom(1400, 2400);
+
+  // Sprawdź URL - czy jesteśmy na stronie 2FA/weryfikacji
+  const currentUrl = page.url();
+  log.dev("LOGIN", `URL po logowaniu: ${currentUrl.substring(0, 80)}...`);
+
+  // Jeśli jesteśmy na stronie weryfikacji, spróbuj rozwiązać captcha
+  if (currentUrl.includes('two_step_verification') ||
+      currentUrl.includes('checkpoint') ||
+      currentUrl.includes('authentication')) {
+    log.prod("LOGIN", "Wykryto stronę weryfikacji - próbuję rozwiązać captcha...");
+
+    // Poczekaj na załadowanie elementów
+    await sleepRandom(4000, 6000);
+
+    // NOWA DIAGNOSTYKA - wykryj typ captcha
+    const diagnosis = await diagnoseCaptchaType(page);
+
+    if (!CAPTCHA_ENABLED) {
+      log.warn("CAPTCHA", "Solver wyłączony (brak CAPTCHA_API_KEY)");
+      await sleepRandom(1000, 2000);
+      return true;
+    }
+
+    let apiResult = { ok: false };
+
+    // === FUNCAPTCHA / ARKOSE LABS ===
+    if (diagnosis.type === "funcaptcha" && diagnosis.details.publicKey) {
+      log.prod("CAPTCHA", "Używam solvera FunCaptcha...");
+
+      const maxRetries = 2;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        log.prod("CAPTCHA", `FunCaptcha próba ${attempt}/${maxRetries}...`);
+
+        apiResult = await solveFunCaptchaViaApi(
+          diagnosis.details.publicKey,
+          currentUrl
+        );
+
+        if (apiResult.ok) break;
+
+        if (apiResult.error === 'ERROR_CAPTCHA_UNSOLVABLE' && attempt < maxRetries) {
+          log.warn("CAPTCHA", "FunCaptcha nierozwiązywalna - odświeżam...");
+          await page.reload({ waitUntil: 'networkidle2' }).catch(() => {});
+          await sleepRandom(3000, 5000);
+          // Po reload ponownie zdiagnozuj
+          const newDiag = await diagnoseCaptchaType(page);
+          if (newDiag.details.publicKey) {
+            diagnosis.details.publicKey = newDiag.details.publicKey;
+          }
+        } else if (apiResult.error) {
+          break;
+        }
+      }
+
+      if (apiResult.ok && apiResult.token) {
+        log.success("CAPTCHA", "Otrzymano token FunCaptcha!");
+
+        // Wstrzyknij token FunCaptcha
+        try {
+          const injected = await page.evaluate((token) => {
+            let success = false;
+
+            // FunCaptcha callback - różne warianty
+            const callbacks = [
+              () => window.ArkoseEnforcement?.setSessionToken?.(token),
+              () => window.fc_callback?.(token),
+              () => window.funcaptchaCallback?.(token),
+              () => window.onFunCaptchaSuccess?.(token),
+              // Szukaj ukrytego inputa
+              () => {
+                const input = document.querySelector('input[name="fc-token"], input[name="verification_token"]');
+                if (input) {
+                  input.value = token;
+                  success = true;
+                }
+              },
+              // Wywołaj event submit
+              () => {
+                const form = document.querySelector('form');
+                if (form) {
+                  const hiddenInput = document.createElement('input');
+                  hiddenInput.type = 'hidden';
+                  hiddenInput.name = 'fc-token';
+                  hiddenInput.value = token;
+                  form.appendChild(hiddenInput);
+                  success = true;
+                }
+              },
+            ];
+
+            for (const tryCallback of callbacks) {
+              try {
+                tryCallback();
+              } catch {}
+            }
+
+            return success;
+          }, apiResult.token);
+
+          log.dev("CAPTCHA", `Token FunCaptcha wstrzyknięty: ${injected ? 'OK' : 'częściowo'}`);
+          await sleepRandom(1500, 2500);
+
+          // Kliknij przycisk submit
+          await clickSubmitButton(page);
+          return true;
+        } catch (err) {
+          log.error("CAPTCHA", `Błąd wstrzykiwania tokenu FunCaptcha: ${err?.message}`);
+        }
+      }
+    }
+    // === RECAPTCHA ===
+    else if (diagnosis.type === "recaptcha" && diagnosis.details.sitekey) {
+      log.prod("CAPTCHA", "Używam solvera reCAPTCHA...");
+
+      // Sprawdź czy Enterprise
+      const isEnterprise = diagnosis.details.frames.some(f => f.enterprise);
+
+      // KROK 1: Kliknij checkbox "Nie jestem robotem" jeśli istnieje
+      try {
+        const frames = page.frames();
+        for (const frame of frames) {
+          if (frame.url().includes('recaptcha') && frame.url().includes('anchor')) {
+            log.prod("CAPTCHA", "Szukam checkboxa reCAPTCHA...");
+            const checkbox = await frame.$('.recaptcha-checkbox-border, .recaptcha-checkbox, #recaptcha-anchor');
+            if (checkbox) {
+              log.prod("CAPTCHA", "Klikam checkbox 'Nie jestem robotem'...");
+              await checkbox.click();
+              await sleepRandom(2000, 3000);
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        log.debug("CAPTCHA", `Błąd kliknięcia checkboxa: ${err?.message}`);
+      }
+
+      // Wyciągnij data-s
+      let dataS = null;
+      try {
+        dataS = await page.evaluate(() => {
+          const recaptchaDiv = document.querySelector('.g-recaptcha, [data-sitekey], #recaptcha');
+          if (recaptchaDiv?.dataset?.s) return recaptchaDiv.dataset.s;
+          const iframes = document.querySelectorAll('iframe[src*="recaptcha"]');
+          for (const iframe of iframes) {
+            const match = (iframe.src || '').match(/[?&]s=([^&]+)/);
+            if (match) return decodeURIComponent(match[1]);
+          }
+          return null;
+        });
+      } catch {}
+
+      const maxRetries = 2;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        log.prod("CAPTCHA", `reCAPTCHA próba ${attempt}/${maxRetries}...`);
+
+        apiResult = await solveRecaptchaViaApi(diagnosis.details.sitekey, currentUrl, {
+          isEnterprise,
+          isInvisible: false,
+          dataS,
+        });
+
+        if (apiResult.ok) break;
+
+        if (apiResult.error === 'ERROR_CAPTCHA_UNSOLVABLE' && attempt < maxRetries) {
+          log.warn("CAPTCHA", "reCAPTCHA nierozwiązywalna - odświeżam...");
+          await page.reload({ waitUntil: 'networkidle2' }).catch(() => {});
+          await sleepRandom(3000, 5000);
+        } else if (apiResult.error) {
+          break;
+        }
+      }
+
+      if (apiResult.ok && apiResult.token) {
+        log.success("CAPTCHA", "Otrzymano token reCAPTCHA!");
+
+        // Wstrzyknij token reCAPTCHA - użyj wykrytego callbacka jeśli dostępny
+        const callbackPath = diagnosis.details.callback;
+        try {
+          const injected = await page.evaluate((token, cbPath) => {
+            let success = false;
+
+            // 1. Ustaw wartość w textarea
+            const textareas = document.querySelectorAll(
+              'textarea[name="g-recaptcha-response"], #g-recaptcha-response'
+            );
+            textareas.forEach(ta => {
+              ta.value = token;
+              ta.innerHTML = token;
+              success = true;
+            });
+
+            // 2. Wywołaj callback wykryty przez skrypt 2Captcha
+            if (cbPath) {
+              try {
+                // cbPath ma format: ___grecaptcha_cfg.clients['0']['X']['Y']['callback']
+                const callback = eval(cbPath);
+                if (typeof callback === 'function') {
+                  callback(token);
+                  success = true;
+                  console.log('[2Captcha] Callback wywołany:', cbPath);
+                }
+              } catch (e) {
+                console.log('[2Captcha] Błąd callbacka:', e.message);
+              }
+            }
+
+            // 3. Fallback - standardowe callbacki
+            try { window.onCaptchaSuccess?.(token); } catch {}
+            try { window.captchaCallback?.(token); } catch {}
+
+            // 4. Szukaj callbacku w ___grecaptcha_cfg (głęboko)
+            try {
+              const cfg = window.___grecaptcha_cfg;
+              if (cfg?.clients) {
+                for (const [cid, client] of Object.entries(cfg.clients)) {
+                  for (const [key, obj] of Object.entries(client)) {
+                    if (obj && typeof obj === 'object') {
+                      for (const [subkey, subobj] of Object.entries(obj)) {
+                        if (subobj && typeof subobj === 'object') {
+                          if (typeof subobj.callback === 'function') {
+                            subobj.callback(token);
+                            success = true;
+                            console.log('[2Captcha] Callback znaleziony w:', cid, key, subkey);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch {}
+
+            return success;
+          }, apiResult.token, callbackPath);
+
+          log.dev("CAPTCHA", `Token reCAPTCHA wstrzyknięty: ${injected ? 'OK' : 'częściowo'}`);
+          await sleepRandom(1500, 2500);
+
+          // Kliknij przycisk submit
+          await clickSubmitButton(page);
+          return true;
+        } catch (err) {
+          log.error("CAPTCHA", `Błąd wstrzykiwania tokenu reCAPTCHA: ${err?.message}`);
+        }
+      }
+    }
+    // === NIEZNANY TYP ===
+    else {
+      log.warn("CAPTCHA", `Nieobsługiwany typ captcha: ${diagnosis.type}`);
+      log.prod("CAPTCHA", "Szczegóły diagnozy:", JSON.stringify(diagnosis.details, null, 2));
+    }
+
+    await sleepRandom(1000, 2000);
+  }
+
+  // Standardowe sprawdzenie captcha
+  const captchaResult = await solveCaptchaIfPresent(page);
+  if (captchaResult.solved) {
+    log.success("LOGIN", "Captcha rozwiązana po logowaniu!");
+    await sleepRandom(2000, 3000);
+
+    // Po rozwiązaniu captcha, może trzeba kliknąć submit ponownie
+    const submitAfterCaptcha = await page.$('button[type="submit"], button[name="login"]');
+    if (submitAfterCaptcha) {
+      await submitAfterCaptcha.click().catch(() => {});
+      await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
+      await sleepRandom(1000, 2000);
+    }
+  }
+
   return true;
 }
 
@@ -414,21 +1172,60 @@ async function ensureLoggedInOnPostOverlay(page, postUrl = "") {
  */
 async function hasCaptcha(page) {
   try {
-    return await page.evaluate(() => {
-      // reCAPTCHA v2/v3
-      const recaptcha = document.querySelector(
-        'iframe[src*="recaptcha"], .g-recaptcha, #recaptcha'
-      );
+    const result = await page.evaluate(() => {
+      // reCAPTCHA v2/v3 - rozszerzone selektory
+      const recaptchaSelectors = [
+        'iframe[src*="recaptcha"]',
+        'iframe[src*="google.com/recaptcha"]',
+        'iframe[title*="reCAPTCHA"]',
+        'iframe[title*="recaptcha"]',
+        '.g-recaptcha',
+        '#recaptcha',
+        '[data-sitekey]',
+        '.rc-anchor',
+        '.recaptcha-checkbox',
+      ].join(',');
+
+      const recaptcha = document.querySelector(recaptchaSelectors);
+
       // hCaptcha
       const hcaptcha = document.querySelector(
         'iframe[src*="hcaptcha"], .h-captcha'
       );
+
       // Facebook image captcha
       const fbCaptcha = document.querySelector(
         'img[src*="captcha"], input[name*="captcha"]'
       );
-      return !!(recaptcha || hcaptcha || fbCaptcha);
+
+      // Tekst "Nie jestem robotem" / "I'm not a robot" na stronie
+      const bodyText = (document.body?.innerText || '').toLowerCase();
+      const hasRobotText = bodyText.includes('nie jestem robotem') ||
+                          bodyText.includes("i'm not a robot") ||
+                          bodyText.includes('recaptcha');
+
+      // URL zawiera verification/authentication z recaptcha
+      const url = window.location.href.toLowerCase();
+      const isVerificationPage = url.includes('two_step_verification') ||
+                                  url.includes('checkpoint');
+
+      return {
+        found: !!(recaptcha || hcaptcha || fbCaptcha || (hasRobotText && isVerificationPage)),
+        details: {
+          recaptcha: !!recaptcha,
+          hcaptcha: !!hcaptcha,
+          fbCaptcha: !!fbCaptcha,
+          robotText: hasRobotText,
+          verificationPage: isVerificationPage
+        }
+      };
     });
+
+    if (result.found) {
+      log.debug("CAPTCHA", "Wykryto captcha", result.details);
+    }
+
+    return result.found;
   } catch {
     return false;
   }
