@@ -1,5 +1,6 @@
 // src/watcher.js
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-extra";
+import RecaptchaPlugin from "puppeteer-extra-plugin-recaptcha";
 import fs from "fs";
 import path from "path";
 import {
@@ -16,7 +17,23 @@ import {
   CHECKPOINT_ALERT_TELEGRAM,
   SOFT_BAN_DETECTION,
   SOFT_BAN_THRESHOLD,
+  CAPTCHA_API_KEY,
+  CAPTCHA_ENABLED,
 } from "./config.js";
+
+// Konfiguracja captcha solver (2Captcha)
+if (CAPTCHA_ENABLED && CAPTCHA_API_KEY) {
+  puppeteer.use(
+    RecaptchaPlugin({
+      provider: {
+        id: "2captcha",
+        token: CAPTCHA_API_KEY,
+      },
+      visualFeedback: true,
+    })
+  );
+  console.log("[CAPTCHA] 2Captcha solver włączony");
+}
 
 import {
   prepare,
@@ -35,7 +52,7 @@ import {
   hasAnyBackupCookies,
   restoreNextAvailableCookies,
 } from "./fb/cookies.js";
-import { checkIfLogged, fbLogin } from "./fb/login.js";
+import { checkIfLogged, fbLogin, solveCaptchaIfPresent, hasCaptcha } from "./fb/login.js";
 import { isCheckpoint, getCheckpointType } from "./fb/checkpoint.js";
 import { parseFbRelativeTime, filterByAge } from "./utils/time.js";
 import { loadCache, saveCache, getCacheSize, getCacheEntryCount } from "./db/cache.js";
@@ -729,8 +746,35 @@ async function startWatcher() {
             totalBackups
           });
 
-          // Próba recovery z rotacją cookies
-          if (totalBackups > 0 && checkpointRetryCount <= totalBackups) {
+          // === CAPTCHA SOLVER - próba rozwiązania przed rotacją cookies ===
+          if (CAPTCHA_ENABLED) {
+            const captchaResult = await solveCaptchaIfPresent(page);
+            if (captchaResult.solved) {
+              log.success("CAPTCHA", "Captcha rozwiązana! Kontynuuję logowanie...");
+              await sleepRandom(2000, 3000);
+
+              // Sprawdź czy jesteśmy zalogowani po rozwiązaniu captcha
+              loggedIn = await checkIfLogged(page);
+              if (loggedIn) {
+                log.success("LOGIN", "Zalogowano po rozwiązaniu captcha");
+                checkpointRetryCount = 0;
+              } else {
+                // Spróbuj wypełnić formularz logowania
+                await fbLogin(page);
+                loggedIn = await checkIfLogged(page);
+              }
+
+              if (loggedIn) {
+                // Sukces - kontynuuj normalnie
+              } else {
+                log.warn("LOGIN", "Nadal niezalogowany po captcha - próbuję rotację cookies");
+              }
+            }
+          }
+
+          // Jeśli nadal checkpoint lub niezalogowany, próba recovery z rotacją cookies
+          // (pomijamy jeśli captcha solver zadziałał)
+          if (!loggedIn && totalBackups > 0 && checkpointRetryCount <= totalBackups) {
             const restoreResult = await restoreNextAvailableCookies(currentCookiesIndex);
 
             if (restoreResult.ok) {
@@ -753,8 +797,8 @@ async function startWatcher() {
             }
           }
 
-          // Wszystkie cookies wyczerpane lub brak backup
-          if (CHECKPOINT_ALERT_TELEGRAM) {
+          // Wszystkie cookies wyczerpane lub brak backup (pomijamy jeśli zalogowano)
+          if (!loggedIn && CHECKPOINT_ALERT_TELEGRAM) {
             const cookiesInfo = backupList.map((c) => `  - cookies_${c.index}.json (${c.age}h)`).join("\n") || "  (brak plików)";
 
             await sendOwnerAlert(
@@ -771,8 +815,10 @@ async function startWatcher() {
             );
           }
 
-          log.error("CHECKPOINT", "Wyczerpano wszystkie backup cookies - zatrzymuję proces");
-          process.exit(1);
+          if (!loggedIn) {
+            log.error("CHECKPOINT", "Wyczerpano wszystkie backup cookies - zatrzymuję proces");
+            process.exit(1);
+          }
         }
       }
       // === KONIEC CHECKPOINT DETECTION ===

@@ -169,6 +169,19 @@ const SOFT_BAN_THRESHOLD = Number(process.env.SOFT_BAN_THRESHOLD || 3);
  */
 const SCP_COOKIES_TARGET = (process.env.SCP_COOKIES_TARGET || "").trim();
 
+/* ==================== CAPTCHA SOLVER ==================== */
+/**
+ * CAPTCHA_API_KEY – klucz API do 2Captcha
+ * Używany do automatycznego rozwiązywania captcha przy logowaniu
+ */
+const CAPTCHA_API_KEY = (process.env.CAPTCHA_API_KEY || "").trim();
+
+/**
+ * CAPTCHA_ENABLED – czy włączyć automatyczne rozwiązywanie captcha
+ * Domyślnie: true jeśli CAPTCHA_API_KEY jest ustawiony
+ */
+const CAPTCHA_ENABLED = process.env.CAPTCHA_ENABLED !== "false" && !!CAPTCHA_API_KEY;
+
 export {
   // stary system – optional
   POSTS,
@@ -206,4 +219,8 @@ export {
   // soft ban detection
   SOFT_BAN_DETECTION,
   SOFT_BAN_THRESHOLD,
+
+  // captcha solver
+  CAPTCHA_API_KEY,
+  CAPTCHA_ENABLED,
 };

@@ -1,6 +1,7 @@
 // src/fb/login.js
 import { sleepRandom } from "../utils/sleep.js";
 import log from "../utils/logger.js";
+import { CAPTCHA_ENABLED } from "../config.js";
 
 /**
  * FB login helpers – PRO (NO COOLDOWN)
@@ -408,6 +409,76 @@ async function ensureLoggedInOnPostOverlay(page, postUrl = "") {
   }
 }
 
+/**
+ * Wykrywa obecność captcha na stronie (reCAPTCHA, hCaptcha, itp.)
+ */
+async function hasCaptcha(page) {
+  try {
+    return await page.evaluate(() => {
+      // reCAPTCHA v2/v3
+      const recaptcha = document.querySelector(
+        'iframe[src*="recaptcha"], .g-recaptcha, #recaptcha'
+      );
+      // hCaptcha
+      const hcaptcha = document.querySelector(
+        'iframe[src*="hcaptcha"], .h-captcha'
+      );
+      // Facebook image captcha
+      const fbCaptcha = document.querySelector(
+        'img[src*="captcha"], input[name*="captcha"]'
+      );
+      return !!(recaptcha || hcaptcha || fbCaptcha);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Próbuje rozwiązać captcha na stronie (jeśli plugin 2Captcha jest włączony).
+ * Wymaga puppeteer-extra-plugin-recaptcha.
+ * @returns {Promise<{solved: boolean, error?: string}>}
+ */
+async function solveCaptchaIfPresent(page) {
+  if (!CAPTCHA_ENABLED) {
+    log.debug("CAPTCHA", "Solver wyłączony (brak CAPTCHA_API_KEY)");
+    return { solved: false, error: "disabled" };
+  }
+
+  try {
+    const detected = await hasCaptcha(page);
+    if (!detected) {
+      log.debug("CAPTCHA", "Brak captcha na stronie");
+      return { solved: false, error: "no_captcha" };
+    }
+
+    log.prod("CAPTCHA", "Wykryto captcha - rozpoczynam rozwiązywanie...");
+
+    // puppeteer-extra-plugin-recaptcha dodaje metodę solveRecaptchas() do page
+    if (typeof page.solveRecaptchas !== "function") {
+      log.warn("CAPTCHA", "Plugin recaptcha nie jest załadowany");
+      return { solved: false, error: "plugin_not_loaded" };
+    }
+
+    const result = await page.solveRecaptchas();
+
+    if (result.solved && result.solved.length > 0) {
+      log.prod("CAPTCHA", `Rozwiązano ${result.solved.length} captcha!`);
+      await sleepRandom(1000, 2000);
+      return { solved: true };
+    } else if (result.error) {
+      log.warn("CAPTCHA", `Błąd rozwiązywania: ${result.error}`);
+      return { solved: false, error: result.error };
+    } else {
+      log.debug("CAPTCHA", "Brak captcha do rozwiązania (lub nieobsługiwany typ)");
+      return { solved: false, error: "unsupported_or_none" };
+    }
+  } catch (err) {
+    log.warn("CAPTCHA", `Wyjątek: ${err?.message || err}`);
+    return { solved: false, error: err?.message || "unknown" };
+  }
+}
+
 export {
   fbLogin,
   checkIfLogged,
@@ -415,4 +486,6 @@ export {
   clickByText,
   acceptLoginCookies,
   loginViaVisibleForm,
+  hasCaptcha,
+  solveCaptchaIfPresent,
 };
