@@ -14,6 +14,7 @@ import {
   POSTS_API_TOKEN,
   CAPTCHA_API_KEY,
   CAPTCHA_ENABLED,
+  REMOTE_DEBUG_PORT,
 } from "./config.js";
 
 // Konfiguracja captcha solver (2Captcha)
@@ -562,6 +563,13 @@ async function startWatcher() {
 
       if (linux) {
         args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+      }
+
+      // Remote debugging - pozwala podłączyć się przez chrome://inspect
+      if (REMOTE_DEBUG_PORT > 0) {
+        args.push(`--remote-debugging-port=${REMOTE_DEBUG_PORT}`);
+        args.push("--remote-debugging-address=127.0.0.1");
+        log.prod("DEBUG", `Remote debugging na porcie ${REMOTE_DEBUG_PORT} - połącz przez: ssh -L ${REMOTE_DEBUG_PORT}:localhost:${REMOTE_DEBUG_PORT} user@server`);
       }
 
       browser = await puppeteer.launch({

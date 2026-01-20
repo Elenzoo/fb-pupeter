@@ -139,6 +139,19 @@ const CAPTCHA_API_KEY = (process.env.CAPTCHA_API_KEY || "").trim();
  */
 const CAPTCHA_ENABLED = process.env.CAPTCHA_ENABLED !== "false" && !!CAPTCHA_API_KEY;
 
+/* ==================== REMOTE DEBUG ==================== */
+/**
+ * REMOTE_DEBUG_PORT – port do zdalnego debugowania Chrome
+ * Gdy ustawiony, możesz podłączyć się przez chrome://inspect
+ * i widzieć/kontrolować przeglądarkę na żywo (2FA, checkpoint)
+ *
+ * Użycie:
+ *   1. REMOTE_DEBUG_PORT=9222 node src/index.js
+ *   2. SSH tunel: ssh -L 9222:localhost:9222 user@server
+ *   3. W Chrome: chrome://inspect → Configure → localhost:9222
+ */
+const REMOTE_DEBUG_PORT = Number(process.env.REMOTE_DEBUG_PORT || 0);
+
 export {
   // stary system – optional
   POSTS,
@@ -169,4 +182,7 @@ export {
   // captcha solver
   CAPTCHA_API_KEY,
   CAPTCHA_ENABLED,
+
+  // remote debug
+  REMOTE_DEBUG_PORT,
 };
