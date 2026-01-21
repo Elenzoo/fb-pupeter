@@ -1141,8 +1141,8 @@ async function fillLoginFormBestEffort(page) {
       if (gridDetected) {
         log.prod("CAPTCHA", "Wykryto siatkę obrazków - używam GridTask...");
 
-        // Próby rozwiązania przez GridTask
-        const maxGridRetries = 3;
+        // Próby rozwiązania przez GridTask (FB często wymaga 4-6 rund)
+        const maxGridRetries = 6;
         for (let gridAttempt = 1; gridAttempt <= maxGridRetries; gridAttempt++) {
           log.prod("CAPTCHA", `GridTask próba ${gridAttempt}/${maxGridRetries}...`);
 
