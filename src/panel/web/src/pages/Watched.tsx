@@ -264,7 +264,7 @@ export function Watched() {
                 <TableHead className="w-[60px]">ID</TableHead>
                 <TableHead>URL</TableHead>
                 <TableHead>Nazwa</TableHead>
-                <TableHead className="w-[80px]">Obrazek</TableHead>
+                <TableHead className="w-[260px]">Obrazek</TableHead>
                 <TableHead className="w-[80px]">Aktywny</TableHead>
                 <TableHead className="w-[120px]">Akcje</TableHead>
               </TableRow>
@@ -305,10 +305,11 @@ export function Watched() {
                   <TableCell>
                     {post.image ? (
                       <img
-                        src={post.image}
-                        alt=""
-                        className="w-12 h-12 object-cover rounded"
-                      />
+  src={post.image}
+  alt=""
+  className="w-[220px] h-[120px] object-contain rounded-md bg-black/20 transition-transform duration-200 hover:scale-[1.03] cursor-zoom-in"
+/>
+
                     ) : (
                       '-'
                     )}
