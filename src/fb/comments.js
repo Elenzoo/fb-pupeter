@@ -740,10 +740,11 @@ export async function extractCommentsData(page, url = null) {
 
     // kontekst: do czego porownujemy
     log.debug("DEDUP", `Context: want=${postRef || "null"}`);
+log.debug("DEDUP","Note: comment permalink ref check disabled (use comment_id/reply_comment_id)");
 
     for (const c of arr) {
       const permalink = c && typeof c === "object" ? c.permalink || null : null;
-      const cref = permalink ? getPostRef(permalink) : null;
+      const cref = null; // disabled: permalink-based postRef for comments
 
       // pokaz 3 pierwsze permalink->cref
       if (sampleLogged < 3 && permalink) {
@@ -751,10 +752,6 @@ export async function extractCommentsData(page, url = null) {
         sampleLogged += 1;
       }
 
-      if (cref && cref !== postRef) {
-        dropped += 1;
-        continue;
-      }
       if (c && typeof c === "object") c.postRef = postRef;
       out.push(c);
     }
