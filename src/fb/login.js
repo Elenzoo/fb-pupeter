@@ -1,5 +1,5 @@
 // src/fb/login.js
-import { sleepRandom } from "../utils/sleep.js";
+import { sleepRandom, humanType } from "../utils/sleep.js";
 import log from "../utils/logger.js";
 import { CAPTCHA_ENABLED, CAPTCHA_API_KEY } from "../config.js";
 
@@ -645,15 +645,17 @@ async function fillLoginFormBestEffort(page) {
     return false;
   }
 
-  log.dev("LOGIN", "Wpisuję email i hasło...");
+  log.dev("LOGIN", "Wpisuję email i hasło (human-like typing)...");
 
   await emailInput.click({ clickCount: 3 }).catch(() => {});
   await page.keyboard.press("Backspace").catch(() => {});
-  await emailInput.type(email, { delay: 35 }).catch(() => {});
+  // Human-like typing: ~120ms/znak z mikro-pauzami
+  await humanType(emailInput, email, page).catch(() => {});
 
   await passInput.click({ clickCount: 3 }).catch(() => {});
   await page.keyboard.press("Backspace").catch(() => {});
-  await passInput.type(password, { delay: 35 }).catch(() => {});
+  // Human-like typing: ~120ms/znak z mikro-pauzami
+  await humanType(passInput, password, page).catch(() => {});
 
   const loginButton =
     (await page.$('button[name="login"]')) ||

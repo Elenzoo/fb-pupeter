@@ -1,6 +1,11 @@
 // src/watcher.js
 import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import RecaptchaPlugin from "puppeteer-extra-plugin-recaptcha";
+
+// Stealth Plugin - ukrywa automatyzację (ZAWSZE pierwszy)
+puppeteer.use(StealthPlugin());
+console.log("[STEALTH] Plugin stealth włączony");
 import fs from "fs";
 import path from "path";
 import {
@@ -15,6 +20,8 @@ import {
   CAPTCHA_API_KEY,
   CAPTCHA_ENABLED,
   REMOTE_DEBUG_PORT,
+  HUMAN_MODE,
+  PROXY_URL,
 } from "./config.js";
 
 // Konfiguracja captcha solver (2Captcha)
@@ -43,6 +50,7 @@ import { loadCookies, saveCookies } from "./fb/cookies.js";
 import { checkIfLogged, fbLogin, solveCaptchaIfPresent } from "./fb/login.js";
 import { isCheckpoint, getCheckpointType } from "./fb/checkpoint.js";
 import { parseFbRelativeTime, filterByAge } from "./utils/time.js";
+import { shuffleArray, betweenPostsPause } from "./utils/sleep.js";
 import { loadCache, saveCache, getCacheSize, getCacheEntryCount } from "./db/cache.js";
 import { sendTelegramLeads, sendOwnerAlert } from "./telegram.js";
 import log from "./utils/logger.js";
@@ -572,6 +580,19 @@ async function startWatcher() {
         log.prod("DEBUG", `Remote debugging na porcie ${REMOTE_DEBUG_PORT} - połącz przez: ssh -L ${REMOTE_DEBUG_PORT}:localhost:${REMOTE_DEBUG_PORT} user@server`);
       }
 
+      // Proxy - residential rotating proxy zmniejsza ryzyko banów
+      if (PROXY_URL) {
+        args.push(`--proxy-server=${PROXY_URL}`);
+        // Ukryj credentials w logu
+        const safeProxyUrl = PROXY_URL.replace(/\/\/([^:]+):([^@]+)@/, "//***:***@");
+        log.prod("PROXY", `Używam proxy: ${safeProxyUrl}`);
+      }
+
+      // Human Mode info
+      if (HUMAN_MODE) {
+        log.prod("HUMAN", "Human Behavior Mode włączony");
+      }
+
       browser = await puppeteer.launch({
         headless: headlessMode,
         defaultViewport: null,
@@ -632,8 +653,15 @@ async function startWatcher() {
             log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect, potem naciśnij Ctrl+C i uruchom ponownie.");
             log.warn("CHECKPOINT", "Sprawdzam co 30s czy jesteś zalogowany...");
 
-            // Czekaj w pętli aż użytkownik ręcznie rozwiąże checkpoint
+            // Czekaj w pętli aż użytkownik ręcznie rozwiąże checkpoint (max 30 min)
+            const MAX_WAIT_2FA_MS = 30 * 60 * 1000; // 30 minut
+            const startWait2FA = Date.now();
             while (true) {
+              if (Date.now() - startWait2FA > MAX_WAIT_2FA_MS) {
+                log.error("CHECKPOINT", "Timeout oczekiwania na 2FA (30 min) - restart procesu");
+                await sendOwnerAlert("TIMEOUT 2FA", "Przekroczono 30 minut oczekiwania na ręczną interwencję. Proces zostanie zrestartowany.");
+                process.exit(1);
+              }
               await new Promise(r => setTimeout(r, 30000));
               const nowLogged = await checkIfLogged(page).catch(() => false);
               if (nowLogged) {
@@ -642,7 +670,8 @@ async function startWatcher() {
                 loggedIn = true;
                 break;
               }
-              log.dev("CHECKPOINT", "Nadal brak sesji - czekam...");
+              const remainingMin = Math.round((MAX_WAIT_2FA_MS - (Date.now() - startWait2FA)) / 60000);
+              log.dev("CHECKPOINT", `Nadal brak sesji - czekam... (pozostało ~${remainingMin} min)`);
             }
           } else {
             log.error("CHECKPOINT", "Wymagana interwencja - zatrzymuję proces");
@@ -654,7 +683,17 @@ async function startWatcher() {
 
       if (!loggedIn) {
         log.dev("LOGIN", "Brak sesji – logowanie...");
-        await fbLogin(page);
+        const LOGIN_TIMEOUT_MS = 120000; // 2 minuty na login
+        try {
+          await Promise.race([
+            fbLogin(page),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Login timeout (2 min)')), LOGIN_TIMEOUT_MS))
+          ]);
+        } catch (loginErr) {
+          log.error("LOGIN", `Błąd logowania: ${loginErr.message}`);
+          await sendOwnerAlert("LOGIN ERROR", `Logowanie nie powiodło się: ${loginErr.message}`);
+          throw loginErr;
+        }
         loggedIn = await checkIfLogged(page);
 
         // Sprawdź checkpoint po próbie logowania
@@ -668,12 +707,19 @@ async function startWatcher() {
             `Facebook wymaga weryfikacji po próbie logowania.\n\nTyp: ${checkpointType}`
           );
 
-          // Gdy remote debug - czekaj na ręczną interwencję
+          // Gdy remote debug - czekaj na ręczną interwencję (max 30 min)
           if (REMOTE_DEBUG_PORT > 0) {
             log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
             log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect. Sprawdzam co 30s...");
 
+            const MAX_WAIT_2FA_MS_LOGIN = 30 * 60 * 1000; // 30 minut
+            const startWait2FALogin = Date.now();
             while (true) {
+              if (Date.now() - startWait2FALogin > MAX_WAIT_2FA_MS_LOGIN) {
+                log.error("CHECKPOINT", "Timeout oczekiwania na 2FA po logowaniu (30 min) - restart procesu");
+                await sendOwnerAlert("TIMEOUT 2FA LOGIN", "Przekroczono 30 minut oczekiwania na ręczną interwencję po logowaniu. Proces zostanie zrestartowany.");
+                process.exit(1);
+              }
               await new Promise(r => setTimeout(r, 30000));
               const nowLogged = await checkIfLogged(page).catch(() => false);
               if (nowLogged) {
@@ -682,7 +728,8 @@ async function startWatcher() {
                 loggedIn = true;
                 break;
               }
-              log.dev("CHECKPOINT", "Nadal brak sesji - czekam...");
+              const remainingMinLogin = Math.round((MAX_WAIT_2FA_MS_LOGIN - (Date.now() - startWait2FALogin)) / 60000);
+              log.dev("CHECKPOINT", `Nadal brak sesji - czekam... (pozostało ~${remainingMinLogin} min)`);
             }
           } else {
             process.exit(1);
@@ -705,7 +752,20 @@ async function startWatcher() {
       if (!currentPosts.length) {
         log.warn("WATCHER", "Brak aktywnych postów do monitorowania");
       } else {
-        for (const post of currentPosts) {
+        // Human Behavior: randomizacja kolejności postów
+        const shuffledPosts = shuffleArray(currentPosts);
+        const postOrder = shuffledPosts.map(p => p.name || p.id.slice(0, 8)).join(" → ");
+        log.dev("HUMAN", `Kolejność postów: ${postOrder}`);
+
+        let postIndex = 0;
+        for (const post of shuffledPosts) {
+          // Human Behavior: pauza PRZED każdym postem (poza pierwszym)
+          if (postIndex > 0) {
+            const pauseMs = await betweenPostsPause();
+            log.dev("HUMAN", `Pauza: ${(pauseMs / 1000).toFixed(1)}s`);
+          }
+          postIndex++;
+
           const cacheKey = getCacheKey(post);
           const postLabel = post.name || post.id.slice(0, 8);
 

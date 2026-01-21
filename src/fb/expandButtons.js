@@ -7,9 +7,13 @@
 // Zwraca true, jeśli COŚ zostało kliknięte.
 
 import { INCLUDE_REPLIES } from "../config.js";
+import { humanDelay } from "../utils/sleep.js";
 import log from "../utils/logger.js";
 
 async function clickOneExpandButton(page) {
+  // Human behavior: małe opóźnienie przed szukaniem przycisku
+  await humanDelay(150, 0.4);
+
   const res = await page.evaluate((includeReplies) => {
     const isPhotoView = /[?&]fbid=|\/photo\.php|\/photo\?fbid=|\/photo\/\d/i.test(
       location.href
@@ -173,6 +177,8 @@ async function clickOneExpandButton(page) {
 
   if (res && res.clicked) {
     log.debug("EXPAND", `Klik '${res.text}' (${res.kind})`);
+    // Human behavior: opóźnienie po kliknięciu (czekaj na reakcję UI)
+    await humanDelay(400, 0.3);
   }
   return !!(res && res.clicked);
 }

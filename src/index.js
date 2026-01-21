@@ -70,6 +70,8 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
   _origErr("[uncaughtException]", err);
   fireAlert("uncaughtException", safeToString(err));
+  // Daj czas na wysłanie alertu, potem exit (PM2 zrestartuje)
+  setTimeout(() => process.exit(1), 3000);
 });
 
 // ping “żyję”

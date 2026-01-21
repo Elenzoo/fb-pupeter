@@ -152,6 +152,23 @@ const CAPTCHA_ENABLED = process.env.CAPTCHA_ENABLED !== "false" && !!CAPTCHA_API
  */
 const REMOTE_DEBUG_PORT = Number(process.env.REMOTE_DEBUG_PORT || 0);
 
+/* ==================== HUMAN BEHAVIOR MODE ==================== */
+/**
+ * HUMAN_MODE – włącza symulację zachowań człowieka
+ * - Wolniejsze wpisywanie (~120ms/znak zamiast 35ms)
+ * - Losowa kolejność postów
+ * - Pauzy między postami (3-8 sekund)
+ * Domyślnie: true
+ */
+const HUMAN_MODE = process.env.HUMAN_MODE !== "false";
+
+/**
+ * PROXY_URL – URL do proxy HTTP/SOCKS5
+ * Format: http://user:pass@host:port lub socks5://host:port
+ * Zalecane: residential rotating proxy (Bright Data, Oxylabs, IPRoyal)
+ */
+const PROXY_URL = (process.env.PROXY_URL || "").trim();
+
 export {
   // stary system – optional
   POSTS,
@@ -185,4 +202,8 @@ export {
 
   // remote debug
   REMOTE_DEBUG_PORT,
+
+  // human behavior mode
+  HUMAN_MODE,
+  PROXY_URL,
 };

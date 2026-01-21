@@ -1,6 +1,6 @@
 // src/fb/comments.js
 import { EXPAND_COMMENTS } from "../config.js";
-import { sleepRandom } from "../utils/sleep.js";
+import { sleepRandom, humanDelay } from "../utils/sleep.js";
 import { scrollPost } from "./scroll.js";
 import { acceptCookies, saveCookies } from "./cookies.js";
 import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "./login.js";
@@ -145,8 +145,9 @@ async function switchCommentsFilterToAllLegacy(page) {
   log.dev("FILTER", "Przełączam na 'Wszystkie komentarze'...");
 
   if (!(await page.evaluate(() => !!document.querySelector("div[role='menu']")))) {
+    await humanDelay(200, 0.3); // Human: pauza przed otwarciem menu
     const opened = await openCommentsMenu(page);
-    if (opened) await sleepRandom(250, 450);
+    if (opened) await humanDelay(500, 0.3); // Human: czekaj na animację menu
   }
 
   const picked = await clickMenuOptionByPrefix(page, [
@@ -159,7 +160,7 @@ async function switchCommentsFilterToAllLegacy(page) {
   ]);
 
   if (picked?.ok) {
-    await sleepRandom(250, 450);
+    await humanDelay(400, 0.3);
     await page
       .waitForFunction(() => !document.querySelector("div[role='menu']"), {
         timeout: 2500,
@@ -203,7 +204,7 @@ export async function switchCommentsFilterToNewest(page, url = null) {
       log.dev("FILTER", "Nie udało się otworzyć menu sortowania");
       return { ok: false, reason: "menu-not-opened" };
     }
-    await sleepRandom(250, 450);
+    await humanDelay(400, 0.3);
   }
 
   // Kliknij "Najnowsze" / "Newest"
@@ -215,7 +216,7 @@ export async function switchCommentsFilterToNewest(page, url = null) {
   ]);
 
   if (picked?.ok) {
-    await sleepRandom(250, 450);
+    await humanDelay(400, 0.3);
     await page
       .waitForFunction(() => !document.querySelector("div[role='menu']"), {
         timeout: 2500,
@@ -241,7 +242,7 @@ export async function expandAllComments(page) {
     const didClick = await clickOneExpandButton(page);
     if (!didClick) break;
     clicks++;
-    await sleepRandom(450, 900);
+    await humanDelay(700, 0.3);
   }
   return clicks;
 }
@@ -493,7 +494,7 @@ async function prepareLegacy(page, url) {
   // ✅ TYLKO "Wszystkie komentarze / Pokaż wszystkie"
   // ❌ NIE DOTYKAMY sortowania ("Najnowsze") w ogóle
   await switchCommentsFilterToAllLegacy(page).catch(() => false);
-  await sleepRandom(250, 450);
+  await humanDelay(400, 0.3);
 }
 
 async function loadAllCommentsLegacy(page, opts = {}) {
@@ -572,7 +573,7 @@ async function loadAllCommentsLegacy(page, opts = {}) {
       const did = await clickOneExpandButton(page).catch(() => false);
       if (!did) break;
       clicks++;
-      await sleepRandom(250, 450);
+      await humanDelay(400, 0.3);
     }
 
     await scrollPost(page, 220).catch(() => {});
