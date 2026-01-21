@@ -382,6 +382,325 @@ async function solveRecaptchaViaApi(sitekey, pageUrl, options = {}) {
 }
 
 /**
+ * Rozwiązuje reCAPTCHA z siatką obrazków przez GridTask (2Captcha)
+ * Zamiast generować token, klika fizycznie w kwadraty wskazane przez pracowników.
+ *
+ * @param {Page} page - Puppeteer page
+ * @returns {Promise<{ok: boolean, clicked?: number[], error?: string}>}
+ */
+async function solveGridCaptcha(page) {
+  if (!CAPTCHA_API_KEY) {
+    return { ok: false, error: "missing_api_key" };
+  }
+
+  log.prod("CAPTCHA", "=== GRID CAPTCHA SOLVER ===");
+
+  try {
+    // 1. Znajdź iframe z siatką obrazków (bframe)
+    const frames = page.frames();
+    let gridFrame = null;
+    let gridFrameUrl = null;
+
+    for (const frame of frames) {
+      const url = frame.url();
+      if (url.includes('recaptcha') && url.includes('bframe')) {
+        gridFrame = frame;
+        gridFrameUrl = url;
+        log.dev("CAPTCHA", `Znaleziono bframe: ${url.substring(0, 80)}...`);
+        break;
+      }
+    }
+
+    if (!gridFrame) {
+      log.warn("CAPTCHA", "Nie znaleziono iframe z siatką obrazków");
+      return { ok: false, error: "no_grid_frame" };
+    }
+
+    // 2. Poczekaj na załadowanie siatki
+    await sleepRandom(1500, 2500);
+
+    // 3. Wyciągnij instrukcję (np. "Wybierz wszystkie kwadraty z przejściami dla pieszych")
+    let instruction = "";
+    try {
+      instruction = await gridFrame.evaluate(() => {
+        // Szukaj instrukcji w różnych miejscach
+        const selectors = [
+          '.rc-imageselect-desc-wrapper',
+          '.rc-imageselect-desc',
+          '.rc-imageselect-instructions',
+          'strong',
+          '.rc-imageselect-desc-no-canonical'
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el && el.textContent.trim()) {
+            return el.textContent.trim();
+          }
+        }
+        return "";
+      });
+      log.prod("CAPTCHA", `Instrukcja: "${instruction.substring(0, 60)}..."`);
+    } catch (err) {
+      log.warn("CAPTCHA", `Nie można wyciągnąć instrukcji: ${err?.message}`);
+    }
+
+    // Przetłumacz instrukcję na angielski dla 2Captcha (pracownicy lepiej rozumieją)
+    const instructionEn = translateInstruction(instruction);
+    log.dev("CAPTCHA", `Instrukcja EN: "${instructionEn}"`);
+
+    // 4. Zrób screenshot siatki obrazków
+    let screenshotBase64 = null;
+    try {
+      // Znajdź element z siatką
+      const gridElement = await gridFrame.$('.rc-imageselect-challenge, .rc-imageselect-table-33, .rc-imageselect-table-44, .rc-imageselect');
+
+      if (gridElement) {
+        const screenshotBuffer = await gridElement.screenshot({ encoding: 'base64' });
+        screenshotBase64 = screenshotBuffer;
+        log.prod("CAPTCHA", `Screenshot siatki: ${(screenshotBase64.length / 1024).toFixed(1)}KB`);
+      } else {
+        // Fallback - screenshot całego iframe
+        const frameElement = await page.$('iframe[src*="bframe"]');
+        if (frameElement) {
+          const screenshotBuffer = await frameElement.screenshot({ encoding: 'base64' });
+          screenshotBase64 = screenshotBuffer;
+          log.prod("CAPTCHA", `Screenshot iframe: ${(screenshotBase64.length / 1024).toFixed(1)}KB`);
+        }
+      }
+    } catch (err) {
+      log.error("CAPTCHA", `Błąd screenshot: ${err?.message}`);
+      return { ok: false, error: "screenshot_failed" };
+    }
+
+    if (!screenshotBase64) {
+      return { ok: false, error: "no_screenshot" };
+    }
+
+    // 5. Sprawdź rozmiar siatki (3x3 lub 4x4)
+    let gridSize = "3x3";
+    try {
+      gridSize = await gridFrame.evaluate(() => {
+        if (document.querySelector('.rc-imageselect-table-44')) return "4x4";
+        if (document.querySelector('.rc-imageselect-table-33')) return "3x3";
+        // Policz kwadraty
+        const tiles = document.querySelectorAll('.rc-imageselect-tile');
+        if (tiles.length === 16) return "4x4";
+        return "3x3";
+      });
+      log.dev("CAPTCHA", `Rozmiar siatki: ${gridSize}`);
+    } catch {}
+
+    // 6. Wyślij do 2Captcha GridTask
+    log.prod("CAPTCHA", "Wysyłam GridTask do 2Captcha...");
+
+    const createTaskPayload = {
+      clientKey: CAPTCHA_API_KEY,
+      task: {
+        type: "GridTask",
+        body: screenshotBase64,
+        comment: instructionEn || "Select all squares that match the description",
+        rows: gridSize === "4x4" ? 4 : 3,
+        columns: gridSize === "4x4" ? 4 : 3,
+      },
+    };
+
+    const createRes = await fetch("https://api.2captcha.com/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createTaskPayload),
+    });
+    const createData = await createRes.json();
+
+    if (createData.errorId !== 0) {
+      log.error("CAPTCHA", `Błąd GridTask: ${createData.errorCode} - ${createData.errorDescription}`);
+      return { ok: false, error: createData.errorCode || createData.errorDescription };
+    }
+
+    const taskId = createData.taskId;
+    log.dev("CAPTCHA", `GridTask ID: ${taskId} - czekam na rozwiązanie...`);
+
+    // 7. Polling - czekaj na rozwiązanie (max 120 sekund)
+    const maxAttempts = 24; // 24 * 5s = 120s
+    let clickIndices = [];
+
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+
+      const resultRes = await fetch("https://api.2captcha.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientKey: CAPTCHA_API_KEY,
+          taskId: taskId,
+        }),
+      });
+      const resultData = await resultRes.json();
+
+      if (resultData.errorId !== 0) {
+        log.error("CAPTCHA", `Błąd getTaskResult: ${resultData.errorCode}`);
+        return { ok: false, error: resultData.errorCode };
+      }
+
+      if (resultData.status === "ready") {
+        clickIndices = resultData.solution?.click || [];
+        log.success("CAPTCHA", `GridTask rozwiązany! Kwadraty: [${clickIndices.join(', ')}]`);
+        break;
+      }
+
+      log.debug("CAPTCHA", `Czekam na GridTask... (${i + 1}/${maxAttempts})`);
+    }
+
+    if (!clickIndices.length) {
+      log.warn("CAPTCHA", "Brak kwadratów do kliknięcia (może 'Pomiń'?)");
+      // Może trzeba kliknąć "Pomiń" jeśli nie ma pasujących obrazków
+      try {
+        const skipBtn = await gridFrame.$('.rc-imageselect-incorrect-response, button:has-text("Pomiń"), button:has-text("Skip")');
+        if (skipBtn) {
+          await skipBtn.click();
+          await sleepRandom(1000, 2000);
+          return { ok: true, clicked: [], skipped: true };
+        }
+      } catch {}
+      return { ok: false, error: "no_tiles_to_click" };
+    }
+
+    // 8. Kliknij wskazane kwadraty
+    log.prod("CAPTCHA", `Klikam ${clickIndices.length} kwadratów...`);
+
+    for (const index of clickIndices) {
+      try {
+        // Indeksy z 2Captcha są 1-based (1 = górny lewy)
+        const tileIndex = index - 1; // konwertuj na 0-based
+
+        const clicked = await gridFrame.evaluate((idx) => {
+          const tiles = document.querySelectorAll('.rc-imageselect-tile');
+          if (tiles[idx]) {
+            tiles[idx].click();
+            return true;
+          }
+          // Alternatywny selektor
+          const cells = document.querySelectorAll('td.rc-imageselect-tile');
+          if (cells[idx]) {
+            cells[idx].click();
+            return true;
+          }
+          return false;
+        }, tileIndex);
+
+        if (clicked) {
+          log.dev("CAPTCHA", `Kliknięto kwadrat ${index}`);
+        } else {
+          log.warn("CAPTCHA", `Nie znaleziono kwadratu ${index}`);
+        }
+
+        // Krótka pauza między kliknięciami (human-like)
+        await sleepRandom(200, 500);
+      } catch (err) {
+        log.warn("CAPTCHA", `Błąd kliknięcia kwadratu ${index}: ${err?.message}`);
+      }
+    }
+
+    // 9. Kliknij przycisk "Sprawdź" / "Verify"
+    await sleepRandom(500, 1000);
+
+    try {
+      const verifyBtn = await gridFrame.$('#recaptcha-verify-button, .rc-button-default, button[id*="verify"]');
+      if (verifyBtn) {
+        log.prod("CAPTCHA", "Klikam 'Sprawdź'...");
+        await verifyBtn.click();
+        await sleepRandom(2000, 3000);
+      }
+    } catch (err) {
+      log.warn("CAPTCHA", `Błąd kliknięcia Verify: ${err?.message}`);
+    }
+
+    return { ok: true, clicked: clickIndices };
+
+  } catch (err) {
+    log.error("CAPTCHA", `Błąd GridTask: ${err?.message}`);
+    return { ok: false, error: err?.message };
+  }
+}
+
+/**
+ * Tłumaczy polską instrukcję reCAPTCHA na angielski
+ */
+function translateInstruction(pl) {
+  const translations = {
+    "przejściami dla pieszych": "crosswalks",
+    "przejścia dla pieszych": "crosswalks",
+    "sygnalizatorami świetlnymi": "traffic lights",
+    "sygnalizatory świetlne": "traffic lights",
+    "światłami": "traffic lights",
+    "samochodami": "cars",
+    "samochody": "cars",
+    "autobusami": "buses",
+    "autobusy": "buses",
+    "motocyklami": "motorcycles",
+    "motocykle": "motorcycles",
+    "rowerami": "bicycles",
+    "rowery": "bicycles",
+    "hydrantami": "fire hydrants",
+    "hydranty": "fire hydrants",
+    "mostami": "bridges",
+    "mosty": "bridges",
+    "schodami": "stairs",
+    "schody": "stairs",
+    "górami": "mountains",
+    "góry": "mountains",
+    "palmami": "palm trees",
+    "palmy": "palm trees",
+    "łodziami": "boats",
+    "łodzie": "boats",
+    "taksówkami": "taxis",
+    "taksówki": "taxis",
+    "chimneys": "chimneys",
+    "kominami": "chimneys",
+    "kominy": "chimneys",
+    "parking meters": "parking meters",
+    "parkomatami": "parking meters",
+    "parkomaty": "parking meters",
+  };
+
+  let en = pl.toLowerCase();
+
+  // Zamień polskie frazy na angielskie
+  for (const [plPhrase, enPhrase] of Object.entries(translations)) {
+    if (en.includes(plPhrase.toLowerCase())) {
+      return `Select all squares with ${enPhrase}`;
+    }
+  }
+
+  // Jeśli nie znaleziono tłumaczenia, zwróć oryginalną instrukcję
+  return pl || "Select all matching images";
+}
+
+/**
+ * Sprawdza czy pojawiła się siatka obrazków (po kliknięciu checkboxa)
+ */
+async function hasImageGrid(page) {
+  try {
+    const frames = page.frames();
+    for (const frame of frames) {
+      if (frame.url().includes('recaptcha') && frame.url().includes('bframe')) {
+        // Sprawdź czy siatka jest widoczna
+        const hasGrid = await frame.evaluate(() => {
+          const grid = document.querySelector('.rc-imageselect-challenge, .rc-imageselect-table-33, .rc-imageselect-table-44');
+          return grid && grid.offsetHeight > 0;
+        }).catch(() => false);
+
+        if (hasGrid) {
+          return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * FB login helpers – PRO (NO COOLDOWN)
  *
  * Najważniejsze:
@@ -815,6 +1134,64 @@ async function fillLoginFormBestEffort(page) {
         log.debug("CAPTCHA", `Błąd kliknięcia checkboxa: ${err?.message}`);
       }
 
+      // KROK 2: Sprawdź czy pojawiła się siatka obrazków
+      await sleepRandom(1000, 2000);
+      const gridDetected = await hasImageGrid(page);
+
+      if (gridDetected) {
+        log.prod("CAPTCHA", "Wykryto siatkę obrazków - używam GridTask...");
+
+        // Próby rozwiązania przez GridTask
+        const maxGridRetries = 3;
+        for (let gridAttempt = 1; gridAttempt <= maxGridRetries; gridAttempt++) {
+          log.prod("CAPTCHA", `GridTask próba ${gridAttempt}/${maxGridRetries}...`);
+
+          const gridResult = await solveGridCaptcha(page);
+
+          if (gridResult.ok) {
+            log.success("CAPTCHA", `GridTask sukces! Kliknięto: [${gridResult.clicked?.join(', ') || 'pominięto'}]`);
+
+            // Sprawdź czy captcha zniknęła (sukces)
+            await sleepRandom(2000, 3000);
+            const stillHasGrid = await hasImageGrid(page);
+
+            if (!stillHasGrid) {
+              log.success("CAPTCHA", "Siatka zniknęła - captcha rozwiązana!");
+              // Kliknij submit jeśli trzeba
+              await clickSubmitButton(page);
+              return true;
+            } else {
+              log.warn("CAPTCHA", "Siatka nadal widoczna - próbuję ponownie...");
+              // Może pojawiła się nowa siatka - kontynuuj
+            }
+          } else {
+            log.warn("CAPTCHA", `GridTask błąd: ${gridResult.error}`);
+
+            if (gridResult.error === 'ERROR_CAPTCHA_UNSOLVABLE' && gridAttempt < maxGridRetries) {
+              // Kliknij "Nowy obrazek" jeśli dostępny
+              try {
+                const frames = page.frames();
+                for (const frame of frames) {
+                  if (frame.url().includes('bframe')) {
+                    const newImageBtn = await frame.$('#recaptcha-reload-button, .rc-button-reload');
+                    if (newImageBtn) {
+                      log.prod("CAPTCHA", "Klikam 'Nowy obrazek'...");
+                      await newImageBtn.click();
+                      await sleepRandom(2000, 3000);
+                    }
+                    break;
+                  }
+                }
+              } catch {}
+            }
+          }
+        }
+
+        // GridTask nie zadziałał - fallback do token method
+        log.warn("CAPTCHA", "GridTask wyczerpany - próbuję metodę tokenową...");
+      }
+
+      // KROK 3 (fallback): Metoda tokenowa (dla przypadków bez siatki lub gdy GridTask nie zadziałał)
       // Wyciągnij data-s
       let dataS = null;
       try {
