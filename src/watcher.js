@@ -6,6 +6,7 @@ import RecaptchaPlugin from "puppeteer-extra-plugin-recaptcha";
 // Stealth Plugin - ukrywa automatyzację (ZAWSZE pierwszy)
 puppeteer.use(StealthPlugin());
 console.log("[STEALTH] Plugin stealth włączony");
+
 import fs from "fs";
 import path from "path";
 import {
@@ -24,14 +25,11 @@ import {
   PROXY_URL,
 } from "./config.js";
 
-// Konfiguracja captcha solver (2Captcha)
+// Konfiguracja captcha solver (2Captcha) - zostawiam jak masz (nie rozbudowuję tego)
 if (CAPTCHA_ENABLED && CAPTCHA_API_KEY) {
   puppeteer.use(
     RecaptchaPlugin({
-      provider: {
-        id: "2captcha",
-        token: CAPTCHA_API_KEY,
-      },
+      provider: { id: "2captcha", token: CAPTCHA_API_KEY },
       visualFeedback: true,
     })
   );
@@ -70,13 +68,12 @@ const lastCounts = new Map();
 const knownCommentsPerPost = new Map();
 
 // Limity dla knownIds - zapobiega memory leak
-const MAX_KNOWN_IDS_PER_POST = 1000;  // max komentarzy na post w pamięci
-const KNOWN_IDS_TRIM_TO = 800;        // do ilu przycinać gdy przekroczy limit
+const MAX_KNOWN_IDS_PER_POST = 1000;
+const KNOWN_IDS_TRIM_TO = 800;
 
 for (const [url, entry] of Object.entries(commentsCache)) {
   if (typeof entry?.lastCount === "number") lastCounts.set(url, entry.lastCount);
   if (Array.isArray(entry?.knownIds)) {
-    // Przytnij podczas ładowania jeśli za dużo
     const ids = entry.knownIds.slice(-MAX_KNOWN_IDS_PER_POST);
     knownCommentsPerPost.set(url, new Set(ids));
   }
@@ -86,19 +83,16 @@ let currentPosts = [];
 let lastRefreshAny = 0;
 let cycleNumber = 0;
 
+// ======= Stabilność: eskalacja błędów =======
+let consecutiveHardFails = 0; // licznik kolejnych fail-i typu NAV/PROTOCOL/TARGET
+const HARD_FAILS_RESET_CONTEXT = Number(process.env.HARD_FAILS_RESET_CONTEXT || 3);
+const HARD_FAILS_RESET_BROWSER = Number(process.env.HARD_FAILS_RESET_BROWSER || 5);
+const MAX_POST_RETRY = Number(process.env.POST_RETRY_MAX || 1); // retry per post na nowym page
+const BROWSER_RECYCLE_EVERY_CYCLES = Number(process.env.BROWSER_RECYCLE_EVERY_CYCLES || 10);
+
+// ======= Stary licznik nawigacji (zostawiam, ale ulepszamy wykrywanie) =======
 let navErrorCount = 0;
 const MAX_NAV_ERRORS = 5;
-
-function isNavigationError(err) {
-  if (!err) return false;
-  const msg = String(err.message || err).toLowerCase();
-  return (
-    msg.includes("safegoto-failed") ||
-    msg.includes("navigation timeout") ||
-    msg.includes("net::err_connection_timed_out") ||
-    msg.includes("net::err_timed_out")
-  );
-}
 
 function envBool(name, def = false) {
   const raw = String(process.env[name] ?? "").trim().toLowerCase();
@@ -135,7 +129,6 @@ async function sendTelegramIfFresh(post, comments, ctx = "normal") {
     };
   });
 
-  // log wieku komentarzy (tylko DEBUG)
   for (const c of normalized) {
     log.debug("TELEGRAM", `Komentarz ${c?.id}`, {
       ctx,
@@ -182,6 +175,116 @@ async function applyStealth(page) {
 }
 
 /* ============================================================
+   ===================   STABILNOŚĆ CORE   ====================
+   ============================================================ */
+
+function classifyError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+
+  const isTimeout =
+    msg.includes("timeout") ||
+    msg.includes("navigation timeout") ||
+    msg.includes("timed out");
+
+  const isNet =
+    msg.includes("net::err_") ||
+    msg.includes("err_connection") ||
+    msg.includes("err_internet_disconnected") ||
+    msg.includes("err_name_not_resolved") ||
+    msg.includes("err_connection_reset");
+
+  const isContext =
+    msg.includes("execution context was destroyed") ||
+    msg.includes("cannot find context") ||
+    msg.includes("context") && msg.includes("destroy");
+
+  const isFrame =
+    msg.includes("frame was detached") ||
+    msg.includes("detached frame");
+
+  const isTargetClosed =
+    msg.includes("target closed") ||
+    msg.includes("session closed") ||
+    msg.includes("browser has disconnected") ||
+    msg.includes("disconnected") ||
+    msg.includes("protocol error") && msg.includes("closed");
+
+  const isSafeGoto =
+    msg.includes("safegoto-failed");
+
+  const isNavigation =
+    isTimeout || isNet || isSafeGoto || msg.includes("navigation");
+
+  // hardFail = coś co zwykle naprawia reset page/context/browser
+  const hardFail = isTargetClosed || isContext || isFrame || isNavigation;
+
+  return {
+    msg,
+    isTimeout,
+    isNet,
+    isContext,
+    isFrame,
+    isTargetClosed,
+    isSafeGoto,
+    isNavigation,
+    hardFail,
+  };
+}
+
+function isNavigationError(err) {
+  const c = classifyError(err);
+  return c.isNavigation || c.isContext || c.isFrame;
+}
+
+async function safeClosePage(page) {
+  if (!page) return;
+  try {
+    await page.close({ runBeforeUnload: false });
+  } catch {}
+}
+
+async function safeCloseContext(ctx) {
+  if (!ctx) return;
+  try {
+    await ctx.close();
+  } catch {}
+}
+
+async function safeCloseBrowser(browser) {
+  if (!browser) return;
+  try {
+    await browser.close();
+  } catch {}
+}
+
+async function setupLightweightPage(page) {
+  // blokuj ciężkie rzeczy → mniejsze RAM i mniej OOM
+  const blockImages = envBool("BLOCK_IMAGES", true);
+  const blockMedia = envBool("BLOCK_MEDIA", true);
+  const blockFonts = envBool("BLOCK_FONTS", true);
+
+  if (blockImages || blockMedia || blockFonts) {
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      try {
+        const type = req.resourceType();
+        if (blockImages && type === "image") return req.abort();
+        if (blockMedia && (type === "media")) return req.abort();
+        if (blockFonts && (type === "font")) return req.abort();
+        return req.continue();
+      } catch {
+        try { return req.continue(); } catch {}
+      }
+    });
+  }
+
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(90000);
+  await page.setViewport({ width: 1280, height: 720 });
+  await applyStealth(page);
+}
+
+/* ============================================================
    ===============   PANEL POSTS (data/posts.json)   ===========
    ============================================================ */
 
@@ -198,37 +301,6 @@ function normalizeUrl(u) {
   const x = String(u).trim();
   if (!/^https?:\/\/.+/i.test(x)) return "";
   return x;
-}
-
-function makePostKey(url) {
-  try {
-    const u = new URL(String(url || "").trim());
-    for (const k of Array.from(u.searchParams.keys())) {
-      if (k.startsWith("__") || ["ref", "notif_id", "notif_t", "refid"].includes(k)) {
-        u.searchParams.delete(k);
-      }
-    }
-    if (u.pathname.includes("permalink.php")) {
-      const s = u.searchParams.get("story_fbid");
-      const id = u.searchParams.get("id");
-      if (s && id) return `permalink:${id}:${s}`;
-    }
-    if (u.pathname.includes("story.php")) {
-      const s = u.searchParams.get("story_fbid");
-      const id = u.searchParams.get("id");
-      if (s && id) return `story:${id}:${s}`;
-    }
-    const mPosts = u.pathname.match(/\/posts\/([^/?#]+)/i);
-    if (mPosts?.[1]) return `posts:${mPosts[1]}`;
-    const v = u.searchParams.get("v");
-    if (u.pathname.includes("/watch") && v) return `watch:${v}`;
-    const mVid = u.pathname.match(/\/videos\/([^/?#]+)/i);
-    if (mVid?.[1]) return `videos:${mVid[1]}`;
-    const q = u.searchParams.toString();
-    return `url:${u.host}${u.pathname}${q ? "?" + q : ""}`;
-  } catch {
-    return `url:${String(url || "").trim()}`;
-  }
 }
 
 function readPanelPosts() {
@@ -331,9 +403,7 @@ async function fetchPostsFromApi() {
 
   try {
     const headers = { "Content-Type": "application/json" };
-    if (POSTS_API_TOKEN) {
-      headers["Authorization"] = `Bearer ${POSTS_API_TOKEN}`;
-    }
+    if (POSTS_API_TOKEN) headers["Authorization"] = `Bearer ${POSTS_API_TOKEN}`;
 
     const res = await fetch(POSTS_API_URL, {
       method: "GET",
@@ -478,31 +548,19 @@ function getKnownSetForPost(cacheKey) {
   return set;
 }
 
-/**
- * Przycina Set knownIds gdy przekroczy limit (FIFO - usuwa najstarsze).
- * Zapobiega memory leak przy długim działaniu.
- */
 function cleanupKnownIds(set) {
   if (set.size <= MAX_KNOWN_IDS_PER_POST) return;
 
   const arr = Array.from(set);
   const toRemove = arr.slice(0, arr.length - KNOWN_IDS_TRIM_TO);
-  for (const id of toRemove) {
-    set.delete(id);
-  }
+  for (const id of toRemove) set.delete(id);
 
   log.debug("CACHE", `Przycięto knownIds: ${arr.length} → ${set.size}`);
 }
 
-
-/**
- * Zwraca całkowitą liczbę knownIds w pamięci (dla monitoringu)
- */
 function getTotalKnownIdsCount() {
   let total = 0;
-  for (const set of knownCommentsPerPost.values()) {
-    total += set.size;
-  }
+  for (const set of knownCommentsPerPost.values()) total += set.size;
   return total;
 }
 
@@ -525,7 +583,7 @@ function flushCacheToDisk() {
 }
 
 /* ============================================================
-   =====================   GŁÓWNY WATCHER   ===================
+   =====================   BROWSER FACTORY   ===================
    ============================================================ */
 
 const isDev = process.env.NODE_ENV !== "production";
@@ -539,6 +597,54 @@ function getExecutablePath() {
   return String(p || "").trim() || undefined;
 }
 
+function buildLaunchOptions() {
+  const wantHeadless = envBool("HEADLESS_BROWSER", true);
+  const headlessMode = wantHeadless ? (isDev ? true : "new") : false;
+
+  const linux = process.platform === "linux";
+  const executablePath = getExecutablePath();
+
+  const args = [
+    "--disable-notifications",
+    "--disable-blink-features=AutomationControlled",
+  ];
+
+  if (linux) {
+    args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+  }
+
+  if (REMOTE_DEBUG_PORT > 0) {
+    args.push(`--remote-debugging-port=${REMOTE_DEBUG_PORT}`);
+    args.push("--remote-debugging-address=127.0.0.1");
+    log.prod(
+      "DEBUG",
+      `Remote debugging na porcie ${REMOTE_DEBUG_PORT} - połącz przez: ssh -L ${REMOTE_DEBUG_PORT}:localhost:${REMOTE_DEBUG_PORT} user@server`
+    );
+  }
+
+  if (PROXY_URL) {
+    args.push(`--proxy-server=${PROXY_URL}`);
+    const safeProxyUrl = PROXY_URL.replace(/\/\/([^:]+):([^@]+)@/, "//***:***@");
+    log.prod("PROXY", `Używam proxy: ${safeProxyUrl}`);
+  }
+
+  if (HUMAN_MODE) {
+    log.prod("HUMAN", "Human Behavior Mode włączony");
+  }
+
+  return {
+    headless: headlessMode,
+    defaultViewport: null,
+    executablePath,
+    args,
+    ignoreDefaultArgs: ["--enable-automation"],
+  };
+}
+
+/* ============================================================
+   =====================   GŁÓWNY WATCHER   ===================
+   ============================================================ */
+
 async function startWatcher() {
   log.header("FB Comment Watcher");
   log.prod("WATCHER", `Start - interwał: ${Math.round(CHECK_INTERVAL_MS / 1000)}s`, {
@@ -547,219 +653,179 @@ async function startWatcher() {
   });
 
   const loop = async () => {
-    let browser = null;
-    let page = null;
-    let hadNavErrorThisRound = false;
     const cycleStart = Date.now();
     cycleNumber++;
     let newCommentsTotal = 0;
     let errorsCount = 0;
+    let hadNavErrorThisRound = false;
+
+    let browser = null;
+    let ctx = null;
 
     try {
       log.prod("WATCHER", `Cykl #${cycleNumber} start`, { posts: currentPosts.length });
 
-      const wantHeadless = envBool("HEADLESS_BROWSER", true);
-      const headlessMode = wantHeadless ? (isDev ? true : "new") : false;
-
-      const linux = process.platform === "linux";
-      const executablePath = getExecutablePath();
-
-      const args = [
-        "--disable-notifications",
-        "--disable-blink-features=AutomationControlled",
-      ];
-
-      if (linux) {
-        args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
-      }
-
-      // Remote debugging - pozwala podłączyć się przez chrome://inspect
-      if (REMOTE_DEBUG_PORT > 0) {
-        args.push(`--remote-debugging-port=${REMOTE_DEBUG_PORT}`);
-        args.push("--remote-debugging-address=127.0.0.1");
-        log.prod("DEBUG", `Remote debugging na porcie ${REMOTE_DEBUG_PORT} - połącz przez: ssh -L ${REMOTE_DEBUG_PORT}:localhost:${REMOTE_DEBUG_PORT} user@server`);
-      }
-
-      // Proxy - residential rotating proxy zmniejsza ryzyko banów
-      if (PROXY_URL) {
-        args.push(`--proxy-server=${PROXY_URL}`);
-        // Ukryj credentials w logu
-        const safeProxyUrl = PROXY_URL.replace(/\/\/([^:]+):([^@]+)@/, "//***:***@");
-        log.prod("PROXY", `Używam proxy: ${safeProxyUrl}`);
-      }
-
-      // Human Mode info
-      if (HUMAN_MODE) {
-        log.prod("HUMAN", "Human Behavior Mode włączony");
-      }
-
-      browser = await puppeteer.launch({
-        headless: headlessMode,
-        defaultViewport: null,
-        executablePath,
-        args,
-        ignoreDefaultArgs: ["--enable-automation"],
-      });
-
-      page = await browser.newPage();
-      await applyStealth(page);
-
-      page.setDefaultNavigationTimeout(90000);
-      page.setDefaultTimeout(90000);
-      await page.setViewport({ width: 1280, height: 720 });
-
-      // cookies + login
-      await loadCookies(page);
-      await page.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
-
-      let loggedIn = await checkIfLogged(page);
-
-      // === CHECKPOINT DETECTION (tylko alert) ===
-      const checkpoint = await isCheckpoint(page);
-      if (checkpoint) {
-        const checkpointType = await getCheckpointType(page);
-        log.warn("CHECKPOINT", `Wykryto checkpoint: ${checkpointType}`);
-
-        // Próba rozwiązania captcha (jeśli to captcha, nie 2FA)
-        if (CAPTCHA_ENABLED) {
-          const captchaResult = await solveCaptchaIfPresent(page);
-          if (captchaResult.solved) {
-            log.success("CAPTCHA", "Captcha rozwiązana!");
-            await new Promise(r => setTimeout(r, 2000));
-            loggedIn = await checkIfLogged(page);
-            if (!loggedIn) {
-              await fbLogin(page);
-              loggedIn = await checkIfLogged(page);
-            }
-          }
-        }
-
-        // Jeśli nadal nie zalogowany - alert i stop (lub czekaj przy remote debug)
-        if (!loggedIn) {
-          await sendOwnerAlert(
-            "CHECKPOINT - Wymagana interwencja",
-            `Facebook wymaga weryfikacji tożsamości.\n\n` +
-            `Typ: ${checkpointType}\n\n` +
-            `Wymagane działanie:\n` +
-            `1. Zaloguj się ręcznie i zaktualizuj cookies.json\n` +
-            `2. Zmień dane logowania w .env jeśli potrzeba\n` +
-            `3. PM2 automatycznie wznowi pracę`
-          );
-
-          // Gdy remote debug - czekaj na ręczną interwencję zamiast wychodzić
-          if (REMOTE_DEBUG_PORT > 0) {
-            log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
-            log.warn("CHECKPOINT", "Przeglądarka czeka na ręczną interwencję.");
-            log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect, potem naciśnij Ctrl+C i uruchom ponownie.");
-            log.warn("CHECKPOINT", "Sprawdzam co 30s czy jesteś zalogowany...");
-
-            // Czekaj w pętli aż użytkownik ręcznie rozwiąże checkpoint (max 30 min)
-            const MAX_WAIT_2FA_MS = 30 * 60 * 1000; // 30 minut
-            const startWait2FA = Date.now();
-            while (true) {
-              if (Date.now() - startWait2FA > MAX_WAIT_2FA_MS) {
-                log.error("CHECKPOINT", "Timeout oczekiwania na 2FA (30 min) - restart procesu");
-                await sendOwnerAlert("TIMEOUT 2FA", "Przekroczono 30 minut oczekiwania na ręczną interwencję. Proces zostanie zrestartowany.");
-                process.exit(1);
-              }
-              await new Promise(r => setTimeout(r, 30000));
-              const nowLogged = await checkIfLogged(page).catch(() => false);
-              if (nowLogged) {
-                log.success("CHECKPOINT", "Wykryto sesję! Zapisuję cookies i kontynuuję...");
-                await saveCookies(page);
-                loggedIn = true;
-                break;
-              }
-              const remainingMin = Math.round((MAX_WAIT_2FA_MS - (Date.now() - startWait2FA)) / 60000);
-              log.dev("CHECKPOINT", `Nadal brak sesji - czekam... (pozostało ~${remainingMin} min)`);
-            }
-          } else {
-            log.error("CHECKPOINT", "Wymagana interwencja - zatrzymuję proces");
-            process.exit(1);
-          }
-        }
-      }
-      // === KONIEC CHECKPOINT DETECTION ===
-
-      if (!loggedIn) {
-        log.dev("LOGIN", "Brak sesji – logowanie...");
-        const LOGIN_TIMEOUT_MS = 120000; // 2 minuty na login
-        try {
-          await Promise.race([
-            fbLogin(page),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Login timeout (2 min)')), LOGIN_TIMEOUT_MS))
-          ]);
-        } catch (loginErr) {
-          log.error("LOGIN", `Błąd logowania: ${loginErr.message}`);
-          await sendOwnerAlert("LOGIN ERROR", `Logowanie nie powiodło się: ${loginErr.message}`);
-          throw loginErr;
-        }
-        loggedIn = await checkIfLogged(page);
-
-        // Sprawdź checkpoint po próbie logowania
-        const checkpointAfterLogin = await isCheckpoint(page);
-        if (checkpointAfterLogin) {
-          const checkpointType = await getCheckpointType(page);
-          log.warn("CHECKPOINT", `Checkpoint po logowaniu: ${checkpointType}`);
-
-          await sendOwnerAlert(
-            "CHECKPOINT po logowaniu",
-            `Facebook wymaga weryfikacji po próbie logowania.\n\nTyp: ${checkpointType}`
-          );
-
-          // Gdy remote debug - czekaj na ręczną interwencję (max 30 min)
-          if (REMOTE_DEBUG_PORT > 0) {
-            log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
-            log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect. Sprawdzam co 30s...");
-
-            const MAX_WAIT_2FA_MS_LOGIN = 30 * 60 * 1000; // 30 minut
-            const startWait2FALogin = Date.now();
-            while (true) {
-              if (Date.now() - startWait2FALogin > MAX_WAIT_2FA_MS_LOGIN) {
-                log.error("CHECKPOINT", "Timeout oczekiwania na 2FA po logowaniu (30 min) - restart procesu");
-                await sendOwnerAlert("TIMEOUT 2FA LOGIN", "Przekroczono 30 minut oczekiwania na ręczną interwencję po logowaniu. Proces zostanie zrestartowany.");
-                process.exit(1);
-              }
-              await new Promise(r => setTimeout(r, 30000));
-              const nowLogged = await checkIfLogged(page).catch(() => false);
-              if (nowLogged) {
-                log.success("CHECKPOINT", "Wykryto sesję! Zapisuję cookies i kontynuuję...");
-                await saveCookies(page);
-                loggedIn = true;
-                break;
-              }
-              const remainingMinLogin = Math.round((MAX_WAIT_2FA_MS_LOGIN - (Date.now() - startWait2FALogin)) / 60000);
-              log.dev("CHECKPOINT", `Nadal brak sesji - czekam... (pozostało ~${remainingMinLogin} min)`);
-            }
-          } else {
-            process.exit(1);
-          }
-        }
-
-        if (loggedIn) {
-          log.success("LOGIN", "Zalogowano pomyślnie");
-          await saveCookies(page);
-        } else {
-          log.error("LOGIN", "Logowanie nieudane");
-        }
-      } else {
-        log.dev("LOGIN", "Użyto istniejącej sesji");
-      }
-
-      // posts
+      // Odśwież posty na start cyklu
       await refreshPostsIfNeeded(true);
+
+      // (Opcjonalna) prewencja: recycle browser co N cykli
+      const shouldRecycleByCycle =
+        BROWSER_RECYCLE_EVERY_CYCLES > 0 && cycleNumber % BROWSER_RECYCLE_EVERY_CYCLES === 0;
+
+      // Start browser/context
+      browser = await puppeteer.launch(buildLaunchOptions());
+      ctx = await browser.createBrowserContext(); // izolacja sesji per cykl (stabilniej niż default)
+
+      // ====== LOGIN FLOW na osobnym page (jednorazowy) ======
+      {
+        const loginPage = await ctx.newPage();
+        await setupLightweightPage(loginPage);
+
+        await loadCookies(loginPage);
+        await loginPage.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
+        let loggedIn = await checkIfLogged(loginPage);
+
+        // CHECKPOINT DETECTION (tylko alert) — zostawiam Twój flow
+        const checkpoint = await isCheckpoint(loginPage);
+        if (checkpoint) {
+          const checkpointType = await getCheckpointType(loginPage);
+          log.warn("CHECKPOINT", `Wykryto checkpoint: ${checkpointType}`);
+
+          if (CAPTCHA_ENABLED) {
+            const captchaResult = await solveCaptchaIfPresent(loginPage);
+            if (captchaResult.solved) {
+              log.success("CAPTCHA", "Captcha rozwiązana!");
+              await new Promise((r) => setTimeout(r, 2000));
+              loggedIn = await checkIfLogged(loginPage);
+              if (!loggedIn) {
+                await fbLogin(loginPage);
+                loggedIn = await checkIfLogged(loginPage);
+              }
+            }
+          }
+
+          if (!loggedIn) {
+            await sendOwnerAlert(
+              "CHECKPOINT - Wymagana interwencja",
+              `Facebook wymaga weryfikacji tożsamości.\n\n` +
+                `Typ: ${checkpointType}\n\n` +
+                `Wymagane działanie:\n` +
+                `1. Zaloguj się ręcznie i zaktualizuj cookies.json\n` +
+                `2. Zmień dane logowania w .env jeśli potrzeba\n` +
+                `3. PM2 automatycznie wznowi pracę`
+            );
+
+            if (REMOTE_DEBUG_PORT > 0) {
+              log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
+              log.warn("CHECKPOINT", "Przeglądarka czeka na ręczną interwencję.");
+              log.warn("CHECKPOINT", "Sprawdzam co 30s czy jesteś zalogowany...");
+
+              const MAX_WAIT_2FA_MS = 30 * 60 * 1000;
+              const startWait2FA = Date.now();
+              while (true) {
+                if (Date.now() - startWait2FA > MAX_WAIT_2FA_MS) {
+                  log.error("CHECKPOINT", "Timeout oczekiwania na 2FA (30 min) - restart procesu");
+                  await sendOwnerAlert(
+                    "TIMEOUT 2FA",
+                    "Przekroczono 30 minut oczekiwania na ręczną interwencję. Proces zostanie zrestartowany."
+                  );
+                  process.exit(1);
+                }
+                await new Promise((r) => setTimeout(r, 30000));
+                const nowLogged = await checkIfLogged(loginPage).catch(() => false);
+                if (nowLogged) {
+                  log.success("CHECKPOINT", "Wykryto sesję! Zapisuję cookies i kontynuuję...");
+                  await saveCookies(loginPage);
+                  loggedIn = true;
+                  break;
+                }
+                const remainingMin = Math.round((MAX_WAIT_2FA_MS - (Date.now() - startWait2FA)) / 60000);
+                log.dev("CHECKPOINT", `Nadal brak sesji - czekam... (pozostało ~${remainingMin} min)`);
+              }
+            } else {
+              log.error("CHECKPOINT", "Wymagana interwencja - zatrzymuję proces");
+              process.exit(1);
+            }
+          }
+        }
+
+        if (!loggedIn) {
+          log.dev("LOGIN", "Brak sesji – logowanie...");
+          const LOGIN_TIMEOUT_MS = 120000;
+          try {
+            await Promise.race([
+              fbLogin(loginPage),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("Login timeout (2 min)")), LOGIN_TIMEOUT_MS)),
+            ]);
+          } catch (loginErr) {
+            log.error("LOGIN", `Błąd logowania: ${loginErr.message}`);
+            await sendOwnerAlert("LOGIN ERROR", `Logowanie nie powiodło się: ${loginErr.message}`);
+            throw loginErr;
+          }
+
+          loggedIn = await checkIfLogged(loginPage);
+
+          const checkpointAfterLogin = await isCheckpoint(loginPage);
+          if (checkpointAfterLogin) {
+            const checkpointType = await getCheckpointType(loginPage);
+            log.warn("CHECKPOINT", `Checkpoint po logowaniu: ${checkpointType}`);
+
+            await sendOwnerAlert("CHECKPOINT po logowaniu", `Facebook wymaga weryfikacji po próbie logowania.\n\nTyp: ${checkpointType}`);
+
+            if (REMOTE_DEBUG_PORT > 0) {
+              log.warn("CHECKPOINT", "=== REMOTE DEBUG MODE ===");
+              log.warn("CHECKPOINT", "Zrób 2FA/checkpoint w chrome://inspect. Sprawdzam co 30s...");
+
+              const MAX_WAIT_2FA_MS_LOGIN = 30 * 60 * 1000;
+              const startWait2FALogin = Date.now();
+              while (true) {
+                if (Date.now() - startWait2FALogin > MAX_WAIT_2FA_MS_LOGIN) {
+                  log.error("CHECKPOINT", "Timeout oczekiwania na 2FA po logowaniu (30 min) - restart procesu");
+                  await sendOwnerAlert(
+                    "TIMEOUT 2FA LOGIN",
+                    "Przekroczono 30 minut oczekiwania na ręczną interwencję po logowaniu. Proces zostanie zrestartowany."
+                  );
+                  process.exit(1);
+                }
+                await new Promise((r) => setTimeout(r, 30000));
+                const nowLogged = await checkIfLogged(loginPage).catch(() => false);
+                if (nowLogged) {
+                  log.success("CHECKPOINT", "Wykryto sesję! Zapisuję cookies i kontynuuję...");
+                  await saveCookies(loginPage);
+                  loggedIn = true;
+                  break;
+                }
+                const remainingMinLogin = Math.round((MAX_WAIT_2FA_MS_LOGIN - (Date.now() - startWait2FALogin)) / 60000);
+                log.dev("CHECKPOINT", `Nadal brak sesji - czekam... (pozostało ~${remainingMinLogin} min)`);
+              }
+            } else {
+              process.exit(1);
+            }
+          }
+
+          if (loggedIn) {
+            log.success("LOGIN", "Zalogowano pomyślnie");
+            await saveCookies(loginPage);
+          } else {
+            log.error("LOGIN", "Logowanie nieudane");
+          }
+        } else {
+          log.dev("LOGIN", "Użyto istniejącej sesji");
+        }
+
+        await safeClosePage(loginPage);
+      }
 
       if (!currentPosts.length) {
         log.warn("WATCHER", "Brak aktywnych postów do monitorowania");
       } else {
-        // Human Behavior: randomizacja kolejności postów
         const shuffledPosts = shuffleArray(currentPosts);
-        const postOrder = shuffledPosts.map(p => p.name || p.id.slice(0, 8)).join(" → ");
+        const postOrder = shuffledPosts.map((p) => p.name || p.id.slice(0, 8)).join(" → ");
         log.dev("HUMAN", `Kolejność postów: ${postOrder}`);
 
         let postIndex = 0;
+
         for (const post of shuffledPosts) {
-          // Human Behavior: pauza PRZED każdym postem (poza pierwszym)
           if (postIndex > 0) {
             const pauseMs = await betweenPostsPause();
             log.dev("HUMAN", `Pauza: ${(pauseMs / 1000).toFixed(1)}s`);
@@ -769,178 +835,253 @@ async function startWatcher() {
           const cacheKey = getCacheKey(post);
           const postLabel = post.name || post.id.slice(0, 8);
 
-          try {
-            log.dev("NAV", `→ ${postLabel}`);
-            await prepare(page, post.url);
+          // ======= klucz: NOWY PAGE PER POST + retry na NOWYM PAGE =======
+          let attempt = 0;
+          let done = false;
 
-            // ==================== FAST_MODE BRANCH ====================
-            if (FAST_MODE) {
-              const knownSet = getKnownSetForPost(cacheKey);
-              const isFirstRun = !lastCounts.has(cacheKey);
+          while (!done && attempt <= MAX_POST_RETRY) {
+            attempt++;
 
-              // 1. Przełącz na "Najnowsze"
-              const switchResult = await switchCommentsFilterToNewest(page, post.url).catch(() => ({ ok: false }));
+            let page = null;
+            try {
+              page = await ctx.newPage();
+              await setupLightweightPage(page);
 
-              if (!switchResult.ok) {
-                log.dev("FAST", `${postLabel}: Fallback do normalnego trybu`, { reason: switchResult.reason });
-              } else {
-                await new Promise((r) => setTimeout(r, 600 + Math.random() * 400));
+              // Jeżeli chcesz, możesz tu też ładować cookies per page (nie jest konieczne w obrębie tego samego contextu,
+              // ale bywa stabilniej przy FB). Zostawiam jako opcję.
+              if (envBool("LOAD_COOKIES_EACH_PAGE", false)) {
+                await loadCookies(page).catch(() => {});
+              }
 
-                const snapshot = await extractCommentsData(page, post.url).catch(() => []);
-                const sample = snapshot.slice(0, 30);
+              log.dev("NAV", `→ ${postLabel} (attempt ${attempt}/${MAX_POST_RETRY + 1})`);
+              await prepare(page, post.url);
 
-                log.dev("FAST", `${postLabel}: ${sample.length} komentarzy (sort=Najnowsze)`);
+              // ==================== FAST_MODE BRANCH ====================
+              if (FAST_MODE) {
+                const knownSet = getKnownSetForPost(cacheKey);
+                const isFirstRun = !lastCounts.has(cacheKey);
 
-                // Inicjalizacja
-                if (isFirstRun) {
-                  lastCounts.set(cacheKey, sample.length);
-                  for (const c of sample) if (c?.id) knownSet.add(c.id);
-                  log.dev("FAST", `${postLabel}: Inicjalizacja - zapamiętano ${sample.length}`);
-                  continue;
-                }
+                const switchResult = await switchCommentsFilterToNewest(page, post.url).catch(() => ({ ok: false }));
 
-                // Early skip
-                if (sample.length > 0) {
-                  const newestTime = sample[0]?.time || sample[0]?.fb_time_raw;
-                  const newestAge = getCommentAgeMinutes(newestTime);
+                if (!switchResult.ok) {
+                  log.dev("FAST", `${postLabel}: Fallback do normalnego trybu`, { reason: switchResult.reason });
+                } else {
+                  await new Promise((r) => setTimeout(r, 600 + Math.random() * 400));
 
-                  if (newestAge !== null && newestAge > FAST_MAX_AGE_MIN) {
-                    log.dev("FAST", `${postLabel}: SKIP - najnowszy ${Math.round(newestAge)} min`, { limit: FAST_MAX_AGE_MIN });
+                  const snapshot = await extractCommentsData(page, post.url).catch(() => []);
+                  const sample = snapshot.slice(0, 30);
+
+                  log.dev("FAST", `${postLabel}: ${sample.length} komentarzy (sort=Najnowsze)`);
+
+                  if (isFirstRun) {
+                    lastCounts.set(cacheKey, sample.length);
+                    for (const c of sample) if (c?.id) knownSet.add(c.id);
+                    log.dev("FAST", `${postLabel}: Inicjalizacja - zapamiętano ${sample.length}`);
+                    done = true;
                     continue;
                   }
-                }
 
-                // Dedup
-                const newComments = [];
-                for (const c of sample) {
-                  if (!c?.id) continue;
-                  if (!knownSet.has(c.id)) {
-                    knownSet.add(c.id);
-                    newComments.push(c);
-                    c.__postId = post.id;
-                    c.__postUrl = post.url;
+                  if (sample.length > 0) {
+                    const newestTime = sample[0]?.time || sample[0]?.fb_time_raw;
+                    const newestAge = getCommentAgeMinutes(newestTime);
+
+                    if (newestAge !== null && newestAge > FAST_MAX_AGE_MIN) {
+                      log.dev("FAST", `${postLabel}: SKIP - najnowszy ${Math.round(newestAge)} min`, { limit: FAST_MAX_AGE_MIN });
+                      done = true;
+                      continue;
+                    }
                   }
-                }
 
-                // Cleanup knownIds jeśli za dużo (zapobiega memory leak)
-                cleanupKnownIds(knownSet);
-
-                // Wysyłka
-                if (newComments.length > 0) {
-                  log.success("FAST", `${postLabel}: +${newComments.length} nowych`);
-                  newCommentsTotal += newComments.length;
-
-                  const safeComments = newComments.filter((c) => c.__postId === post.id);
-                  if (safeComments.length !== newComments.length) {
-                    log.warn("FAST", "Odfiltrowano komentarze spoza posta", {
-                      before: newComments.length,
-                      after: safeComments.length,
-                    });
+                  const newComments = [];
+                  for (const c of sample) {
+                    if (!c?.id) continue;
+                    if (!knownSet.has(c.id)) {
+                      knownSet.add(c.id);
+                      newComments.push(c);
+                      c.__postId = post.id;
+                      c.__postUrl = post.url;
+                    }
                   }
-                  await sendTelegramIfFresh(post, safeComments, "fast");
-                } else {
-                  log.dev("FAST", `${postLabel}: Brak nowych`);
+
+                  cleanupKnownIds(knownSet);
+
+                  if (newComments.length > 0) {
+                    log.success("FAST", `${postLabel}: +${newComments.length} nowych`);
+                    newCommentsTotal += newComments.length;
+
+                    const safeComments = newComments.filter((c) => c.__postId === post.id);
+                    if (safeComments.length !== newComments.length) {
+                      log.warn("FAST", "Odfiltrowano komentarze spoza posta", {
+                        before: newComments.length,
+                        after: safeComments.length,
+                      });
+                    }
+                    await sendTelegramIfFresh(post, safeComments, "fast");
+                  } else {
+                    log.dev("FAST", `${postLabel}: Brak nowych`);
+                  }
+
+                  done = true;
+                  continue;
+                }
+              }
+              // ==================== KONIEC FAST_MODE ====================
+
+              const count = await getCommentCount(page, post.url);
+              const hasCount = typeof count === "number" && Number.isFinite(count);
+
+              if (!hasCount) {
+                log.dev("WATCHER", `${postLabel}: Brak licznika - tryb awaryjny`);
+              }
+
+              const prev = lastCounts.has(cacheKey) ? lastCounts.get(cacheKey) : null;
+              const knownSet = getKnownSetForPost(cacheKey);
+
+              if (prev === null) {
+                const initialCount = hasCount ? count : 0;
+                lastCounts.set(cacheKey, initialCount);
+
+                log.dev("WATCHER", `${postLabel}: Inicjalizacja (${initialCount} komentarzy)`);
+
+                if (EXPAND_COMMENTS) {
+                  await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }, post.url).catch(() => {});
+                  const snap = await extractCommentsData(page, post.url).catch(() => []);
+                  for (const c of snap) if (c?.id) knownSet.add(c.id);
+                  log.dev("WATCHER", `${postLabel}: Zapamiętano ${snap.length} istniejących`);
                 }
 
+                done = true;
                 continue;
               }
-            }
-            // ==================== KONIEC FAST_MODE ====================
 
-            const count = await getCommentCount(page, post.url);
-            const hasCount = typeof count === "number" && Number.isFinite(count);
-
-            if (!hasCount) {
-              log.dev("WATCHER", `${postLabel}: Brak licznika - tryb awaryjny`);
-            }
-
-            const prev = lastCounts.has(cacheKey) ? lastCounts.get(cacheKey) : null;
-            const knownSet = getKnownSetForPost(cacheKey);
-
-            // Pierwsze wejście
-            if (prev === null) {
-              const initialCount = hasCount ? count : 0;
-              lastCounts.set(cacheKey, initialCount);
-
-              log.dev("WATCHER", `${postLabel}: Inicjalizacja (${initialCount} komentarzy)`);
-
-              if (EXPAND_COMMENTS) {
-                await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }, post.url).catch(() => {});
-                const snap = await extractCommentsData(page, post.url).catch(() => []);
-                for (const c of snap) if (c?.id) knownSet.add(c.id);
-                log.dev("WATCHER", `${postLabel}: Zapamiętano ${snap.length} istniejących`);
+              if (hasCount) {
+                if (count !== prev) {
+                  log.dev("WATCHER", `${postLabel}: Zmiana ${prev} → ${count}`);
+                  lastCounts.set(cacheKey, count);
+                } else {
+                  log.dev("WATCHER", `${postLabel}: Bez zmian (${count})`);
+                }
               }
 
-              continue;
-            }
-
-            if (hasCount) {
-              if (count !== prev) {
-                log.dev("WATCHER", `${postLabel}: Zmiana ${prev} → ${count}`);
-                lastCounts.set(cacheKey, count);
-              } else {
-                log.dev("WATCHER", `${postLabel}: Bez zmian (${count})`);
+              if (!EXPAND_COMMENTS) {
+                done = true;
+                continue;
               }
-            }
 
-            if (!EXPAND_COMMENTS) continue;
+              await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(() => {});
+              const snapshot = await extractCommentsData(page, post.url).catch(() => []);
 
-            await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(() => {});
-            const snapshot = await extractCommentsData(page, post.url).catch(() => []);
-
-            const newComments = [];
-            for (const c of snapshot) {
-              if (!c?.id) continue;
-              if (!knownSet.has(c.id)) {
-                knownSet.add(c.id);
-                newComments.push(c);
-                c.__postId = post.id;
-                c.__postUrl = post.url;
+              const newComments = [];
+              for (const c of snapshot) {
+                if (!c?.id) continue;
+                if (!knownSet.has(c.id)) {
+                  knownSet.add(c.id);
+                  newComments.push(c);
+                  c.__postId = post.id;
+                  c.__postUrl = post.url;
+                }
               }
-            }
 
-            // Cleanup knownIds jeśli za dużo (zapobiega memory leak)
-            cleanupKnownIds(knownSet);
+              cleanupKnownIds(knownSet);
 
-            log.debug("DEDUP", `${postLabel}: context`, {
-              snapshotLen: snapshot.length,
-              newLen: newComments.length,
-            });
+              log.debug("DEDUP", `${postLabel}: context`, {
+                snapshotLen: snapshot.length,
+                newLen: newComments.length,
+              });
 
-            // Fallback
-            if (hasCount && newComments.length === 0 && count > prev) {
-              const diff = Math.max(1, count - prev);
-              const tail = snapshot.slice(-diff);
-              for (const c of tail) if (c?.id) knownSet.add(c.id);
+              if (hasCount && newComments.length === 0 && count > prev) {
+                const diff = Math.max(1, count - prev);
+                const tail = snapshot.slice(-diff);
+                for (const c of tail) if (c?.id) knownSet.add(c.id);
 
-              log.dev("WATCHER", `${postLabel}: Fallback - biorę ostatnie ${diff}`);
-              await sendTelegramIfFresh(post, tail, "fallback");
-              newCommentsTotal += tail.length;
-              continue;
-            }
+                log.dev("WATCHER", `${postLabel}: Fallback - biorę ostatnie ${diff}`);
+                await sendTelegramIfFresh(post, tail, "fallback");
+                newCommentsTotal += tail.length;
 
-            if (newComments.length > 0) {
-              log.success("WATCHER", `${postLabel}: +${newComments.length} nowych`);
-              newCommentsTotal += newComments.length;
+                done = true;
+                continue;
+              }
 
-              const safeComments = newComments.filter((c) => c.__postId === post.id);
-              if (safeComments.length !== newComments.length) {
-                log.warn("WATCHER", "Odfiltrowano komentarze spoza posta", {
-                  before: newComments.length,
-                  after: safeComments.length,
+              if (newComments.length > 0) {
+                log.success("WATCHER", `${postLabel}: +${newComments.length} nowych`);
+                newCommentsTotal += newComments.length;
+
+                const safeComments = newComments.filter((c) => c.__postId === post.id);
+                if (safeComments.length !== newComments.length) {
+                  log.warn("WATCHER", "Odfiltrowano komentarze spoza posta", {
+                    before: newComments.length,
+                    after: safeComments.length,
+                  });
+                }
+                await sendTelegramIfFresh(post, safeComments, "normal");
+              }
+
+              // sukces → reset liczników hard fail
+              consecutiveHardFails = 0;
+              done = true;
+            } catch (err) {
+              errorsCount++;
+              const c = classifyError(err);
+
+              log.error("WATCHER", `Błąd przy ${postLabel} (attempt ${attempt}): ${err?.message || err}`);
+              log.debug("WATCHER", "Stack", { stack: err?.stack });
+
+              if (c.hardFail) {
+                hadNavErrorThisRound = true;
+                navErrorCount++;
+                consecutiveHardFails++;
+
+                log.warn("WATCHER", "HardFail klasyfikacja", {
+                  navErrorCount: `${navErrorCount}/${MAX_NAV_ERRORS}`,
+                  consecutiveHardFails,
+                  isTargetClosed: c.isTargetClosed,
+                  isContext: c.isContext,
+                  isFrame: c.isFrame,
+                  isNavigation: c.isNavigation,
                 });
-              }
-              await sendTelegramIfFresh(post, safeComments, "normal");
-            }
-          } catch (err) {
-            errorsCount++;
-            log.error("WATCHER", `Błąd przy ${postLabel}: ${err?.message || err}`);
-            log.debug("WATCHER", "Stack", { stack: err?.stack });
 
-            if (isNavigationError(err)) {
-              hadNavErrorThisRound = true;
-              navErrorCount++;
-              log.warn("WATCHER", `Błąd nawigacji: ${navErrorCount}/${MAX_NAV_ERRORS}`);
+                // Jeśli wygląda jak padnięty browser/target → szybka eskalacja
+                if (c.isTargetClosed) {
+                  // Nie ma sensu retry na tym samym browser/context
+                  attempt = MAX_POST_RETRY + 1; // kończ retry
+                }
+              }
+
+              // retry tylko jeśli zostały próby
+              if (attempt <= MAX_POST_RETRY) {
+                log.warn("WATCHER", `${postLabel}: retry na świeżym page...`);
+              } else {
+                log.warn("WATCHER", `${postLabel}: brak retry — idę dalej`);
+                done = true;
+              }
+
+              // Eskalacje globalne
+              if (consecutiveHardFails >= HARD_FAILS_RESET_BROWSER) {
+                log.error("WATCHER", `Eskalacja: reset BROWSER (consecutiveHardFails=${consecutiveHardFails})`);
+                // reset: zamknij context i browser, stwórz od nowa
+                await safeCloseContext(ctx);
+                await safeCloseBrowser(browser);
+
+                browser = await puppeteer.launch(buildLaunchOptions());
+                ctx = await browser.createBrowserContext();
+                consecutiveHardFails = 0; // po pełnym resecie
+              } else if (consecutiveHardFails >= HARD_FAILS_RESET_CONTEXT) {
+                log.error("WATCHER", `Eskalacja: reset CONTEXT (consecutiveHardFails=${consecutiveHardFails})`);
+                await safeCloseContext(ctx);
+                ctx = await browser.createBrowserContext();
+                consecutiveHardFails = 0; // po resecie contextu
+              }
+
+              if (isNavigationError(err)) {
+                hadNavErrorThisRound = true;
+              }
+            } finally {
+              // ważne: zamknij page po każdej próbie
+              // (page może nie istnieć jeśli padło przed newPage)
+              // safeClosePage jest w try/catch, więc OK
+              // NOTE: page jest w scope try — tu nie mamy do niego dostępu; więc zamykamy przez "finally" w try
+              // Zrobione niżej w bloku try: close page w finally per próba:
+              await safeClosePage(page);
             }
           }
         }
@@ -956,14 +1097,8 @@ async function startWatcher() {
         navErrorCount = 0;
       }
 
-      if (browser) {
-        try {
-          await browser.close();
-          log.dev("WATCHER", "Zamknięto przeglądarkę");
-        } catch (e) {
-          log.warn("WATCHER", `Błąd zamykania przeglądarki: ${e?.message}`);
-        }
-      }
+      await safeCloseContext(ctx);
+      await safeCloseBrowser(browser);
 
       const duration = Date.now() - cycleStart;
       const cacheSize = getCacheSize();
@@ -981,7 +1116,6 @@ async function startWatcher() {
         totalKnownIds,
       });
 
-      // Alert jeśli cache przekroczył 10MB
       if (cacheSize > 10 * 1024 * 1024) {
         log.warn("CACHE", `Rozmiar cache przekroczył 10MB: ${Math.round(cacheSize / 1024 / 1024)}MB`);
       }
@@ -989,6 +1123,11 @@ async function startWatcher() {
       if (navErrorCount >= MAX_NAV_ERRORS) {
         log.error("WATCHER", "Za dużo błędów nawigacji – kończę proces");
         process.exit(1);
+      }
+
+      // prewencyjny “cycle recycle” (opcjonalnie)
+      if (BROWSER_RECYCLE_EVERY_CYCLES > 0 && cycleNumber % BROWSER_RECYCLE_EVERY_CYCLES === 0) {
+        log.prod("WATCHER", `Prewencja: cycle recycle aktywny (co ${BROWSER_RECYCLE_EVERY_CYCLES} cykli)`);
       }
 
       const jitter = Math.floor(Math.random() * 5000);

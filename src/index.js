@@ -1,21 +1,38 @@
+// src/index.js
+
+// WATCHER LOCK (anti-double-start)
 if (process.env.__WATCHER_LOCKED__) {
   console.error("WATCHER DUPLICATE START — EXIT");
   process.exit(1);
 }
 process.env.__WATCHER_LOCKED__ = "1";
 
+// timestamp console.log
 const __log = console.log;
 console.log = (...args) => {
-  const ts = new Date().toISOString().replace("T"," ").replace("Z","");
+  const ts = new Date().toISOString().replace("T", " ").replace("Z", "");
   __log(`[${ts}]`, ...args);
 };
 
-// src/index.js
-import "dotenv/config";
+// ✅ .env as SINGLE SOURCE OF TRUTH (override everything)
+import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { startWatcher } from "./watcher.js";
 import { sendOwnerAlert } from "./telegram.js";
+
+// Resolve .env path reliably (works under PM2 + different cwd)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ENV_PATH = path.resolve(__dirname, "..", ".env");
+
+// Load .env with override (wins vs PM2/system env)
+dotenv.config({ path: ENV_PATH, override: true });
+
+// (Optional) If you also want to support running from other cwd with local .env,
+// you can keep this second load. It will also override.
+// dotenv.config({ path: path.join(process.cwd(), ".env"), override: true });
 
 function ensureDir(p) {
   try {

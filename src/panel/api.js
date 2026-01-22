@@ -10,8 +10,9 @@ import dotenv from "dotenv";
 const BASE_DIR = process.pkg ? path.dirname(process.execPath) : process.cwd();
 
 // .env: najpierw dev (cwd), potem exe (BASE_DIR)
-dotenv.config({ path: path.join(process.cwd(), ".env") });
-dotenv.config({ path: path.join(BASE_DIR, ".env") });
+dotenv.config({ path: path.join(process.cwd(), ".env"), override: true });
+dotenv.config({ path: path.join(BASE_DIR, ".env"), override: true });
+
 
 // UI: dev -> src/panel/ui, exe -> ./ui
 const UI_DIR = process.pkg

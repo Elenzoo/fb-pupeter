@@ -18,6 +18,8 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | `src/db/cache.js` | ~116 | `getCache()`, `updateCache()` | deduplikacja |
 | `src/index.js` | ~83 | `main()` | punkt wejścia |
 | `src/utils/time.js` | ~63 | `parseRelativeTime()` | parsowanie "2 godz." |
+| `src/utils/sleep.js` | ~132 | `humanDelay()`, `shuffleArray()`, `humanType()` | human behavior delays |
+| `src/utils/mouse.js` | ~195 | `humanClick()`, `moveToElement()` | ruchy myszy Bezier |
 
 ## Częste operacje (gdzie edytować)
 
@@ -29,6 +31,8 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | Interwał sprawdzania | `src/config.js` | `CHECK_INTERVAL_MS` |
 | Obsługę checkpoint | `src/fb/checkpoint.js` | `handleCheckpoint()` |
 | Cache komentarzy | `src/db/cache.js` | `updateCache()` |
+| Opóźnienia human-like | `src/utils/sleep.js` | `humanTypingDelay()` |
+| Ruchy myszy | `src/utils/mouse.js` | `humanClick()` |
 
 ## Architektura
 
@@ -103,6 +107,12 @@ LOG_LEVEL=1              # 0=silent, 1=prod, 2=dev, 3=debug
 REMOTE_DEBUG_PORT=9222   # port do podglądu przeglądarki (0=wyłączony)
 ```
 
+### Human Behavior Mode
+```
+HUMAN_MODE=true                    # włącza symulację człowieka (domyślnie true)
+PROXY_URL=http://user:pass@host:port  # rotating residential proxy (opcjonalne)
+```
+
 ## Ważne informacje techniczne
 
 ### Stealth
@@ -110,7 +120,26 @@ Bot używa technik ukrywania automatyzacji:
 - `navigator.webdriver = false`
 - Usunięcie flag Chromium automation
 - Losowe opóźnienia między akcjami
-- Plugin `puppeteer-extra-plugin-stealth`
+- Plugin `puppeteer-extra-plugin-stealth` (aktywowany!)
+
+### Human Behavior Mode
+Symulacja zachowań człowieka dla zmniejszenia ryzyka wykrycia:
+- **Stealth Plugin**: ukrywa webdriver, plugins, WebGL, canvas fingerprint
+- **Wolne pisanie**: ~120ms/znak z mikro-pauzami (zamiast 35ms)
+- **Rozkład Gaussa**: naturalne opóźnienia zamiast jednolitych
+- **Shuffle postów**: losowa kolejność sprawdzania (Fisher-Yates)
+- **Pauzy między postami**: 3-8 sekund z rozkładem normalnym
+- **Ruchy myszy**: krzywe Beziera (opcjonalne)
+- **Proxy support**: residential rotating proxy
+
+Logi przy `LOG_LEVEL=2`:
+```
+[STEALTH] Plugin stealth włączony
+[PROXY] Używam proxy: http://***@host:port
+[HUMAN] Human Behavior Mode włączony
+[HUMAN] Kolejność postów: post3 → post1 → post2
+[HUMAN] Pauza: 5.2s
+```
 
 ### Cache
 - Plik: `data/comments-cache.json`
@@ -144,6 +173,13 @@ chrome://inspect/#devices → Configure → localhost:9222
 ```
 
 Kliknij "inspect" przy facebook.com - masz pełną kontrolę nad przeglądarką.
+
+### Proxy (opcjonalne)
+Zmniejsza ryzyko banów przez zmianę IP:
+- **Format**: `http://user:pass@host:port` lub `socks5://host:port`
+- **Zalecane**: Residential rotating proxy (Bright Data, Oxylabs, IPRoyal)
+- Facebook flaguje: datacenter IP, ciągłą aktywność z jednego IP
+- Residential IP wyglądają jak zwykli użytkownicy
 
 ## Serwer produkcyjny
 

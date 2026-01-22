@@ -24,7 +24,28 @@
       "Bash(npm run build:*)",
       "Bash(node src/panel/api.js:*)",
       "Bash(npm run dev:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat\\(panel\\): add React admin panel with shadcn/ui\n\nNew React frontend for admin panel accessible at /new/:\n- Vite + React 18 + TypeScript + Tailwind CSS\n- shadcn/ui components \\(Button, Card, Input, Table, Dialog, Tabs, etc.\\)\n- Dark theme by default\n\nPages:\n- Dashboard: system status, PM2 info, token auth\n- Watched: posts table with CRUD operations\n- Settings: expanded .env editor with sections \\(Watcher, Logging,\n  Puppeteer, Facebook, Telegram Owner/Client/Format/Alerts\\)\n- Logs: PM2 logs viewer with auto-refresh\n- Cookies: session manager with backup/restore functionality\n- Placeholders: Sources, Discoveries, Campaigns \\(coming soon\\)\n\nAPI changes:\n- New cookies endpoints: /api/cookies/status, /backups, /backup,\n  /activate/:i, /restore/:i, DELETE /backup/:i\n- Expanded env fields \\(LOG_LEVEL, FAST_MODE, TELEGRAM_*, TG_ALERTS_*\\)\n- Strip ANSI codes from PM2 output\n- Serve React build from /new/ path\n\nLegacy panel remains at / for backwards compatibility.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git fetch:*)",
+      "Bash(npm install:*)",
+      "Bash(node test-captcha.js:*)",
+      "Bash(timeout 10 node:*)",
+      "Bash(node:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:2captcha.com)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(taskkill:*)",
+      "Bash(del \"C:\\\\Projekty vs\\\\FB_Watcher\\\\cookies.json\")",
+      "Bash(git commit:*)",
+      "Bash(set LOG_LEVEL=2:*)",
+      "Bash(timeout:*)",
+      "Bash(set REMOTE_DEBUG_PORT=9222)",
+      "Bash(REMOTE_DEBUG_PORT=9222 LOG_LEVEL=2 node:*)",
+      "Bash(HEADLESS_BROWSER=false LOG_LEVEL=2 node:*)",
+      "Bash(grep:*)",
+      "Bash(powershell:*)",
+      "Bash(git log:*)"
     ]
   }
 }
