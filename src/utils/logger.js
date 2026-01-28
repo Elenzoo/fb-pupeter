@@ -1,3 +1,4 @@
+import "dotenv/config";
 // src/utils/logger.js
 // Ujednolicony system logowania z poziomami: SILENT(0), PROD(1), DEV(2), DEBUG(3)
 

@@ -5,6 +5,9 @@ import type {
   LogsResponse,
   Post,
   SessionStatus,
+  DiscoveriesResponse,
+  BlacklistResponse,
+  BlacklistEntry,
 } from './types'
 
 const TOKEN_KEY = 'FBW_PANEL_TOKEN'
@@ -140,5 +143,48 @@ export async function clearCookies(): Promise<{ ok: boolean; error?: string }> {
 
 export async function getCookiesStatus(): Promise<SessionStatus & { ok: boolean; error?: string }> {
   return request<SessionStatus>('/api/cookies/status')
+}
+
+// Discoveries
+export async function getDiscoveries(): Promise<DiscoveriesResponse> {
+  return request<DiscoveriesResponse>('/api/discoveries')
+}
+
+export async function approveDiscovery(id: string): Promise<{ ok: boolean; error?: string }> {
+  return request(`/api/discoveries/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+  })
+}
+
+export async function rejectDiscovery(id: string): Promise<{ ok: boolean; error?: string }> {
+  return request(`/api/discoveries/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+  })
+}
+
+export async function approveAllDiscoveries(): Promise<{ ok: boolean; count?: number; error?: string }> {
+  return request('/api/discoveries/approve-all', { method: 'POST' })
+}
+
+export async function rejectAllDiscoveries(): Promise<{ ok: boolean; count?: number; error?: string }> {
+  return request('/api/discoveries/reject-all', { method: 'POST' })
+}
+
+// Blacklist
+export async function getBlacklist(): Promise<BlacklistResponse> {
+  return request<BlacklistResponse>('/api/blacklist')
+}
+
+export async function removeFromBlacklist(id: string): Promise<{ ok: boolean; error?: string }> {
+  return request(`/api/blacklist/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function addToBlacklist(url: string, reason = 'manual'): Promise<{ ok: boolean; entry?: BlacklistEntry; error?: string }> {
+  return request('/api/blacklist', {
+    method: 'POST',
+    body: JSON.stringify({ url, reason }),
+  })
 }
 

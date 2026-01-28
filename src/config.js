@@ -169,6 +169,113 @@ const HUMAN_MODE = process.env.HUMAN_MODE !== "false";
  */
 const PROXY_URL = (process.env.PROXY_URL || "").trim();
 
+/* ==================== FB_WATCHER LITE ==================== */
+/**
+ * SESSION_LENGTH_MIN_MS / SESSION_LENGTH_MAX_MS – zakres długości sesji
+ * Bot restartuje przeglądarkę po losowym czasie w tym zakresie
+ */
+const SESSION_LENGTH_MIN_MS = Number(process.env.SESSION_LENGTH_MIN_MS || 30 * 60 * 1000);
+const SESSION_LENGTH_MAX_MS = Number(process.env.SESSION_LENGTH_MAX_MS || 90 * 60 * 1000);
+
+/**
+ * WARMUP – sesja rozgrzewkowa przed monitorowaniem
+ * Buduje "normalną" historię aktywności (scroll, profile, zdjęcia)
+ */
+const WARMUP_ENABLED = process.env.WARMUP_ENABLED !== "false";
+const WARMUP_DURATION_MIN_MS = Number(process.env.WARMUP_DURATION_MIN_MS || 5 * 60 * 1000);
+const WARMUP_DURATION_MAX_MS = Number(process.env.WARMUP_DURATION_MAX_MS || 10 * 60 * 1000);
+
+/**
+ * VIEWPORT_RANDOMIZATION – losowa rozdzielczość przy każdej sesji
+ */
+const VIEWPORT_RANDOMIZATION = process.env.VIEWPORT_RANDOMIZATION !== "false";
+
+/**
+ * TYPING_MISTAKES – symulacja literówek przy wpisywaniu
+ */
+const TYPING_MISTAKES_ENABLED = process.env.TYPING_MISTAKES_ENABLED !== "false";
+const TYPING_MISTAKES_CHANCE = Number(process.env.TYPING_MISTAKES_CHANCE || 0.03);
+
+/**
+ * NAVIGATION_MISTAKES – symulacja przypadkowego cofania/powrotu
+ */
+const NAVIGATION_MISTAKES_ENABLED = process.env.NAVIGATION_MISTAKES_ENABLED !== "false";
+
+/**
+ * PROFILE_VISITS – odwiedzanie losowych profili podczas sesji
+ */
+const PROFILE_VISITS_ENABLED = process.env.PROFILE_VISITS_ENABLED !== "false";
+const PROFILE_VISITS_CHANCE = Number(process.env.PROFILE_VISITS_CHANCE || 0.08);
+
+/**
+ * TAB_SIMULATION – symulacja przełączania kart przeglądarki
+ */
+const TAB_SIMULATION_ENABLED = process.env.TAB_SIMULATION_ENABLED !== "false";
+const TAB_SIMULATION_CHANCE = Number(process.env.TAB_SIMULATION_CHANCE || 0.10);
+
+/**
+ * IMAGE_INTERACTION – interakcja ze zdjęciami (hover, klik, oglądanie)
+ */
+const IMAGE_INTERACTION_ENABLED = process.env.IMAGE_INTERACTION_ENABLED !== "false";
+const IMAGE_INTERACTION_CHANCE = Number(process.env.IMAGE_INTERACTION_CHANCE || 0.15);
+
+/**
+ * NIGHT_MODE – tryb nocny (sen i morning catch-up)
+ */
+const NIGHT_MODE_ENABLED = process.env.NIGHT_MODE_ENABLED === "true";
+const NIGHT_START_HOUR = Number(process.env.NIGHT_START_HOUR || 22);
+const NIGHT_END_HOUR = Number(process.env.NIGHT_END_HOUR || 7);
+const NIGHT_CATCHUP_HOURS = Number(process.env.NIGHT_CATCHUP_HOURS || 8);
+
+/**
+ * FEED_SCAN – skanowanie tablicy w poszukiwaniu postów z keywords
+ */
+const FEED_SCAN_ENABLED = process.env.FEED_SCAN_ENABLED === "true";
+const FEED_SCAN_KEYWORDS = (process.env.FEED_SCAN_KEYWORDS || "").trim();
+const FEED_SCROLL_DURATION_MIN = Number(process.env.FEED_SCROLL_DURATION_MIN || 1);
+const FEED_SCROLL_DURATION_MAX = Number(process.env.FEED_SCROLL_DURATION_MAX || 3);
+
+/**
+ * HUMAN_RANDOM_LIKE_CHANCE – szansa na losowy like podczas sesji
+ */
+const HUMAN_RANDOM_LIKE_CHANCE = Number(process.env.HUMAN_RANDOM_LIKE_CHANCE || 0.20);
+
+/**
+ * DISCOVERY_TELEGRAM_ENABLED – czy wysyłać alert Telegram przy nowym discovery
+ */
+const DISCOVERY_TELEGRAM_ENABLED = process.env.DISCOVERY_TELEGRAM_ENABLED === "true";
+
+/* ==================== META ADS SCANNER ==================== */
+/**
+ * METAADS_KEYWORDS – słowa kluczowe do wyszukiwania reklam (rozdzielone przecinkami)
+ * Np.: "garaże blaszane,hale magazynowe,wiaty garażowe"
+ */
+const METAADS_KEYWORDS = (process.env.METAADS_KEYWORDS || "").trim();
+
+/**
+ * METAADS_COUNTRY – kod kraju do filtrowania reklam (ISO 3166-1 alpha-2)
+ * Domyślnie: PL
+ */
+const METAADS_COUNTRY = (process.env.METAADS_COUNTRY || "PL").trim();
+
+/**
+ * METAADS_SCAN_INTERVAL_H – interwał skanowania w godzinach
+ * Domyślnie: 12 (dwa razy dziennie)
+ */
+const METAADS_SCAN_INTERVAL_H = Number(process.env.METAADS_SCAN_INTERVAL_H || 12);
+
+/**
+ * METAADS_AUTO_SEND_TO_WATCHER – czy automatycznie wysyłać nowe reklamy do panelu
+ * Domyślnie: true
+ */
+const METAADS_AUTO_SEND_TO_WATCHER = process.env.METAADS_AUTO_SEND_TO_WATCHER !== "false";
+
+/**
+ * METAADS_HEADLESS – czy uruchamiać przeglądarkę w trybie headless
+ * Domyślnie: true (bez okna), ustaw na false żeby widzieć przeglądarkę
+ */
+const METAADS_HEADLESS = process.env.METAADS_HEADLESS !== "false";
+
 export {
   // stary system – optional
   POSTS,
@@ -206,4 +313,38 @@ export {
   // human behavior mode
   HUMAN_MODE,
   PROXY_URL,
+
+  // FB_Watcher LITE
+  SESSION_LENGTH_MIN_MS,
+  SESSION_LENGTH_MAX_MS,
+  WARMUP_ENABLED,
+  WARMUP_DURATION_MIN_MS,
+  WARMUP_DURATION_MAX_MS,
+  VIEWPORT_RANDOMIZATION,
+  TYPING_MISTAKES_ENABLED,
+  TYPING_MISTAKES_CHANCE,
+  NAVIGATION_MISTAKES_ENABLED,
+  PROFILE_VISITS_ENABLED,
+  PROFILE_VISITS_CHANCE,
+  TAB_SIMULATION_ENABLED,
+  TAB_SIMULATION_CHANCE,
+  IMAGE_INTERACTION_ENABLED,
+  IMAGE_INTERACTION_CHANCE,
+  NIGHT_MODE_ENABLED,
+  NIGHT_START_HOUR,
+  NIGHT_END_HOUR,
+  NIGHT_CATCHUP_HOURS,
+  FEED_SCAN_ENABLED,
+  FEED_SCAN_KEYWORDS,
+  FEED_SCROLL_DURATION_MIN,
+  FEED_SCROLL_DURATION_MAX,
+  HUMAN_RANDOM_LIKE_CHANCE,
+  DISCOVERY_TELEGRAM_ENABLED,
+
+  // meta ads scanner
+  METAADS_KEYWORDS,
+  METAADS_COUNTRY,
+  METAADS_SCAN_INTERVAL_H,
+  METAADS_AUTO_SEND_TO_WATCHER,
+  METAADS_HEADLESS,
 };

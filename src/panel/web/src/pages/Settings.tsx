@@ -7,7 +7,8 @@ import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import {
   Play, Square, RotateCw, Save, RefreshCw,
-  User, Bot, Zap, Terminal, Eye, Send, Bell, Link
+  User, Bot, Zap, Terminal, Eye, Send, Bell, Link,
+  Moon, Search, Shield, Clock, Heart
 } from 'lucide-react'
 import { getEnv, setEnv, pm2Start, pm2Stop, pm2Restart } from '@/lib/api'
 import type { EnvValues } from '@/lib/types'
@@ -123,6 +124,68 @@ const SECTIONS: SectionConfig[] = [
       { key: 'TG_ALERTS_ENABLED', label: 'Włącz alerty', type: 'switch' },
       { key: 'TG_ALERTS_COOLDOWN_SEC', label: 'Cooldown (sek)', type: 'number', placeholder: '120', description: 'Minimalny odstęp między alertami' },
       { key: 'TG_ALERTS_MAXLEN', label: 'Max długość', type: 'number', placeholder: '3500', description: 'Maksymalna długość wiadomości' },
+    ],
+  },
+  {
+    title: 'LITE: Human Behavior',
+    icon: <Heart className="h-5 w-5" />,
+    description: 'Symulacja zachowań człowieka',
+    fields: [
+      { key: 'HUMAN_MODE', label: 'Human Mode', type: 'switch', description: 'Włącz symulację zachowań człowieka' },
+      { key: 'HUMAN_RANDOM_LIKE_CHANCE', label: 'Szansa na losowy like', type: 'number', placeholder: '0.20', description: 'Szansa (0-1) na polubienie podczas sesji' },
+      { key: 'WEBHOOK_MAX_AGE_MIN', label: 'Max wiek komentarzy (min)', type: 'number', placeholder: '60', description: 'Pomijaj komentarze starsze niż X minut' },
+    ],
+  },
+  {
+    title: 'LITE: Session Management',
+    icon: <Clock className="h-5 w-5" />,
+    description: 'Zarządzanie długością sesji',
+    fields: [
+      { key: 'SESSION_LENGTH_MIN_MS', label: 'Min długość sesji (ms)', type: 'number', placeholder: '1800000', description: '30 min = 1800000' },
+      { key: 'SESSION_LENGTH_MAX_MS', label: 'Max długość sesji (ms)', type: 'number', placeholder: '5400000', description: '90 min = 5400000' },
+      { key: 'WARMUP_ENABLED', label: 'Sesja rozgrzewkowa', type: 'switch', description: 'Rozgrzewka przed monitorowaniem' },
+      { key: 'WARMUP_DURATION_MIN_MS', label: 'Min warmup (ms)', type: 'number', placeholder: '300000', description: '5 min = 300000' },
+      { key: 'WARMUP_DURATION_MAX_MS', label: 'Max warmup (ms)', type: 'number', placeholder: '600000', description: '10 min = 600000' },
+    ],
+  },
+  {
+    title: 'LITE: Anti-Detection',
+    icon: <Shield className="h-5 w-5" />,
+    description: 'Techniki ukrywania bota',
+    fields: [
+      { key: 'VIEWPORT_RANDOMIZATION', label: 'Losowy viewport', type: 'switch', description: 'Losowa rozdzielczość przy każdej sesji' },
+      { key: 'TYPING_MISTAKES_ENABLED', label: 'Literówki', type: 'switch', description: 'Symulacja błędów przy pisaniu' },
+      { key: 'TYPING_MISTAKES_CHANCE', label: 'Szansa literówki', type: 'number', placeholder: '0.03', description: 'Szansa (0-1) na literówkę' },
+      { key: 'NAVIGATION_MISTAKES_ENABLED', label: 'Błędy nawigacji', type: 'switch', description: 'Symulacja cofania/powrotu' },
+      { key: 'PROFILE_VISITS_ENABLED', label: 'Odwiedzanie profili', type: 'switch', description: 'Losowe odwiedzanie profili' },
+      { key: 'PROFILE_VISITS_CHANCE', label: 'Szansa wizyty', type: 'number', placeholder: '0.08', description: 'Szansa (0-1) na wizytę profilu' },
+      { key: 'TAB_SIMULATION_ENABLED', label: 'Symulacja kart', type: 'switch', description: 'Symulacja przełączania kart' },
+      { key: 'TAB_SIMULATION_CHANCE', label: 'Szansa tab switch', type: 'number', placeholder: '0.10', description: 'Szansa (0-1) na przełączenie karty' },
+      { key: 'IMAGE_INTERACTION_ENABLED', label: 'Interakcja ze zdjęciami', type: 'switch', description: 'Hover i klik na zdjęciach' },
+      { key: 'IMAGE_INTERACTION_CHANCE', label: 'Szansa na zdjęcie', type: 'number', placeholder: '0.15', description: 'Szansa (0-1) na interakcję ze zdjęciem' },
+    ],
+  },
+  {
+    title: 'LITE: Night Mode',
+    icon: <Moon className="h-5 w-5" />,
+    description: 'Tryb nocny - bot śpi',
+    fields: [
+      { key: 'NIGHT_MODE_ENABLED', label: 'Włącz tryb nocny', type: 'switch', description: 'Bot śpi w nocy' },
+      { key: 'NIGHT_START_HOUR', label: 'Początek nocy', type: 'number', placeholder: '22', description: 'Godzina rozpoczęcia snu (0-23)' },
+      { key: 'NIGHT_END_HOUR', label: 'Koniec nocy', type: 'number', placeholder: '7', description: 'Godzina przebudzenia (0-23)' },
+      { key: 'NIGHT_CATCHUP_HOURS', label: 'Catch-up (godz)', type: 'number', placeholder: '8', description: 'Po ilu godzinach robić catch-up' },
+    ],
+  },
+  {
+    title: 'LITE: Feed Scanner',
+    icon: <Search className="h-5 w-5" />,
+    description: 'Skanowanie tablicy po słowach kluczowych',
+    fields: [
+      { key: 'FEED_SCAN_ENABLED', label: 'Włącz skanowanie', type: 'switch', description: 'Skanuj tablicę FB' },
+      { key: 'FEED_SCAN_KEYWORDS', label: 'Słowa kluczowe', placeholder: 'garaż,blaszany,hala', description: 'Rozdzielone przecinkami' },
+      { key: 'FEED_SCROLL_DURATION_MIN', label: 'Min czas scroll (min)', type: 'number', placeholder: '1', description: 'Minimalny czas scrollowania' },
+      { key: 'FEED_SCROLL_DURATION_MAX', label: 'Max czas scroll (min)', type: 'number', placeholder: '3', description: 'Maksymalny czas scrollowania' },
+      { key: 'DISCOVERY_TELEGRAM_ENABLED', label: 'Alert Telegram', type: 'switch', description: 'Wyślij alert przy nowym wykryciu' },
     ],
   },
 ]

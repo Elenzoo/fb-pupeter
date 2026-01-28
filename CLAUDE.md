@@ -20,6 +20,25 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | `src/utils/time.js` | ~63 | `parseRelativeTime()` | parsowanie "2 godz." |
 | `src/utils/sleep.js` | ~132 | `humanDelay()`, `shuffleArray()`, `humanType()` | human behavior delays |
 | `src/utils/mouse.js` | ~195 | `humanClick()`, `moveToElement()` | ruchy myszy Bezier |
+| `src/metaads/index.js` | ~170 | `runScan()`, `sendToWatcher()` | punkt wejścia scannera |
+| `src/metaads/scanner.js` | ~120 | `scanKeyword()` | scraper Meta Ad Library |
+| `src/metaads/extractor.js` | ~170 | `extractAdsFromPage()`, `extractPostUrlFromSnapshot()` | ekstrakcja danych |
+| `src/metaads/cache.js` | ~120 | `loadCache()`, `saveCache()` | cache reklam |
+| `src/lite/index.js` | ~150 | `getLiteConfig()`, exports | moduł LITE - główny eksport |
+| `src/lite/antiDetection.js` | ~150 | `getRandomViewport()`, `generateSessionFingerprint()` | losowy viewport, session mgmt |
+| `src/lite/smoothScroll.js` | ~180 | `smoothScrollBy()`, `feedScrollSession()` | płynne scrollowanie |
+| `src/lite/humanBehavior.js` | ~200 | `humanClick()`, `betweenPostsPause()`, `createHumanBehavior()` | koordynator human behavior |
+| `src/lite/warmup.js` | ~150 | `warmupSession()` | sesja rozgrzewkowa |
+| `src/lite/nightMode.js` | ~150 | `handleNightMode()`, `isNightTime()` | tryb nocny + catch-up |
+| `src/lite/feedScanner.js` | ~250 | `scanFeed()`, `approveDiscovery()` | skanowanie tablicy |
+| `src/lite/keywordMatcher.js` | ~150 | `matchKeywords()`, `createKeywordMatcher()` | dopasowanie słów kluczowych |
+| `src/lite/userMistakes.js` | ~150 | `humanTypeWithMistakes()`, `maybeGoBack()` | symulacja błędów użytkownika |
+| `src/lite/tabSimulation.js` | ~100 | `maybeSimulateTabSwitch()` | symulacja przełączania kart |
+| `src/lite/profileVisitor.js` | ~150 | `maybeVisitProfile()` | odwiedzanie profili |
+| `src/lite/imageInteraction.js` | ~150 | `maybeInteractWithImage()` | interakcja ze zdjęciami |
+| `src/lite/randomActions.js` | ~150 | `maybeRandomLike()`, `executeRandomActions()` | losowe akcje |
+| `data/discoveries.json` | - | - | znalezione posty z Feed Scannera |
+| `data/blacklist.json` | - | - | odrzucone posty |
 
 ## Częste operacje (gdzie edytować)
 
@@ -33,6 +52,14 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | Cache komentarzy | `src/db/cache.js` | `updateCache()` |
 | Opóźnienia human-like | `src/utils/sleep.js` | `humanTypingDelay()` |
 | Ruchy myszy | `src/utils/mouse.js` | `humanClick()` |
+| Meta Ads Scanner | `src/metaads/scanner.js` | `scanKeyword()` |
+| Cache reklam | `src/metaads/cache.js` | `loadCache()`, `saveCache()` |
+| LITE anti-detection | `src/lite/antiDetection.js` | `getRandomViewport()` |
+| LITE human behavior | `src/lite/humanBehavior.js` | `betweenPostsPause()` |
+| LITE night mode | `src/lite/nightMode.js` | `handleNightMode()` |
+| LITE feed scanner | `src/lite/feedScanner.js` | `scanFeed()` |
+| LITE discoveries | `data/discoveries.json` | (plik JSON) |
+| LITE blacklist | `data/blacklist.json` | (plik JSON) |
 
 ## Architektura
 
@@ -41,19 +68,34 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 2. **Lokalny plik** (`data/posts.json`) - fallback
 3. **Google Sheets** (`POSTS_SHEET_URL`) - ostateczny fallback
 
-## Ostatnia sesja (2026-01-20)
+## Ostatnia sesja (2026-01-28)
 
-### Branch: `feat/react-admin-panel`
+### Branch: `fix/stability-page-per-post`
 
 ### Co zostało zrobione
-- **2Captcha solver** - automatyczne rozwiązywanie captcha przy logowaniu:
-  - Plugin `puppeteer-extra-plugin-recaptcha`
-  - Konfiguracja: `CAPTCHA_API_KEY` w .env
-  - Działa dla reCAPTCHA v2/v3
-- **Uproszczenie logiki cookies** - usunięto rotację backup cookies:
-  - Usunięto soft ban detection
-  - Usunięto automatyczną rotację cookies przy checkpoint
-  - Checkpoint = alert Telegram + stop (wymaga ręcznej interwencji)
+- **FB_Watcher LITE** - zaawansowany moduł anti-detection i human behavior:
+  - Session management (losowy viewport, długość sesji 30-90 min)
+  - Warmup session (5-10 min naturalnej aktywności przed monitorowaniem)
+  - Night mode (sen nocny + morning catch-up)
+  - Feed Scanner (skanowanie tablicy po keywords)
+  - Discoveries/Blacklist system (panel API + pliki JSON)
+  - Human behavior: płynne scrollowanie, symulacja błędów, tab switching
+  - Profile visits, image interaction, random likes
+
+### Poprzednia sesja (2026-01-26)
+- **Meta Ads Scanner - naprawa ekstrakcji** (zmiana UI Facebooka):
+  - Facebook nie używa już linków `/ads/library/?id=` w HTML
+  - Dane reklam są teraz osadzone jako JSON w HTML strony
+  - Przepisano `extractor.js` - parsuje JSON z `ad_archive_id`, `page_id`, `page_name`
+  - Dodano `METAADS_HEADLESS` - kontrola widoczności przeglądarki
+  - Dodano `METAADS_DEBUG` - screenshoty i zapis HTML do debugowania
+- **Naprawa systemu logowania** w module metaads:
+  - Zmiana z `log(1, ...)` na nowe API `log.prod("METAADS", ...)`
+  - Wszystkie 4 pliki zaktualizowane (index, scanner, extractor, cache)
+
+### Poprzednia sesja (2026-01-20)
+- **2Captcha solver** - automatyczne rozwiązywanie captcha przy logowaniu
+- **Uproszczenie logiki cookies** - usunięto rotację backup cookies
 - **Czyszczenie kodu** - usunięto ~400 linii niepotrzebnego kodu
 
 ### Konfiguracja 2Captcha (.env)
@@ -113,6 +155,57 @@ HUMAN_MODE=true                    # włącza symulację człowieka (domyślnie 
 PROXY_URL=http://user:pass@host:port  # rotating residential proxy (opcjonalne)
 ```
 
+### Meta Ads Scanner
+```
+METAADS_KEYWORDS=garaże blaszane,hale magazynowe  # słowa kluczowe (rozdzielone ,)
+METAADS_COUNTRY=PL                                # kraj (ISO 3166-1 alpha-2)
+METAADS_SCAN_INTERVAL_H=12                        # interwał skanowania (godziny)
+METAADS_AUTO_SEND_TO_WATCHER=true                 # auto-wysyłka do panelu
+METAADS_HEADLESS=true                             # false = widoczna przeglądarka
+METAADS_DEBUG=false                               # true = screenshoty + HTML debug
+```
+
+### FB_Watcher LITE
+```
+# Session Management
+SESSION_LENGTH_MIN_MS=1800000      # 30 min - minimalna długość sesji
+SESSION_LENGTH_MAX_MS=5400000      # 90 min - maksymalna długość sesji
+
+# Warmup (sesja rozgrzewkowa przed monitorowaniem)
+WARMUP_ENABLED=true
+WARMUP_DURATION_MIN_MS=300000      # 5 min
+WARMUP_DURATION_MAX_MS=600000      # 10 min
+
+# Anti-Detection
+VIEWPORT_RANDOMIZATION=true        # losowa rozdzielczość przy każdej sesji
+TYPING_MISTAKES_ENABLED=true       # symulacja literówek (3%)
+TYPING_MISTAKES_CHANCE=0.03
+NAVIGATION_MISTAKES_ENABLED=true   # symulacja cofania/powrotu
+PROFILE_VISITS_ENABLED=true        # odwiedzanie losowych profili (8%)
+PROFILE_VISITS_CHANCE=0.08
+TAB_SIMULATION_ENABLED=true        # symulacja przełączania kart (10%)
+TAB_SIMULATION_CHANCE=0.10
+IMAGE_INTERACTION_ENABLED=true     # interakcja ze zdjęciami (15%)
+IMAGE_INTERACTION_CHANCE=0.15
+
+# Night Mode (tryb nocny)
+NIGHT_MODE_ENABLED=false           # włącz żeby bot spał w nocy
+NIGHT_START_HOUR=22                # początek nocy (22:00)
+NIGHT_END_HOUR=7                   # koniec nocy (7:00)
+NIGHT_CATCHUP_HOURS=8              # po ilu godzinach robić catch-up
+
+# Feed Scanner (skanowanie tablicy)
+FEED_SCAN_ENABLED=false            # włącz żeby skanować feed
+FEED_SCAN_KEYWORDS=garaż,blaszany,hala,wiata  # słowa kluczowe
+FEED_SCROLL_DURATION_MIN=1         # min czas scrollowania (minuty)
+FEED_SCROLL_DURATION_MAX=3         # max czas scrollowania (minuty)
+
+# Human Behavior
+HUMAN_RANDOM_LIKE_CHANCE=0.20      # szansa na losowy like (20%)
+DISCOVERY_TELEGRAM_ENABLED=false   # alert Telegram przy nowym discovery
+WEBHOOK_MAX_AGE_MIN=60             # max wiek komentarzy do wysłania
+```
+
 ## Ważne informacje techniczne
 
 ### Stealth
@@ -139,6 +232,57 @@ Logi przy `LOG_LEVEL=2`:
 [HUMAN] Human Behavior Mode włączony
 [HUMAN] Kolejność postów: post3 → post1 → post2
 [HUMAN] Pauza: 5.2s
+```
+
+### FB_Watcher LITE
+Zaawansowany moduł anti-detection z wieloma warstwami ochrony:
+
+**Session Management:**
+- Losowy viewport przy każdej sesji (popularne rozdzielczości)
+- Sesje 30-90 min, potem restart z nowym fingerprint
+- Adaptive delays w zależności od pory dnia
+
+**Warmup Session:**
+- 5-10 minut naturalnej aktywności przed monitorowaniem
+- Scroll feed, odwiedzanie profili, oglądanie zdjęć
+- Buduje "normalną" historię aktywności
+
+**Night Mode:**
+- Sen nocny (domyślnie 22:00-7:00)
+- Morning catch-up z rozszerzonym max age
+- Losowa wariancja czasu budzenia (+/- 30 min)
+
+**Feed Scanner:**
+- Skanuje tablicę FB w poszukiwaniu postów z keywords
+- Discoveries zapisywane do `data/discoveries.json`
+- Panel API do akceptacji/odrzucania
+
+**Human-like Actions:**
+- Płynne scrollowanie (easing in/out, overshoot)
+- Symulacja literówek i błędów nawigacji
+- Tab switching (visibility change events)
+- Profile visits i image interaction
+- Random likes
+
+**Panel API (nowe endpointy):**
+```
+GET  /api/discoveries              - lista pending discoveries
+POST /api/discoveries/:id/approve  - akceptuj → dodaj do watched
+POST /api/discoveries/:id/reject   - odrzuć → dodaj do blacklist
+POST /api/discoveries/approve-all  - akceptuj wszystkie
+POST /api/discoveries/reject-all   - odrzuć wszystkie
+GET  /api/blacklist                - lista blacklist
+DELETE /api/blacklist/:id          - usuń z blacklist
+POST /api/blacklist                - dodaj URL ręcznie
+```
+
+Logi przy `LOG_LEVEL=2`:
+```
+[LITE] Nowa sesja: viewport 1920x1080, długość 67 min
+[LITE] Warmup: 7 min
+[LITE] Night Mode: 22:00 - 7:00
+[LITE] Feed Scan: 4 keywords
+[LITE] Background actions: tab_switch, image_hover
 ```
 
 ### Cache
@@ -181,6 +325,42 @@ Zmniejsza ryzyko banów przez zmianę IP:
 - Facebook flaguje: datacenter IP, ciągłą aktywność z jednego IP
 - Residential IP wyglądają jak zwykli użytkownicy
 
+### Meta Ads Scanner
+Moduł do skanowania biblioteki reklam Meta (Ad Library).
+
+**Ekstrakcja danych (2026-01-26):**
+- Facebook osadza dane reklam jako JSON w HTML strony
+- Parsujemy pola: `ad_archive_id`, `page_id`, `page_name`, `page_profile_uri`
+- Budujemy snapshot URL: `https://facebook.com/ads/library/?id={ad_archive_id}`
+
+**Flow:**
+1. Wyszukanie reklam po słowach kluczowych
+2. Ekstrakcja danych z JSON (adId, pageName, pageId)
+3. Sprawdzenie snapshotu - czy jest link do posta FB
+4. Wysłanie do panelu watchera (jeśli `METAADS_AUTO_SEND_TO_WATCHER=true`)
+
+**Typy reklam:**
+| Typ | Ma post FB? | Wykrywanie | Oznaczenie w panelu |
+|-----|-------------|------------|---------------------|
+| Promowany post | TAK | `fbid` > 0 w JSON | `[ADS] {pageName}` |
+| Dark post | NIE | `fbid:0` w JSON | `[DARK] {pageName}` |
+| Link ad | NIE | `link_url` → zewnętrzna strona | `[DARK] {pageName}` |
+
+**Uwaga (2026-01-26):** Większość reklam w Ad Library to dark posts lub link ads bez powiązanego posta FB. Funkcja `extractPostUrlFromSnapshot()` wcześnie wykrywa te typy przez sprawdzenie `fbid:0` i `link_url`.
+
+**Cache:**
+- Plik: `data/metaads-cache.json`
+- Deduplikacja przez `adId`
+- Struktura: `{ "keyword:X": { "adId": {...} } }`
+
+**Logi:**
+```
+[METAADS] Start skanowania dla: garaże blaszane
+[METAADS] Znaleziono 15 reklam dla "garaże blaszane"
+[METAADS] Nowa reklama: Garaże Premium (123456)
+[METAADS] Wysłano do panelu: [ADS] Garaże Premium
+```
+
 ## Serwer produkcyjny
 
 | Parametr | Wartość |
@@ -215,6 +395,18 @@ node scripts/generate-cookies.js
 
 # Uruchomienie z remote debug (podgląd przeglądarki)
 REMOTE_DEBUG_PORT=9222 node src/index.js
+
+# Meta Ads Scanner - pojedyncze skanowanie
+node src/metaads/index.js --keywords "garaże blaszane" --once
+
+# Meta Ads Scanner - dry-run (bez wysyłki do panelu)
+node src/metaads/index.js --keywords "garaże blaszane" --once --dry-run
+
+# Meta Ads Scanner - debug mode (widoczna przeglądarka + screenshoty)
+METAADS_HEADLESS=false METAADS_DEBUG=true node src/metaads/index.js --keywords "garaże" --once
+
+# Meta Ads Scanner - jako osobny proces PM2
+pm2 start src/metaads/index.js --name metaads-scanner
 ```
 
 ## Skrypty pomocnicze
@@ -270,6 +462,8 @@ pm2 restart fb-watcher
 
 ## Do zrobienia / Potencjalne usprawnienia
 - [ ] Testy 2Captcha na produkcji przy rzeczywistym checkpoint
-- [ ] Obsługa błędów gdy FB zmieni UI
+- [x] Obsługa błędów gdy FB zmieni UI (Meta Ads Scanner - 2026-01-26)
+- [x] Wykrywanie typu reklamy (dark post/link ad/promowany post) - 2026-01-26
 - [ ] Rate limiting dla Telegram
 - [ ] Metryki/statystyki wykrywania
+- [ ] Meta Ads Scanner: wyciąganie treści reklamy ze snapshotu

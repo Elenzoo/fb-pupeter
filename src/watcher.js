@@ -23,6 +23,23 @@ import {
   REMOTE_DEBUG_PORT,
   HUMAN_MODE,
   PROXY_URL,
+  // LITE config
+  SESSION_LENGTH_MIN_MS,
+  SESSION_LENGTH_MAX_MS,
+  WARMUP_ENABLED,
+  WARMUP_DURATION_MIN_MS,
+  WARMUP_DURATION_MAX_MS,
+  VIEWPORT_RANDOMIZATION,
+  NIGHT_MODE_ENABLED,
+  NIGHT_START_HOUR,
+  NIGHT_END_HOUR,
+  NIGHT_CATCHUP_HOURS,
+  FEED_SCAN_ENABLED,
+  FEED_SCAN_KEYWORDS,
+  FEED_SCROLL_DURATION_MIN,
+  FEED_SCROLL_DURATION_MAX,
+  HUMAN_RANDOM_LIKE_CHANCE,
+  DISCOVERY_TELEGRAM_ENABLED,
 } from "./config.js";
 
 // Konfiguracja captcha solver (2Captcha) - zostawiam jak masz (nie rozbudowuję tego)
@@ -48,10 +65,34 @@ import { loadCookies, saveCookies } from "./fb/cookies.js";
 import { checkIfLogged, fbLogin, solveCaptchaIfPresent } from "./fb/login.js";
 import { isCheckpoint, getCheckpointType } from "./fb/checkpoint.js";
 import { parseFbRelativeTime, filterByAge } from "./utils/time.js";
-import { shuffleArray, betweenPostsPause } from "./utils/sleep.js";
+import { shuffleArray } from "./utils/sleep.js";
 import { loadCache, saveCache, getCacheSize, getCacheEntryCount } from "./db/cache.js";
 import { sendTelegramLeads, sendOwnerAlert } from "./telegram.js";
 import log from "./utils/logger.js";
+
+// LITE imports
+import {
+  getRandomViewport,
+  getRandomSessionLength,
+  getRandomizedInterval,
+  shouldEndSession,
+  generateSessionFingerprint,
+} from "./lite/antiDetection.js";
+import { warmupSession, getRandomWarmupDuration } from "./lite/warmup.js";
+import { handleNightMode, getNextSleepInfo } from "./lite/nightMode.js";
+import {
+  betweenPostsPause,
+  executeRandomBackgroundActions,
+  createHumanBehavior,
+  maybeVisitHomeFeed,
+  performMouseMovements,
+} from "./lite/humanBehavior.js";
+import { scanFeed } from "./lite/feedScanner.js";
+import { maybeRandomLike } from "./lite/randomActions.js";
+import { smoothScrollBy } from "./lite/smoothScroll.js";
+import { maybeSimulateTabSwitch } from "./lite/tabSimulation.js";
+import { maybeVisitProfile, findProfileLinks } from "./lite/profileVisitor.js";
+import { maybeInteractWithRandomImage } from "./lite/imageInteraction.js";
 
 /**
  * ŹRÓDŁO POSTÓW (PRIMARY): panel => data/posts.json
@@ -82,6 +123,15 @@ for (const [url, entry] of Object.entries(commentsCache)) {
 let currentPosts = [];
 let lastRefreshAny = 0;
 let cycleNumber = 0;
+
+// LITE: Session management
+let sessionFingerprint = null;
+let sessionStartTime = 0;
+let isFirstCycleOfSession = true;
+let lastCheckTime = null;
+
+// LITE: Human behavior instance
+const humanBehavior = createHumanBehavior();
 
 // ======= Stabilność: eskalacja błędów =======
 let consecutiveHardFails = 0; // licznik kolejnych fail-i typu NAV/PROTOCOL/TARGET
@@ -280,7 +330,14 @@ async function setupLightweightPage(page) {
 
   page.setDefaultNavigationTimeout(90000);
   page.setDefaultTimeout(90000);
-  await page.setViewport({ width: 1280, height: 720 });
+
+  // LITE: Użyj losowego viewportu z sesji lub domyślnego
+  if (VIEWPORT_RANDOMIZATION && sessionFingerprint?.viewport) {
+    await page.setViewport(sessionFingerprint.viewport);
+  } else {
+    await page.setViewport({ width: 1280, height: 720 });
+  }
+
   await applyStealth(page);
 }
 
@@ -650,7 +707,19 @@ async function startWatcher() {
   log.prod("WATCHER", `Start - interwał: ${Math.round(CHECK_INTERVAL_MS / 1000)}s`, {
     fastMode: FAST_MODE,
     logLevel: log.level,
+    liteMode: true,
   });
+
+  // LITE: Log konfiguracji
+  if (NIGHT_MODE_ENABLED) {
+    log.prod("LITE", `Night Mode: ${NIGHT_START_HOUR}:00 - ${NIGHT_END_HOUR}:00`);
+  }
+  if (WARMUP_ENABLED) {
+    log.prod("LITE", `Warmup: ${Math.round(WARMUP_DURATION_MIN_MS / 60000)}-${Math.round(WARMUP_DURATION_MAX_MS / 60000)} min`);
+  }
+  if (FEED_SCAN_ENABLED && FEED_SCAN_KEYWORDS) {
+    log.prod("LITE", `Feed Scan: keywords = ${FEED_SCAN_KEYWORDS}`);
+  }
 
   const loop = async () => {
     const cycleStart = Date.now();
@@ -658,11 +727,52 @@ async function startWatcher() {
     let newCommentsTotal = 0;
     let errorsCount = 0;
     let hadNavErrorThisRound = false;
+    let maxAgeOverride = null;
 
     let browser = null;
     let ctx = null;
 
     try {
+      // ============ LITE: Night Mode ============
+      if (NIGHT_MODE_ENABLED) {
+        const nightResult = await handleNightMode({
+          enabled: true,
+          startHour: NIGHT_START_HOUR,
+          endHour: NIGHT_END_HOUR,
+          catchupHours: NIGHT_CATCHUP_HOURS,
+          baseMaxAgeMin: FAST_MAX_AGE_MIN,
+          lastCheck: lastCheckTime,
+        });
+
+        if (nightResult.slept) {
+          log.prod("LITE", "Obudziłem się po nocy");
+          isFirstCycleOfSession = true; // Reset sesji po nocy
+          sessionFingerprint = null;
+        }
+
+        if (nightResult.catchUp) {
+          maxAgeOverride = nightResult.maxAgeOverride;
+          log.prod("LITE", `Catch-up mode: max age = ${Math.round(maxAgeOverride)} min`);
+        }
+      }
+
+      // ============ LITE: Session Management ============
+      const needNewSession =
+        !sessionFingerprint ||
+        shouldEndSession(sessionStartTime, sessionFingerprint.sessionLength);
+
+      if (needNewSession) {
+        sessionFingerprint = generateSessionFingerprint({
+          sessionMinMs: SESSION_LENGTH_MIN_MS,
+          sessionMaxMs: SESSION_LENGTH_MAX_MS,
+        });
+        sessionStartTime = Date.now();
+        isFirstCycleOfSession = true;
+
+        log.prod("LITE", `Nowa sesja: viewport ${sessionFingerprint.viewport.width}x${sessionFingerprint.viewport.height}, ` +
+          `długość ${Math.round(sessionFingerprint.sessionLength / 60000)} min`);
+      }
+
       log.prod("WATCHER", `Cykl #${cycleNumber} start`, { posts: currentPosts.length });
 
       // Odśwież posty na start cyklu
@@ -816,6 +926,66 @@ async function startWatcher() {
         await safeClosePage(loginPage);
       }
 
+      // ============ LITE: Warmup Session ============
+      if (WARMUP_ENABLED && isFirstCycleOfSession) {
+        const warmupPage = await ctx.newPage();
+        await setupLightweightPage(warmupPage);
+        await loadCookies(warmupPage).catch(() => {});
+
+        const warmupDuration = getRandomWarmupDuration(WARMUP_DURATION_MIN_MS, WARMUP_DURATION_MAX_MS);
+        log.prod("LITE", `Warmup: ${Math.round(warmupDuration / 60000)} min`);
+
+        try {
+          const warmupResult = await warmupSession(warmupPage, warmupDuration);
+          log.dev("LITE", `Warmup zakończony: ${warmupResult.actions.join(", ")}`);
+        } catch (warmupErr) {
+          log.dev("LITE", `Warmup błąd: ${warmupErr.message}`);
+        }
+
+        await safeClosePage(warmupPage);
+        isFirstCycleOfSession = false;
+      }
+
+      // ============ LITE: Feed Scan (losowo 30-50% szans) ============
+      if (FEED_SCAN_ENABLED && FEED_SCAN_KEYWORDS && Math.random() < 0.4) {
+        const feedPage = await ctx.newPage();
+        await setupLightweightPage(feedPage);
+        await loadCookies(feedPage).catch(() => {});
+
+        const keywords = FEED_SCAN_KEYWORDS.split(",").map(k => k.trim()).filter(Boolean);
+        const watchedUrls = currentPosts.map(p => p.url);
+
+        log.prod("LITE", `Feed Scan: ${keywords.length} keywords`);
+
+        try {
+          const scanResult = await scanFeed(feedPage, {
+            keywords,
+            watchedUrls,
+            scrollDurationMin: FEED_SCROLL_DURATION_MIN,
+            scrollDurationMax: FEED_SCROLL_DURATION_MAX,
+            likeChance: HUMAN_RANDOM_LIKE_CHANCE,
+            onDiscovery: DISCOVERY_TELEGRAM_ENABLED ? async (discovery) => {
+              await sendOwnerAlert(
+                "Nowe Discovery",
+                `Znaleziono post z keywords!\n\n` +
+                `Strona: ${discovery.pageName}\n` +
+                `Keywords: ${discovery.matchedKeywords.join(", ")}\n` +
+                `URL: ${discovery.url}\n\n` +
+                `Treść: ${discovery.content.substring(0, 200)}...`
+              );
+            } : null,
+          });
+
+          if (scanResult.discoveries.length > 0) {
+            log.prod("LITE", `Feed Scan: ${scanResult.discoveries.length} nowych discoveries`);
+          }
+        } catch (scanErr) {
+          log.dev("LITE", `Feed Scan błąd: ${scanErr.message}`);
+        }
+
+        await safeClosePage(feedPage);
+      }
+
       if (!currentPosts.length) {
         log.warn("WATCHER", "Brak aktywnych postów do monitorowania");
       } else {
@@ -824,12 +994,9 @@ async function startWatcher() {
         log.dev("HUMAN", `Kolejność postów: ${postOrder}`);
 
         let postIndex = 0;
+        let lastPostPage = null; // Referencja do ostatniego page dla akcji między postami
 
         for (const post of shuffledPosts) {
-          if (postIndex > 0) {
-            const pauseMs = await betweenPostsPause();
-            log.dev("HUMAN", `Pauza: ${(pauseMs / 1000).toFixed(1)}s`);
-          }
           postIndex++;
 
           const cacheKey = getCacheKey(post);
@@ -845,6 +1012,7 @@ async function startWatcher() {
             let page = null;
             try {
               page = await ctx.newPage();
+              lastPostPage = page; // Zapisz referencję do page
               await setupLightweightPage(page);
 
               // Jeżeli chcesz, możesz tu też ładować cookies per page (nie jest konieczne w obrębie tego samego contextu,
@@ -853,7 +1021,26 @@ async function startWatcher() {
                 await loadCookies(page).catch(() => {});
               }
 
-              log.dev("NAV", `→ ${postLabel} (attempt ${attempt}/${MAX_POST_RETRY + 1})`);
+              // LITE: Przerwa między postami (1-3 min) - wykonywana na NOWEJ stronie
+              if (HUMAN_MODE) {
+                if (postIndex > 1) {
+                  log.prod("LITE", `=== Między postami (${postIndex - 1}/${shuffledPosts.length}) ===`);
+
+                  // Długa przerwa 1-3 min z szansą na scrollowanie głównej
+                  const pauseResult = await humanBehavior.betweenPostsPause(page);
+
+                  log.prod("LITE", `[PAUZA] Wynik: ${(pauseResult.totalTime / 1000).toFixed(0)}s total, ` +
+                    `home=${pauseResult.homeFeedVisited}, scroll=${(pauseResult.scrollTime / 1000).toFixed(0)}s`);
+                } else {
+                  log.prod("LITE", `=== Pierwszy post w cyklu ===`);
+                }
+
+                // Ruchy myszy przed nawigacją do posta
+                log.dev("LITE", "[MOUSE] Ruchy myszy przed nawigacją");
+                await performMouseMovements(page, 2 + Math.floor(Math.random() * 3));
+              }
+
+              log.prod("NAV", `→ ${postLabel} (attempt ${attempt}/${MAX_POST_RETRY + 1})`);
               await prepare(page, post.url);
 
               // ==================== FAST_MODE BRANCH ====================
@@ -1018,6 +1205,26 @@ async function startWatcher() {
 
               // sukces → reset liczników hard fail
               consecutiveHardFails = 0;
+
+              // LITE: Losowe akcje tła po przetworzeniu posta
+              if (HUMAN_MODE && page) {
+                try {
+                  log.dev("LITE", "[BACKGROUND] Sprawdzam losowe akcje...");
+                  const bgResult = await executeRandomBackgroundActions(page, humanBehavior.config);
+                  if (bgResult.actions.length > 0) {
+                    log.prod("LITE", `[BACKGROUND] Wykonano: ${bgResult.actions.join(", ")}`);
+                  }
+
+                  // Losowy ruch myszy na koniec (60% szans)
+                  if (Math.random() < 0.6) {
+                    log.dev("LITE", "[MOUSE] Końcowe ruchy myszy");
+                    await performMouseMovements(page, 1 + Math.floor(Math.random() * 2));
+                  }
+                } catch (bgErr) {
+                  log.debug("LITE", `Background actions błąd: ${bgErr.message}`);
+                }
+              }
+
               done = true;
             } catch (err) {
               errorsCount++;
@@ -1125,13 +1332,29 @@ async function startWatcher() {
         process.exit(1);
       }
 
-      // prewencyjny “cycle recycle” (opcjonalnie)
+      // prewencyjny "cycle recycle" (opcjonalnie)
       if (BROWSER_RECYCLE_EVERY_CYCLES > 0 && cycleNumber % BROWSER_RECYCLE_EVERY_CYCLES === 0) {
         log.prod("WATCHER", `Prewencja: cycle recycle aktywny (co ${BROWSER_RECYCLE_EVERY_CYCLES} cykli)`);
       }
 
-      const jitter = Math.floor(Math.random() * 5000);
-      const delay = CHECK_INTERVAL_MS + jitter;
+      // LITE: Aktualizuj czas ostatniego sprawdzenia
+      lastCheckTime = new Date();
+
+      // LITE: Sprawdź czy sesja powinna się zakończyć
+      if (sessionFingerprint && shouldEndSession(sessionStartTime, sessionFingerprint.sessionLength)) {
+        log.prod("LITE", "Koniec sesji - następny cykl z nową sesją");
+        sessionFingerprint = null;
+      }
+
+      // LITE: Losowy interwał z wariancją
+      const delay = getRandomizedInterval(CHECK_INTERVAL_MS);
+
+      // LITE: Info o night mode
+      if (NIGHT_MODE_ENABLED) {
+        const sleepInfo = getNextSleepInfo(NIGHT_START_HOUR, NIGHT_END_HOUR);
+        log.dev("LITE", sleepInfo);
+      }
+
       log.dev("WATCHER", `Następny cykl za ${Math.round(delay / 1000)}s`);
       setTimeout(loop, delay);
     }

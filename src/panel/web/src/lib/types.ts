@@ -59,6 +59,38 @@ export interface EnvValues {
   TG_ALERTS_MAXLEN: string
   // Legacy
   WEBHOOK_URL: string
+  // LITE: Session Management
+  SESSION_LENGTH_MIN_MS: string
+  SESSION_LENGTH_MAX_MS: string
+  WARMUP_ENABLED: string
+  WARMUP_DURATION_MIN_MS: string
+  WARMUP_DURATION_MAX_MS: string
+  // LITE: Anti-Detection
+  VIEWPORT_RANDOMIZATION: string
+  TYPING_MISTAKES_ENABLED: string
+  TYPING_MISTAKES_CHANCE: string
+  NAVIGATION_MISTAKES_ENABLED: string
+  PROFILE_VISITS_ENABLED: string
+  PROFILE_VISITS_CHANCE: string
+  TAB_SIMULATION_ENABLED: string
+  TAB_SIMULATION_CHANCE: string
+  IMAGE_INTERACTION_ENABLED: string
+  IMAGE_INTERACTION_CHANCE: string
+  // LITE: Night Mode
+  NIGHT_MODE_ENABLED: string
+  NIGHT_START_HOUR: string
+  NIGHT_END_HOUR: string
+  NIGHT_CATCHUP_HOURS: string
+  // LITE: Feed Scanner
+  FEED_SCAN_ENABLED: string
+  FEED_SCAN_KEYWORDS: string
+  FEED_SCROLL_DURATION_MIN: string
+  FEED_SCROLL_DURATION_MAX: string
+  // LITE: Human Behavior
+  HUMAN_MODE: string
+  HUMAN_RANDOM_LIKE_CHANCE: string
+  DISCOVERY_TELEGRAM_ENABLED: string
+  WEBHOOK_MAX_AGE_MIN: string
 }
 
 // Status sesji cookies
@@ -79,15 +111,26 @@ export interface Source {
   groupUrl?: string
 }
 
-// Wykrycie do zatwierdzenia (przyszłość)
+// Wykrycie do zatwierdzenia
 export interface Discovery {
   id: string
-  sourceId: string
-  postUrl: string
+  url: string
   content: string
-  status: 'pending' | 'approved' | 'rejected'
+  pageName?: string
   matchedKeywords: string[]
+  source: 'home_feed' | 'group' | 'meta_ads'
   discoveredAt: string
+  status: 'pending' | 'approved' | 'rejected'
+}
+
+// Wpis na blacklist
+export interface BlacklistEntry {
+  id: string
+  url: string
+  reason: 'user_rejected' | 'manual'
+  rejectedAt: string
+  content?: string
+  pageName?: string
 }
 
 // API Response types
@@ -115,4 +158,18 @@ export interface LogsResponse {
   path?: string
   error?: string
   source?: string
+}
+
+export interface DiscoveriesResponse {
+  ok: boolean
+  discoveries: Discovery[]
+  total: number
+  error?: string
+}
+
+export interface BlacklistResponse {
+  ok: boolean
+  blacklist: BlacklistEntry[]
+  total: number
+  error?: string
 }

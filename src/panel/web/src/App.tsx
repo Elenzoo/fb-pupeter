@@ -5,6 +5,7 @@ import { Dashboard } from '@/pages/Dashboard'
 import { Watched } from '@/pages/Watched'
 import { Sources } from '@/pages/Sources'
 import { Discoveries } from '@/pages/Discoveries'
+import { Blacklist } from '@/pages/Blacklist'
 import { Campaigns } from '@/pages/Campaigns'
 import { Cookies } from '@/pages/Cookies'
 import { Settings } from '@/pages/Settings'
@@ -20,6 +21,7 @@ export default function App() {
             <Route path="/watched" element={<Watched />} />
             <Route path="/sources" element={<Sources />} />
             <Route path="/discoveries" element={<Discoveries />} />
+            <Route path="/blacklist" element={<Blacklist />} />
             <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/cookies" element={<Cookies />} />
             <Route path="/settings" element={<Settings />} />

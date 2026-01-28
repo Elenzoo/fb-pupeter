@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom'
 import {
   Home,
   Bell,
+  Ban,
   Eye,
   Globe,
   Megaphone,
@@ -82,7 +83,11 @@ export function Sidebar({ className }: SidebarProps) {
             to="/discoveries"
             icon={<Bell className="h-4 w-4" />}
             label="Wykrycia"
-            disabled
+          />
+          <NavItem
+            to="/blacklist"
+            icon={<Ban className="h-4 w-4" />}
+            label="Blacklist"
           />
 
           <Separator className="my-3" />

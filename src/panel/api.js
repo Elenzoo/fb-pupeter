@@ -413,6 +413,7 @@ http
           // Watcher
           "CHECK_INTERVAL_MS",
           "FAST_MODE",
+          "FAST_MAX_AGE_MIN",
           "INCLUDE_REPLIES",
           // Logi
           "LOG_LEVEL",
@@ -439,6 +440,38 @@ http
           "TG_ALERTS_ENABLED",
           "TG_ALERTS_COOLDOWN_SEC",
           "TG_ALERTS_MAXLEN",
+          // LITE: Session Management
+          "SESSION_LENGTH_MIN_MS",
+          "SESSION_LENGTH_MAX_MS",
+          "WARMUP_ENABLED",
+          "WARMUP_DURATION_MIN_MS",
+          "WARMUP_DURATION_MAX_MS",
+          // LITE: Anti-Detection
+          "VIEWPORT_RANDOMIZATION",
+          "TYPING_MISTAKES_ENABLED",
+          "TYPING_MISTAKES_CHANCE",
+          "NAVIGATION_MISTAKES_ENABLED",
+          "PROFILE_VISITS_ENABLED",
+          "PROFILE_VISITS_CHANCE",
+          "TAB_SIMULATION_ENABLED",
+          "TAB_SIMULATION_CHANCE",
+          "IMAGE_INTERACTION_ENABLED",
+          "IMAGE_INTERACTION_CHANCE",
+          // LITE: Night Mode
+          "NIGHT_MODE_ENABLED",
+          "NIGHT_START_HOUR",
+          "NIGHT_END_HOUR",
+          "NIGHT_CATCHUP_HOURS",
+          // LITE: Feed Scanner
+          "FEED_SCAN_ENABLED",
+          "FEED_SCAN_KEYWORDS",
+          "FEED_SCROLL_DURATION_MIN",
+          "FEED_SCROLL_DURATION_MAX",
+          // LITE: Human Behavior
+          "HUMAN_MODE",
+          "HUMAN_RANDOM_LIKE_CHANCE",
+          "DISCOVERY_TELEGRAM_ENABLED",
+          "WEBHOOK_MAX_AGE_MIN",
           // Legacy
           "WEBHOOK_URL",
         ];
@@ -752,6 +785,257 @@ http
           mainCookiesSize: mainSize,
           isLoggedIn: mainExists && mainSize > 10,
         });
+        return;
+      }
+
+      // ===== LITE: DISCOVERIES =====
+      const DISCOVERIES_PATH = path.join(PROJECT_DIR, "data", "discoveries.json");
+      const BLACKLIST_PATH = path.join(PROJECT_DIR, "data", "blacklist.json");
+
+      function readDiscoveries() {
+        if (!fs.existsSync(DISCOVERIES_PATH)) return [];
+        const raw = fs.readFileSync(DISCOVERIES_PATH, "utf8").trim();
+        if (!raw) return [];
+        const parsed = safeJsonParse(raw);
+        return parsed.ok && Array.isArray(parsed.value) ? parsed.value : [];
+      }
+
+      function writeDiscoveries(data) {
+        atomicWriteFile(DISCOVERIES_PATH, JSON.stringify(data, null, 2) + "\n");
+      }
+
+      function readBlacklist() {
+        if (!fs.existsSync(BLACKLIST_PATH)) return [];
+        const raw = fs.readFileSync(BLACKLIST_PATH, "utf8").trim();
+        if (!raw) return [];
+        const parsed = safeJsonParse(raw);
+        return parsed.ok && Array.isArray(parsed.value) ? parsed.value : [];
+      }
+
+      function writeBlacklist(data) {
+        atomicWriteFile(BLACKLIST_PATH, JSON.stringify(data, null, 2) + "\n");
+      }
+
+      // GET /api/discoveries - lista pending discoveries
+      if (req.method === "GET" && pathname === "/api/discoveries") {
+        const discoveries = readDiscoveries();
+        const pending = discoveries.filter((d) => d.status === "pending");
+        json(res, { ok: true, discoveries: pending, total: discoveries.length });
+        return;
+      }
+
+      // POST /api/discoveries/:id/approve - akceptuj discovery
+      const mApprove = req.method === "POST" ? match(pathname, "/api/discoveries/:id/approve") : null;
+      if (mApprove) {
+        const id = mApprove.id;
+        const discoveries = readDiscoveries();
+        const idx = discoveries.findIndex((d) => d.id === id);
+
+        if (idx === -1) {
+          json(res, { ok: false, error: "Discovery not found" }, 404);
+          return;
+        }
+
+        const discovery = discoveries[idx];
+        discovery.status = "approved";
+        discovery.approvedAt = nowIso();
+
+        // Usuń z discoveries
+        discoveries.splice(idx, 1);
+        writeDiscoveries(discoveries);
+
+        // Dodaj do posts.json
+        const posts = readPosts(POSTS_PATH);
+        const existingPost = posts.find((p) => p.url === discovery.url);
+
+        if (!existingPost) {
+          const newPost = {
+            id: genId(),
+            url: discovery.url,
+            active: true,
+            name: `[DISC] ${discovery.pageName || "Unknown"}`,
+            image: "",
+            description: `Keywords: ${(discovery.matchedKeywords || []).join(", ")}`,
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+            source: "discovery",
+            discoveryId: discovery.id,
+          };
+          posts.push(newPost);
+          writePosts(POSTS_PATH, posts);
+          json(res, { ok: true, discovery, post: newPost });
+        } else {
+          json(res, { ok: true, discovery, post: existingPost, note: "Post already exists" });
+        }
+        return;
+      }
+
+      // POST /api/discoveries/:id/reject - odrzuć discovery
+      const mReject = req.method === "POST" ? match(pathname, "/api/discoveries/:id/reject") : null;
+      if (mReject) {
+        const id = mReject.id;
+        const discoveries = readDiscoveries();
+        const idx = discoveries.findIndex((d) => d.id === id);
+
+        if (idx === -1) {
+          json(res, { ok: false, error: "Discovery not found" }, 404);
+          return;
+        }
+
+        const discovery = discoveries[idx];
+
+        // Dodaj do blacklist
+        const blacklist = readBlacklist();
+        blacklist.push({
+          id: discovery.id,
+          url: discovery.url,
+          reason: "user_rejected",
+          rejectedAt: nowIso(),
+          content: discovery.content,
+          pageName: discovery.pageName,
+        });
+        writeBlacklist(blacklist);
+
+        // Usuń z discoveries
+        discoveries.splice(idx, 1);
+        writeDiscoveries(discoveries);
+
+        json(res, { ok: true, discovery });
+        return;
+      }
+
+      // POST /api/discoveries/approve-all - akceptuj wszystkie
+      if (req.method === "POST" && pathname === "/api/discoveries/approve-all") {
+        const discoveries = readDiscoveries();
+        const pending = discoveries.filter((d) => d.status === "pending");
+        const posts = readPosts(POSTS_PATH);
+        const approved = [];
+
+        for (const d of pending) {
+          d.status = "approved";
+          d.approvedAt = nowIso();
+
+          const existingPost = posts.find((p) => p.url === d.url);
+          if (!existingPost) {
+            const newPost = {
+              id: genId(),
+              url: d.url,
+              active: true,
+              name: `[DISC] ${d.pageName || "Unknown"}`,
+              image: "",
+              description: `Keywords: ${(d.matchedKeywords || []).join(", ")}`,
+              createdAt: nowIso(),
+              updatedAt: nowIso(),
+              source: "discovery",
+              discoveryId: d.id,
+            };
+            posts.push(newPost);
+            approved.push({ discovery: d, post: newPost });
+          } else {
+            approved.push({ discovery: d, post: existingPost, note: "Post already exists" });
+          }
+        }
+
+        // Usuń zatwierdzone z discoveries
+        const remaining = discoveries.filter((d) => d.status !== "approved");
+        writeDiscoveries(remaining);
+        writePosts(POSTS_PATH, posts);
+
+        json(res, { ok: true, approved, count: approved.length });
+        return;
+      }
+
+      // POST /api/discoveries/reject-all - odrzuć wszystkie
+      if (req.method === "POST" && pathname === "/api/discoveries/reject-all") {
+        const discoveries = readDiscoveries();
+        const pending = discoveries.filter((d) => d.status === "pending");
+        const blacklist = readBlacklist();
+
+        for (const d of pending) {
+          blacklist.push({
+            id: d.id,
+            url: d.url,
+            reason: "bulk_rejected",
+            rejectedAt: nowIso(),
+            content: d.content,
+            pageName: d.pageName,
+          });
+        }
+
+        writeBlacklist(blacklist);
+
+        // Usuń odrzucone z discoveries
+        const remaining = discoveries.filter((d) => d.status !== "pending");
+        writeDiscoveries(remaining);
+
+        json(res, { ok: true, rejected: pending.length });
+        return;
+      }
+
+      // ===== LITE: BLACKLIST =====
+
+      // GET /api/blacklist - lista blacklist
+      if (req.method === "GET" && pathname === "/api/blacklist") {
+        const blacklist = readBlacklist();
+        json(res, { ok: true, blacklist, total: blacklist.length });
+        return;
+      }
+
+      // DELETE /api/blacklist/:id - usuń z blacklist
+      const mBlacklistDel = req.method === "DELETE" ? match(pathname, "/api/blacklist/:id") : null;
+      if (mBlacklistDel) {
+        const id = mBlacklistDel.id;
+        const blacklist = readBlacklist();
+        const idx = blacklist.findIndex((b) => b.id === id);
+
+        if (idx === -1) {
+          json(res, { ok: false, error: "Blacklist entry not found" }, 404);
+          return;
+        }
+
+        const removed = blacklist.splice(idx, 1)[0];
+        writeBlacklist(blacklist);
+
+        json(res, { ok: true, removed });
+        return;
+      }
+
+      // POST /api/blacklist - dodaj do blacklist ręcznie
+      if (req.method === "POST" && pathname === "/api/blacklist") {
+        const bodyRaw = await readBody(req);
+        const parsed = safeJsonParse(bodyRaw || "{}");
+        if (!parsed.ok) {
+          json(res, { ok: false, error: "Invalid JSON body" }, 400);
+          return;
+        }
+
+        const url = normalizeUrl(parsed.value.url);
+        const reason = String(parsed.value.reason || "manual").trim();
+
+        if (!url) {
+          json(res, { ok: false, error: "Invalid url" }, 400);
+          return;
+        }
+
+        const blacklist = readBlacklist();
+        const existing = blacklist.find((b) => b.url === url);
+
+        if (existing) {
+          json(res, { ok: false, error: "URL already in blacklist" }, 409);
+          return;
+        }
+
+        const entry = {
+          id: `bl_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+          url,
+          reason,
+          rejectedAt: nowIso(),
+        };
+
+        blacklist.push(entry);
+        writeBlacklist(blacklist);
+
+        json(res, { ok: true, entry });
         return;
       }
 
