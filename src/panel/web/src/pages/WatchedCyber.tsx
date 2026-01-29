@@ -69,23 +69,23 @@ export function WatchedCyber() {
   // Vim-style keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if in input, textarea, contenteditable, dialog, or add form is open
-      const target = e.target as HTMLElement
-      const isInInput =
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.isContentEditable ||
-        target.closest('[role="dialog"]') ||
-        target.closest('form') ||
-        target.closest('[data-form]')
-
-      // Only allow Escape when in input
-      if (isInInput) {
+      // If any form/dialog is open, only handle Escape
+      if (showAdd || editPost || deleteTarget) {
         if (e.key === 'Escape') {
           setShowAdd(false)
           setEditPost(null)
           setDeleteTarget(null)
         }
+        return
+      }
+
+      // Ignore if in any input element
+      const target = e.target as HTMLElement
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+      ) {
         return
       }
 
@@ -149,7 +149,7 @@ export function WatchedCyber() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [posts, selectedIndex, loadPosts])
+  }, [posts, selectedIndex, loadPosts, showAdd, editPost, deleteTarget])
 
   const showMessage = (text: string, type: 'success' | 'error') => {
     setMessage({ text, type })
