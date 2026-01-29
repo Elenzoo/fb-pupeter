@@ -126,6 +126,17 @@ export function CyberLayout() {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if in input, textarea, or contenteditable
+      const target = e.target as HTMLElement
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.closest('[role="dialog"]')
+      ) {
+        return
+      }
+
       if (e.ctrlKey || e.metaKey || e.altKey) return
 
       const allItems = [...NAV_ITEMS, ...NAV_ITEMS_SECONDARY]
