@@ -69,9 +69,16 @@ export function WatchedCyber() {
   // Vim-style keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if in input
+      // Ignore if in input, textarea, contenteditable, or dialog is open
       const target = e.target as HTMLElement
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      const isEditing =
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.closest('[role="dialog"]')
+
+      // Only allow Escape when editing
+      if (isEditing && e.key !== 'Escape') return
 
       switch (e.key.toLowerCase()) {
         case 'j':
