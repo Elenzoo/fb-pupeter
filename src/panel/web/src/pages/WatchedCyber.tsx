@@ -437,7 +437,7 @@ export function WatchedCyber() {
           <span className="w-14">STATUS</span>
           <span className="w-48">NAZWA</span>
           <span className="flex-1">URL</span>
-          <span className="w-16">PODGLAD</span>
+          <span className="w-24">PODGLAD</span>
           <span className="w-20">ID</span>
           <span className="w-28">AKCJE</span>
         </div>

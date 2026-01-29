@@ -88,7 +88,7 @@ export function PostRow({
       </div>
 
       {/* Preview thumbnail */}
-      <div className="w-16 h-10 rounded overflow-hidden bg-[#09090b] border border-[#00ffff20]">
+      <div className="w-24 h-16 rounded overflow-hidden bg-[#09090b] border border-[#00ffff20]">
         {post.image ? (
           <img
             src={post.image}
