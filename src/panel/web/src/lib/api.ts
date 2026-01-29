@@ -188,3 +188,13 @@ export async function addToBlacklist(url: string, reason = 'manual'): Promise<{ 
   })
 }
 
+// Image upload
+export async function uploadImage(file: File): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const formData = new FormData()
+  formData.append('image', file)
+  return request('/api/images/upload', {
+    method: 'POST',
+    body: formData,
+  })
+}
+

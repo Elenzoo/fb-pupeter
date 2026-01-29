@@ -26,6 +26,112 @@
     --radius: 0.5rem;
   }
 
+  /* ========================================
+     THEME: DARK MODE (GitHub Dark)
+     ======================================== */
+  .dark.theme-dark,
+  .theme-dark {
+    --background: 215 28% 5%;       /* #0d1117 */
+    --foreground: 213 27% 91%;     /* #e6edf3 */
+    --card: 215 21% 11%;           /* #161b22 */
+    --card-foreground: 213 27% 91%;
+    --popover: 215 21% 11%;
+    --popover-foreground: 213 27% 91%;
+    --primary: 212 92% 67%;        /* #58a6ff - accent cyan */
+    --primary-foreground: 215 28% 5%;
+    --secondary: 215 14% 17%;      /* #21262d */
+    --secondary-foreground: 213 27% 91%;
+    --muted: 215 14% 17%;
+    --muted-foreground: 215 14% 58%;  /* #8b949e */
+    --accent: 215 14% 17%;
+    --accent-foreground: 213 27% 91%;
+    --destructive: 0 72% 63%;      /* #f85149 */
+    --destructive-foreground: 213 27% 91%;
+    --border: 215 14% 20%;         /* #30363d */
+    --input: 215 14% 20%;
+    --ring: 212 92% 67%;
+
+    /* Custom colors for dark theme */
+    --accent-cyan: 212 92% 67%;    /* #58a6ff */
+    --accent-green: 142 69% 50%;   /* #3fb950 */
+    --accent-red: 0 72% 63%;       /* #f85149 */
+    --accent-yellow: 39 100% 63%;  /* #d29922 */
+    --accent-purple: 271 91% 65%;  /* #a371f7 */
+  }
+
+  /* ========================================
+     THEME: COLORFUL (Vercel/Linear style)
+     ======================================== */
+  .dark.theme-colorful,
+  .theme-colorful {
+    --background: 240 10% 6%;      /* #11111b */
+    --foreground: 226 64% 93%;     /* #e2e8f0 */
+    --card: 240 10% 9%;            /* #16161e */
+    --card-foreground: 226 64% 93%;
+    --popover: 240 10% 9%;
+    --popover-foreground: 226 64% 93%;
+    --primary: 271 81% 56%;        /* #7c3aed - violet */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 10% 14%;
+    --secondary-foreground: 226 64% 93%;
+    --muted: 240 10% 14%;
+    --muted-foreground: 226 20% 65%;
+    --accent: 240 10% 14%;
+    --accent-foreground: 226 64% 93%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 10% 18%;
+    --input: 240 10% 18%;
+    --ring: 271 81% 56%;
+
+    /* Custom colors for colorful theme */
+    --gradient-primary-from: 271 81% 56%;  /* #7c3aed */
+    --gradient-primary-to: 330 81% 60%;    /* #ec4899 */
+    --gradient-secondary-from: 217 91% 60%; /* #3b82f6 */
+    --gradient-secondary-to: 187 96% 42%;   /* #06b6d4 */
+    --neon-purple: 270 95% 65%;    /* #a855f7 */
+    --neon-cyan: 187 96% 48%;      /* #22d3ee */
+    --neon-pink: 330 86% 70%;      /* #f472b6 */
+    --glass-opacity: 0.7;
+    --glass-blur: 12px;
+  }
+
+  /* ========================================
+     THEME: CYBERPUNK (Terminal style)
+     ======================================== */
+  .dark.theme-cyberpunk,
+  .theme-cyberpunk {
+    --background: 0 0% 2%;         /* #050505 */
+    --foreground: 160 100% 50%;    /* #00ff66 - terminal green */
+    --card: 240 6% 4%;             /* #09090b */
+    --card-foreground: 160 100% 50%;
+    --popover: 240 6% 4%;
+    --popover-foreground: 160 100% 50%;
+    --primary: 180 100% 50%;       /* #00ffff - cyan */
+    --primary-foreground: 0 0% 0%;
+    --secondary: 240 6% 8%;
+    --secondary-foreground: 160 100% 50%;
+    --muted: 240 6% 8%;
+    --muted-foreground: 180 20% 45%;
+    --accent: 240 6% 8%;
+    --accent-foreground: 160 100% 50%;
+    --destructive: 330 100% 50%;   /* #ff33cc */
+    --destructive-foreground: 0 0% 0%;
+    --border: 180 100% 25%;        /* cyan border */
+    --input: 240 6% 8%;
+    --ring: 180 100% 50%;
+
+    /* Custom colors for cyberpunk theme */
+    --neon-cyan: 180 100% 50%;     /* #00ffff */
+    --neon-green: 120 100% 50%;    /* #00ff00 */
+    --neon-pink: 315 100% 60%;     /* #ff33cc */
+    --neon-purple: 285 100% 60%;   /* #cc33ff */
+    --neon-yellow: 60 100% 50%;    /* #ffff00 */
+    --text-terminal: 143 100% 50%; /* #00ff66 */
+    --scanline-opacity: 0.03;
+  }
+
+  /* Default dark theme fallback */
   .dark {
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
@@ -56,4 +162,310 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* ========================================
+   THEME-SPECIFIC STYLES
+   ======================================== */
+
+/* Cyberpunk scanline effect */
+.theme-cyberpunk::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 255, 255, 0.03) 0px,
+    rgba(0, 255, 255, 0.03) 1px,
+    transparent 1px,
+    transparent 2px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Cyberpunk glow effects */
+.theme-cyberpunk .cyber-glow {
+  text-shadow: 0 0 5px currentColor, 0 0 10px currentColor;
+}
+
+.theme-cyberpunk .cyber-border {
+  box-shadow: 0 0 5px hsl(var(--neon-cyan)), inset 0 0 5px hsl(var(--neon-cyan) / 0.1);
+}
+
+/* Colorful glassmorphism */
+.theme-colorful .glass {
+  background: rgba(17, 17, 27, var(--glass-opacity));
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+.theme-colorful .gradient-border {
+  position: relative;
+}
+
+.theme-colorful .gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, hsl(var(--gradient-primary-from)), hsl(var(--gradient-primary-to)));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Dark theme subtle hover */
+.theme-dark .dark-hover {
+  transition: background-color 0.15s ease;
+}
+
+.theme-dark .dark-hover:hover {
+  background-color: hsl(var(--secondary));
+}
+
+/* ========================================
+   ANIMATIONS
+   ======================================== */
+
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.8;
+    filter: brightness(1.2);
+  }
+}
+
+@keyframes cyber-flicker {
+  0%, 100% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  93% {
+    opacity: 0.3;
+  }
+  94% {
+    opacity: 1;
+  }
+  95% {
+    opacity: 0.5;
+  }
+  96% {
+    opacity: 1;
+  }
+}
+
+@keyframes gradient-shift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Animation utilities */
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-cyber-flicker {
+  animation: cyber-flicker 5s ease-in-out infinite;
+}
+
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: gradient-shift 3s ease infinite;
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.3s ease-out;
+}
+
+.animate-scale-in {
+  animation: scale-in 0.2s ease-out;
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.2s ease-out;
+}
+
+/* Staggered animations */
+.stagger-1 { animation-delay: 0.05s; }
+.stagger-2 { animation-delay: 0.1s; }
+.stagger-3 { animation-delay: 0.15s; }
+.stagger-4 { animation-delay: 0.2s; }
+.stagger-5 { animation-delay: 0.25s; }
+
+/* ========================================
+   SCROLLBAR STYLING
+   ======================================== */
+
+/* Dark theme scrollbar */
+.theme-dark ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.theme-dark ::-webkit-scrollbar-track {
+  background: hsl(var(--background));
+}
+
+.theme-dark ::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+
+.theme-dark ::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* Colorful theme scrollbar */
+.theme-colorful ::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.theme-colorful ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.theme-colorful ::-webkit-scrollbar-thumb {
+  background: linear-gradient(135deg, hsl(var(--gradient-primary-from)), hsl(var(--gradient-primary-to)));
+  border-radius: 3px;
+}
+
+/* Cyberpunk theme scrollbar */
+.theme-cyberpunk ::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.theme-cyberpunk ::-webkit-scrollbar-track {
+  background: hsl(var(--background));
+}
+
+.theme-cyberpunk ::-webkit-scrollbar-thumb {
+  background: hsl(var(--neon-cyan));
+  box-shadow: 0 0 5px hsl(var(--neon-cyan));
+}
+
+/* ========================================
+   FONTS
+   ======================================== */
+
+/* Cyberpunk monospace font */
+.theme-cyberpunk {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Monaco', 'Consolas', monospace;
+}
+
+.theme-cyberpunk h1,
+.theme-cyberpunk h2,
+.theme-cyberpunk h3 {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ========================================
+   UTILITY CLASSES
+   ======================================== */
+
+/* ASCII-style corners for cyberpunk */
+.cyber-corners {
+  position: relative;
+}
+
+.cyber-corners::before,
+.cyber-corners::after {
+  position: absolute;
+  font-family: monospace;
+  font-size: 10px;
+  color: hsl(var(--neon-cyan));
+  opacity: 0.6;
+}
+
+.cyber-corners::before {
+  content: '┌';
+  top: -2px;
+  left: -2px;
+}
+
+.cyber-corners::after {
+  content: '┘';
+  bottom: -2px;
+  right: -2px;
+}
+
+/* Terminal cursor blink */
+.terminal-cursor::after {
+  content: '_';
+  animation: cyber-flicker 1s step-end infinite;
+}
+
+/* Neon text utilities */
+.text-neon-cyan {
+  color: hsl(var(--neon-cyan));
+  text-shadow: 0 0 5px hsl(var(--neon-cyan) / 0.5);
+}
+
+.text-neon-green {
+  color: hsl(var(--neon-green));
+  text-shadow: 0 0 5px hsl(var(--neon-green) / 0.5);
+}
+
+.text-neon-pink {
+  color: hsl(var(--neon-pink));
+  text-shadow: 0 0 5px hsl(var(--neon-pink) / 0.5);
+}
+
+/* Gradient text for colorful theme */
+.gradient-text {
+  background: linear-gradient(135deg, hsl(var(--gradient-primary-from)), hsl(var(--gradient-primary-to)));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }

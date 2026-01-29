@@ -17,6 +17,10 @@ export default defineConfig({
         target: 'http://localhost:3180',
         changeOrigin: true,
       },
+      '/images': {
+        target: 'http://localhost:3180',
+        changeOrigin: true,
+      },
     },
   },
   build: {
