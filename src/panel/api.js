@@ -5,9 +5,20 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import dotenv from "dotenv";
+import Busboy from "busboy";
 
 // ---- BASE DIR (dev vs exe) ----
 const BASE_DIR = process.pkg ? path.dirname(process.execPath) : process.cwd();
+
+// ---- IMAGES CONFIG ----
+const IMAGES_DIR = path.join(BASE_DIR, "data", "images");
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+const ALLOWED_MIME = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+// Ensure images directory exists
+if (!fs.existsSync(IMAGES_DIR)) {
+  fs.mkdirSync(IMAGES_DIR, { recursive: true });
+}
 
 // .env: najpierw dev (cwd), potem exe (BASE_DIR)
 dotenv.config({ path: path.join(process.cwd(), ".env"), override: true });
@@ -127,6 +138,8 @@ function normalizeOptionalUrl(u) {
   if (!u) return "";
   const x = String(u).trim();
   if (x === "") return "";
+  // Accept both http/https URLs and local /images/ paths
+  if (/^\/images\/.+/i.test(x)) return x;
   if (!/^https?:\/\/.+/i.test(x)) return "";
   return x;
 }
@@ -306,6 +319,43 @@ http
 }
 
 
+    // ---------- STATIC IMAGES (/images/*) ----------
+    if (req.method === "GET" && pathname.startsWith("/images/")) {
+      const filename = pathname.replace(/^\/images\//, "");
+      // Security: prevent directory traversal
+      if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+        res.writeHead(400);
+        res.end("Invalid filename");
+        return;
+      }
+
+      const filePath = path.join(IMAGES_DIR, filename);
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404);
+        res.end("Image not found");
+        return;
+      }
+
+      const ext = path.extname(filename).toLowerCase();
+      const mimeTypes = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+      };
+      const contentType = mimeTypes[ext] || "application/octet-stream";
+
+      const stat = fs.statSync(filePath);
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Content-Length": stat.size,
+        "Cache-Control": "public, max-age=31536000", // 1 year cache
+      });
+      fs.createReadStream(filePath).pipe(res);
+      return;
+    }
+
     // ---------- NEW REACT UI (/new/) ----------
     if (req.method === "GET" && pathname.startsWith("/new")) {
       const MIME_TYPES = {
@@ -365,6 +415,103 @@ http
     // ---------- AUTH for API ----------
     if (pathname.startsWith("/api/")) {
       if (!auth(req, res)) return;
+    }
+
+    // ===== IMAGE UPLOAD (before PROJECT_DIR - doesn't need it) =====
+    if (req.method === "POST" && pathname === "/api/images/upload") {
+      console.log("[UPLOAD] Request received");
+      const contentType = req.headers["content-type"] || "";
+      console.log("[UPLOAD] Content-Type:", contentType);
+      if (!contentType.includes("multipart/form-data")) {
+        json(res, { ok: false, error: "Expected multipart/form-data" }, 400);
+        return;
+      }
+
+      try {
+        console.log("[UPLOAD] Creating Busboy instance");
+        const busboy = Busboy({
+          headers: req.headers,
+          limits: { fileSize: MAX_IMAGE_SIZE, files: 1 },
+        });
+
+        let fileReceived = false;
+        let uploadError = null;
+        let writeFinishPromise = null;
+
+        busboy.on("file", (fieldname, file, info) => {
+          const { filename, mimeType } = info;
+          console.log("[UPLOAD] File event:", fieldname, filename, mimeType);
+
+          if (!ALLOWED_MIME.includes(mimeType)) {
+            uploadError = `Nieprawidlowy format pliku. Dozwolone: JPEG, PNG, GIF, WebP`;
+            file.resume(); // drain the stream
+            return;
+          }
+
+          fileReceived = true;
+
+          // Generate unique filename
+          const ext = path.extname(filename || ".jpg").toLowerCase() || ".jpg";
+          const uniqueName = `${Date.now()}_${crypto.randomBytes(6).toString("hex")}${ext}`;
+          const filePath = path.join(IMAGES_DIR, uniqueName);
+
+          const writeStream = fs.createWriteStream(filePath);
+
+          file.on("limit", () => {
+            uploadError = `Plik za duzy (max ${MAX_IMAGE_SIZE / 1024 / 1024}MB)`;
+            writeStream.destroy();
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+            }
+          });
+
+          // Create promise that resolves when write is complete
+          writeFinishPromise = new Promise((resolve) => {
+            writeStream.on("finish", () => {
+              console.log("[UPLOAD] Write finished:", uniqueName);
+              if (!uploadError) {
+                resolve({ ok: true, path: `/images/${uniqueName}` });
+              } else {
+                resolve({ ok: false, error: uploadError });
+              }
+            });
+
+            writeStream.on("error", (err) => {
+              console.log("[UPLOAD] Write error:", err.message);
+              uploadError = `Blad zapisu pliku: ${err.message}`;
+              if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+              }
+              resolve({ ok: false, error: uploadError });
+            });
+          });
+
+          file.pipe(writeStream);
+        });
+
+        busboy.on("finish", async () => {
+          console.log("[UPLOAD] Busboy finish, fileReceived:", fileReceived);
+          if (uploadError) {
+            json(res, { ok: false, error: uploadError }, 400);
+          } else if (!fileReceived) {
+            json(res, { ok: false, error: "Nie przeslano pliku" }, 400);
+          } else if (writeFinishPromise) {
+            const result = await writeFinishPromise;
+            json(res, result, result.ok ? 200 : 400);
+          } else {
+            json(res, { ok: false, error: "Blad przetwarzania pliku" }, 500);
+          }
+        });
+
+        busboy.on("error", (err) => {
+          json(res, { ok: false, error: `Blad uploadu: ${err.message}` }, 500);
+        });
+
+        req.pipe(busboy);
+      } catch (err) {
+        json(res, { ok: false, error: `Blad uploadu: ${err.message}` }, 500);
+      }
+      return;
     }
 
     try {
@@ -698,7 +845,7 @@ http
         return await sh(`pm2 describe ${name}`);
       }
 
-      const WATCH_ENTRY = path.join(PROJECT_DIR, "src", "index.js");
+      const WATCH_ENTRY = path.join(PROJECT_DIR, "src", "bootstrap.js");
       const WATCH_NAME = PM2_APP || "fbwatcher";
 
       if (req.method === "POST" && pathname === "/api/pm2/start") {

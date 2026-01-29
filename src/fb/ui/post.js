@@ -9,6 +9,9 @@ import { acceptCookies, saveCookies } from "../cookies.js";
 import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "../login.js";
 import { clickOneExpandButton } from "../expandButtons.js";
 
+// Human behavior imports
+import { humanClick, preAction, postAction } from "../../lite/humanBehavior.js";
+
 const NAV_TIMEOUT_MS = process.env.NAV_TIMEOUT_MS ? Number(process.env.NAV_TIMEOUT_MS) : 90000;
 
 export const type = "post";
@@ -99,7 +102,11 @@ async function getPostScopeSelector(page) {
    ============================================================ */
 
 async function clickMenuOptionByPattern(page, patterns) {
-  const result = await page.evaluate((patterns) => {
+  const MARKER = "data-hb-click-menu-option";
+
+  // 1) Znajdź i oznacz element w evaluate (bez klikania)
+  const found = await page.evaluate((args) => {
+    const { patterns, marker } = args;
     const norm = (s) =>
       String(s || "")
         .replace(/\u00a0/g, " ")
@@ -107,8 +114,11 @@ async function clickMenuOptionByPattern(page, patterns) {
         .trim()
         .toLowerCase();
 
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const menu = document.querySelector("div[role='menu']");
-    if (!menu) return { clicked: false, noMenu: true };
+    if (!menu) return { found: false, noMenu: true };
 
     const items = Array.from(menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio']"));
 
@@ -117,32 +127,50 @@ async function clickMenuOptionByPattern(page, patterns) {
       return patterns.some((p) => t.startsWith(p));
     });
 
-    if (!opt) return { clicked: false, noMenu: false, patterns };
+    if (!opt) return { found: false, noMenu: false, patterns };
 
     try {
       opt.scrollIntoView?.({ block: "center", inline: "nearest" });
     } catch {}
 
-    try {
-      opt.click();
-      return { clicked: true, noMenu: false };
-    } catch {
-      return { clicked: false, noMenu: false };
-    }
-  }, patterns);
+    // Oznacz element do kliknięcia w Node.js
+    opt.setAttribute(marker, "true");
+    return { found: true, noMenu: false };
+  }, { patterns, marker: MARKER });
 
-  if (result.clicked) {
+  if (!found.found) {
+    return { clicked: false, noMenu: found.noMenu, patterns: found.patterns };
+  }
+
+  // 2) Human-like click w Node.js
+  const element = await page.$(`[${MARKER}]`);
+  if (element) {
+    log.debug("UI:post", "humanClick na opcji menu");
+    await preAction(page, "menu-option-click");
+    await humanClick(page, element);
+    await postAction(page, "menu-option-click");
+
+    // 3) Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER);
+
     await sleepRandom(250, 450);
     await page
       .waitForFunction(() => !document.querySelector("div[role='menu']"), { timeout: 2500 })
       .catch(() => {});
+
+    return { clicked: true, noMenu: false };
   }
 
-  return result;
+  return { clicked: false, noMenu: false };
 }
 
 async function clickAllCommentsInMenu(page) {
-  const result = await page.evaluate(() => {
+  const MARKER = "data-hb-click-all-comments";
+
+  // 1) Znajdź i oznacz element w evaluate (bez klikania)
+  const found = await page.evaluate((marker) => {
     const norm = (s) =>
       String(s || "")
         .replace(/\u00a0/g, " ")
@@ -150,8 +178,11 @@ async function clickAllCommentsInMenu(page) {
         .trim()
         .toLowerCase();
 
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const menu = document.querySelector("div[role='menu']");
-    if (!menu) return { clicked: false, noMenu: true };
+    if (!menu) return { found: false, noMenu: true };
 
     const items = Array.from(menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio']"));
 
@@ -166,33 +197,50 @@ async function clickAllCommentsInMenu(page) {
       );
     });
 
-    if (!opt) return { clicked: false, noMenu: false };
+    if (!opt) return { found: false, noMenu: false };
 
     try {
       opt.scrollIntoView?.({ block: "center", inline: "nearest" });
     } catch {}
 
-    try {
-      opt.click();
-      return { clicked: true, noMenu: false };
-    } catch {
-      return { clicked: false, noMenu: false };
-    }
-  });
+    // Oznacz element do kliknięcia w Node.js
+    opt.setAttribute(marker, "true");
+    return { found: true, noMenu: false };
+  }, MARKER);
 
-  if (result.clicked) {
+  if (!found.found) {
+    return { clicked: false, noMenu: found.noMenu };
+  }
+
+  // 2) Human-like click w Node.js
+  const element = await page.$(`[${MARKER}]`);
+  if (element) {
+    log.debug("UI:post", "humanClick na 'Wszystkie komentarze'");
+    await preAction(page, "all-comments-click");
+    await humanClick(page, element);
+    await postAction(page, "all-comments-click");
+
+    // 3) Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER);
+
     await sleepRandom(250, 450);
     await page
       .waitForFunction(() => !document.querySelector("div[role='menu']"), { timeout: 2500 })
       .catch(() => {});
+
+    return { clicked: true, noMenu: false };
   }
 
-  return result;
+  return { clicked: false, noMenu: false };
 }
 
 async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
   log.dev("UI:post", "Przełączam filtr komentarzy...");
   log.debug("UI:post", `Filter scope: ${scopeSel}`);
+
+  const MARKER_FILTER = "data-hb-click-filter";
 
   // 0) Jeśli menu już otwarte -> wybierz "Wszystkie komentarze" / "Pokaż wszystkie"
   const menuAlreadyOpen = await page.evaluate(() => !!document.querySelector("div[role='menu']"));
@@ -204,9 +252,11 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
     return !!r?.clicked;
   }
 
-  // 1) Kliknij przycisk filtra (Najtrafniejsze/Most relevant) – BEZ wymogu, że jest w viewport
+  // 1) Znajdź przycisk filtra i OZNACZ go (bez klikania w evaluate)
   const pre = await page.evaluate(
-    (scopeSel, code) => {
+    (args) => {
+      const { scopeSel, code, marker } = args;
+
       const norm = (s) =>
         String(s || "")
           .replace(/\u00a0/g, " ")
@@ -218,6 +268,9 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
       eval(code);
       // @ts-ignore
       const root = typeof getPostRoot === "function" ? getPostRoot() : null;
+
+      // Cleanup poprzednich markerów
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
 
       function getLabel(el) {
         if (!el) return "";
@@ -272,15 +325,14 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
           t === "pokaz wszystkie" ||
           t === "show all"
         ) {
-          return { ok: true, state: "already-all", where: "document" };
+          return { ok: true, state: "already-all", where: "document", needsClick: false };
         }
       }
 
       const scopeEl = scopeSel === "document" ? document : document.querySelector(scopeSel);
       const scopes = [scopeEl, root, document].filter(Boolean);
 
-      // 1B) główna ścieżka: szukamy "Najtrafniejsze/Most relevant" w klikalnych elementach,
-      //     ale NIE wymagamy, żeby był w viewport – scrollIntoView go dociągnie.
+      // 1B) główna ścieżka: szukamy "Najtrafniejsze/Most relevant" w klikalnych elementach
       for (const sc of scopes) {
         const clickables = Array.from(
           sc.querySelectorAll("button,div[role='button'],span[role='button'],a[role='button']")
@@ -295,7 +347,6 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
           let dist = 999999;
           try {
             const r = el.getBoundingClientRect();
-            // preferuj elementy bliżej środka ekranu (mniejszy “doskok”)
             dist = Math.abs(r.top - window.innerHeight / 2);
           } catch {}
 
@@ -310,17 +361,13 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
             picked.scrollIntoView?.({ block: "center", inline: "nearest" });
           } catch {}
 
-          try {
-            picked.click();
-            return { ok: true, state: "clicked-filter", where: sc === document ? "document" : "scope" };
-          } catch {
-            // nic
-          }
+          // OZNACZ element zamiast klikać
+          picked.setAttribute(marker, "true");
+          return { ok: true, state: "marked-filter", where: sc === document ? "document" : "scope", needsClick: true };
         }
       }
 
-      // 1C) fallback: znajdź sam TEKST "Najtrafniejsze/Most relevant" gdziekolwiek (span/div),
-      //     potem kliknij najbliższego klikalnego parenta.
+      // 1C) fallback: znajdź sam TEKST "Najtrafniejsze/Most relevant" gdziekolwiek
       for (const sc of scopes) {
         const nodes = Array.from(sc.querySelectorAll("span,div,a,button"))
           .filter(isVisibleEnough)
@@ -337,19 +384,15 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
             clickable.scrollIntoView?.({ block: "center", inline: "nearest" });
           } catch {}
 
-          try {
-            clickable.click();
-            return { ok: true, state: "clicked-filter-fallback", where: sc === document ? "document" : "scope" };
-          } catch {
-            // nic
-          }
+          // OZNACZ element zamiast klikać
+          clickable.setAttribute(marker, "true");
+          return { ok: true, state: "marked-filter-fallback", where: sc === document ? "document" : "scope", needsClick: true };
         }
       }
 
-      return { ok: false, state: "not-found" };
+      return { ok: false, state: "not-found", needsClick: false };
     },
-    scopeSel,
-    postRootScript()
+    { scopeSel, code: postRootScript(), marker: MARKER_FILTER }
   );
 
   if (!pre?.ok) {
@@ -360,6 +403,25 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
   if (pre.state === "already-all") {
     log.debug("UI:post", "Filtr już ustawiony – pomijam");
     return true;
+  }
+
+  // 1.5) Human-like click na przycisku filtra w Node.js
+  if (pre.needsClick) {
+    const filterBtn = await page.$(`[${MARKER_FILTER}]`);
+    if (filterBtn) {
+      log.debug("UI:post", "humanClick na przycisku filtra");
+      await preAction(page, "filter-button-click");
+      await humanClick(page, filterBtn);
+      await postAction(page, "filter-button-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER_FILTER);
+    } else {
+      log.debug("UI:post", "Nie znaleziono oznaczonego przycisku filtra");
+      return false;
+    }
   }
 
   log.debug("UI:post", "Kliknięto filtr", pre);
@@ -420,8 +482,12 @@ async function switchCommentsFilterToAllScoped(page, scopeSel = "document") {
    ============================================================ */
 
 async function openFilterMenuScoped(page, scopeSel = "document") {
+  const MARKER = "data-hb-click-open-filter";
+
   const pre = await page.evaluate(
-    (scopeSel, code) => {
+    (args) => {
+      const { scopeSel, code, marker } = args;
+
       const norm = (s) =>
         String(s || "")
           .replace(/\u00a0/g, " ")
@@ -433,6 +499,9 @@ async function openFilterMenuScoped(page, scopeSel = "document") {
       eval(code);
       // @ts-ignore
       const root = typeof getPostRoot === "function" ? getPostRoot() : null;
+
+      // Cleanup poprzednich markerów
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
 
       function getLabel(el) {
         if (!el) return "";
@@ -457,7 +526,7 @@ async function openFilterMenuScoped(page, scopeSel = "document") {
 
       // Jeśli menu już otwarte
       if (document.querySelector("div[role='menu']")) {
-        return { ok: true, state: "menu-already-open" };
+        return { ok: true, state: "menu-already-open", needsClick: false };
       }
 
       const scopeEl = scopeSel === "document" ? document : document.querySelector(scopeSel);
@@ -499,18 +568,37 @@ async function openFilterMenuScoped(page, scopeSel = "document") {
             picked.scrollIntoView?.({ block: "center", inline: "nearest" });
           } catch {}
 
-          try {
-            picked.click();
-            return { ok: true, state: "clicked-filter", label: candidates[0].label };
-          } catch {}
+          // OZNACZ element zamiast klikać
+          picked.setAttribute(marker, "true");
+          return { ok: true, state: "marked-filter", label: candidates[0].label, needsClick: true };
         }
       }
 
-      return { ok: false, state: "not-found" };
+      return { ok: false, state: "not-found", needsClick: false };
     },
-    scopeSel,
-    postRootScript()
+    { scopeSel, code: postRootScript(), marker: MARKER }
   );
+
+  // Human-like click w Node.js
+  if (pre?.ok && pre.needsClick) {
+    const filterBtn = await page.$(`[${MARKER}]`);
+    if (filterBtn) {
+      log.debug("UI:post", "humanClick na przycisku filtra (openFilterMenuScoped)");
+      await preAction(page, "open-filter-menu-click");
+      await humanClick(page, filterBtn);
+      await postAction(page, "open-filter-menu-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER);
+
+      return { ok: true, state: "clicked-filter", label: pre.label };
+    } else {
+      log.debug("UI:post", "Nie znaleziono oznaczonego przycisku filtra");
+      return { ok: false, state: "marker-not-found" };
+    }
+  }
 
   return pre;
 }

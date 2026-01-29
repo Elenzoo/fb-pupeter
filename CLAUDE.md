@@ -16,7 +16,8 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | `src/config.js` | ~172 | eksport zmiennych | env variables |
 | `src/fb/cookies.js` | ~149 | `loadCookies()`, `saveCookies()` | zarządzanie sesją |
 | `src/db/cache.js` | ~116 | `getCache()`, `updateCache()` | deduplikacja |
-| `src/index.js` | ~83 | `main()` | punkt wejścia |
+| `src/bootstrap.js` | ~27 | - | **PUNKT WEJŚCIA** - ładuje .env przed importami |
+| `src/index.js` | ~83 | `main()` | główna logika (importowany przez bootstrap.js) |
 | `src/utils/time.js` | ~63 | `parseRelativeTime()` | parsowanie "2 godz." |
 | `src/utils/sleep.js` | ~132 | `humanDelay()`, `shuffleArray()`, `humanType()` | human behavior delays |
 | `src/utils/mouse.js` | ~195 | `humanClick()`, `moveToElement()` | ruchy myszy Bezier |
@@ -68,11 +69,37 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 2. **Lokalny plik** (`data/posts.json`) - fallback
 3. **Google Sheets** (`POSTS_SHEET_URL`) - ostateczny fallback
 
-## Ostatnia sesja (2026-01-28)
+## Ostatnia sesja (2026-01-29)
 
-### Branch: `fix/stability-page-per-post`
+### Branch: `feat/lite-human-behavior`
 
 ### Co zostało zrobione
+- **Naprawa Human Behavior w kluczowych miejscach**:
+  - Problem: wszystkie `.click()` były wewnątrz `page.evaluate()` - wykonywały się w kontekście przeglądarki, gdzie NIE ma dostępu do Puppeteer API (`page.mouse.move()`)
+  - Funkcje `humanClick()`, `preAction()`, `postAction()` z `src/lite/humanBehavior.js` używają Puppeteer API i działają TYLKO w Node.js
+  - Rozwiązanie: refaktoryzacja wzorca "oznacz + kliknij":
+    1. W `page.evaluate()` znajdź element i oznacz go atrybutem data (`data-hb-click-*`)
+    2. Zwróć kontrolę do Node.js
+    3. Użyj `page.$()` żeby uzyskać ElementHandle
+    4. Wywołaj `humanClick()` z pełnym ruchem myszy krzywą Beziera
+    5. Usuń marker po kliknięciu
+  - Zrefaktoryzowane funkcje:
+    - `src/fb/ui/post.js`: `clickMenuOptionByPattern`, `clickAllCommentsInMenu`, `switchCommentsFilterToAllScoped`, `openFilterMenuScoped`
+    - `src/fb/comments.js`: `openCommentsMenu`, `clickMenuOptionByPrefix`
+    - `src/fb/ui/videos.js`: `clickShowAllFromMarkedRow`, `ensureAllCommentsFilter`, `switchCommentsFilterToNewestScoped`, `oneSequentialAction`
+    - `src/fb/ui/photo.js`: `clickAllCommentsInMenu`, `switchCommentsFilterToAll`
+  - Teraz przy zmianie filtra komentarzy (Najnowsze/Wszystkie) jest widoczny ruch myszy i naturalne opóźnienia
+
+### Poprzednia sesja (2026-01-29 rano)
+- **Naprawa ładowania .env (Bootstrap Pattern)**:
+  - Problem: ESM import hoisting powodował że `config.js` i `logger.js` czytały env PRZED załadowaniem `.env`
+  - Rozwiązanie: nowy plik `src/bootstrap.js` jako punkt wejścia
+  - `bootstrap.js` ładuje `.env` PRZED dynamicznym importem `index.js`
+  - Usunięto `import "dotenv/config"` z `config.js` i `logger.js`
+  - PM2 teraz uruchamia `bootstrap.js` zamiast `index.js`
+  - Naprawiono na serwerze i lokalnie
+
+### Poprzednia sesja (2026-01-28)
 - **FB_Watcher LITE** - zaawansowany moduł anti-detection i human behavior:
   - Session management (losowy viewport, długość sesji 30-90 min)
   - Warmup session (5-10 min naturalnej aktywności przed monitorowaniem)
@@ -207,6 +234,22 @@ WEBHOOK_MAX_AGE_MIN=60             # max wiek komentarzy do wysłania
 ```
 
 ## Ważne informacje techniczne
+
+### Bootstrap Pattern (ładowanie .env)
+**WAŻNE:** Aplikację ZAWSZE uruchamiaj przez `bootstrap.js`, NIE bezpośrednio `index.js`!
+
+**Problem:** W ES Modules importy są wykonywane PRZED kodem modułu. To oznacza że `config.js` i `logger.js` odczytują `process.env` zanim `index.js` zdąży załadować `.env`.
+
+**Rozwiązanie:** `bootstrap.js` ładuje `.env` PRZED dynamicznym importem `index.js`:
+```
+bootstrap.js → dotenv.config() → import("./index.js") → config.js, logger.js
+```
+
+**Struktura:**
+- `src/bootstrap.js` - punkt wejścia, ładuje .env, pokazuje debug
+- `src/index.js` - główna logika (NIE uruchamiać bezpośrednio)
+- `src/config.js` - zmienne (bez import dotenv)
+- `src/utils/logger.js` - logger (bez import dotenv)
 
 ### Stealth
 Bot używa technik ukrywania automatyzacji:
@@ -381,11 +424,11 @@ ssh -L 9222:localhost:9222 root@162.55.188.103
 ## Komendy
 
 ```bash
-# Uruchomienie
-node src/index.js
+# Uruchomienie (ZAWSZE przez bootstrap.js!)
+node src/bootstrap.js
 
-# PM2 (produkcja)
-pm2 start ecosystem.config.cjs
+# PM2 (produkcja) - WAŻNE: używaj bootstrap.js
+pm2 start /opt/fb-watcher/src/bootstrap.js --name fb-watcher --cwd /opt/fb-watcher
 
 # Logi
 pm2 logs fb-watcher
@@ -394,7 +437,7 @@ pm2 logs fb-watcher
 node scripts/generate-cookies.js
 
 # Uruchomienie z remote debug (podgląd przeglądarki)
-REMOTE_DEBUG_PORT=9222 node src/index.js
+REMOTE_DEBUG_PORT=9222 node src/bootstrap.js
 
 # Meta Ads Scanner - pojedyncze skanowanie
 node src/metaads/index.js --keywords "garaże blaszane" --once

@@ -656,7 +656,7 @@ function getExecutablePath() {
 
 function buildLaunchOptions() {
   const wantHeadless = envBool("HEADLESS_BROWSER", true);
-  const headlessMode = wantHeadless ? (isDev ? true : "new") : false;
+  const headlessMode = wantHeadless ? "new" : false;
 
   const linux = process.platform === "linux";
   const executablePath = getExecutablePath();

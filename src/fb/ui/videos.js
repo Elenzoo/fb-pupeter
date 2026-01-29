@@ -5,6 +5,9 @@ import { acceptCookies } from "../cookies.js";
 import { fbLogin, checkIfLogged } from "../login.js";
 import { getUiCommentInfo } from "../uiCommentInfo.js";
 
+// Human behavior imports
+import { humanClick, preAction, postAction } from "../../lite/humanBehavior.js";
+
 /** Typ handlera UI */
 export const type = "videos";
 
@@ -257,7 +260,10 @@ async function markCommentsScope(page) {
 }
 
 async function clickShowAllFromMarkedRow(page) {
-  const res = await page.evaluate(() => {
+  const MARKER = "data-hb-click-show-all";
+
+  // 1) Znajdź i oznacz element w evaluate (bez klikania)
+  const res = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -285,8 +291,11 @@ async function clickShowAllFromMarkedRow(page) {
       };
     }
 
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const row = document.querySelector("[data-fbw-comments-header-row='1']");
-    if (!row) return { clicked: false, reason: "no-row", dbg: null };
+    if (!row) return { found: false, reason: "no-row", dbg: null };
 
     const candidates = Array.from(
       row.querySelectorAll("div[role='button'][aria-label],button[aria-label],a[aria-label]")
@@ -299,18 +308,38 @@ async function clickShowAllFromMarkedRow(page) {
         try {
           c.scrollIntoView({ block: "center", inline: "nearest" });
         } catch {}
-        try {
-          c.click();
-        } catch {}
-        return { clicked: true, reason: "clicked", dbg: pick(c) };
+        // OZNACZ element zamiast klikać
+        c.setAttribute(marker, "true");
+        return { found: true, reason: "marked", dbg: pick(c) };
       }
     }
 
-    return { clicked: false, reason: "no-showall-in-row", dbg: candidates.slice(0, 4).map(pick) };
-  });
+    return { found: false, reason: "no-showall-in-row", dbg: candidates.slice(0, 4).map(pick) };
+  }, MARKER);
 
-  log.debug("UI:videos", "Show-all click", res);
-  return !!res?.clicked;
+  log.debug("UI:videos", "Show-all mark", res);
+
+  if (!res?.found) {
+    return false;
+  }
+
+  // 2) Human-like click w Node.js
+  const element = await page.$(`[${MARKER}]`);
+  if (element) {
+    log.debug("UI:videos", "humanClick na 'Pokaż wszystkie'");
+    await preAction(page, "show-all-click");
+    await humanClick(page, element);
+    await postAction(page, "show-all-click");
+
+    // 3) Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER);
+
+    return true;
+  }
+
+  return false;
 }
 
 /* ==========================================
@@ -318,7 +347,11 @@ async function clickShowAllFromMarkedRow(page) {
    ========================================== */
 
 async function ensureAllCommentsFilter(page) {
-  const res = await page.evaluate(() => {
+  const MARKER_SORT = "data-hb-click-sort-btn";
+  const MARKER_TARGET = "data-hb-click-filter-target";
+
+  // KROK 1: Znajdź i oznacz przycisk sortowania (bez klikania)
+  const res = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -344,12 +377,15 @@ async function ensureAllCommentsFilter(page) {
       };
     }
 
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const root = document.querySelector("[data-fbw-comments-root='1']") || document.body;
 
     // If already shows "Wszystkie komentarze" / "All comments" / "Najnowsze" etc, do nothing
     const rootTxt = norm(root.innerText || "");
     if (rootTxt.includes("wszystkie komentarze") || rootTxt.includes("all comments")) {
-      return { ok: true, action: "already-all", dbg: null };
+      return { ok: true, action: "already-all", needsClick: false, dbg: null };
     }
 
     // find the sort dropdown button in root
@@ -368,26 +404,46 @@ async function ensureAllCommentsFilter(page) {
     });
 
     if (!sortBtn) {
-      return { ok: false, action: "no-sortbtn", dbg: { sample: btns.slice(0, 8).map(pick) } };
+      return { ok: false, action: "no-sortbtn", needsClick: false, dbg: { sample: btns.slice(0, 8).map(pick) } };
     }
 
     try {
       sortBtn.scrollIntoView({ block: "center", inline: "nearest" });
     } catch {}
-    try {
-      sortBtn.click();
-    } catch {}
 
-    return { ok: true, action: "opened-menu", dbg: pick(sortBtn) };
-  });
+    // OZNACZ element zamiast klikać
+    sortBtn.setAttribute(marker, "true");
+    return { ok: true, action: "marked-sortbtn", needsClick: true, dbg: pick(sortBtn) };
+  }, MARKER_SORT);
 
   log.debug("UI:videos", "Filter step#1", res);
 
-  if (!res?.ok || res.action !== "opened-menu") return false;
+  if (!res?.ok) return false;
+  if (res.action === "already-all") return true;
+
+  // Human-like click na przycisku sortowania
+  if (res.needsClick) {
+    const sortBtn = await page.$(`[${MARKER_SORT}]`);
+    if (sortBtn) {
+      log.debug("UI:videos", "humanClick na przycisku sortowania");
+      await preAction(page, "sort-btn-click");
+      await humanClick(page, sortBtn);
+      await postAction(page, "sort-btn-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER_SORT);
+    } else {
+      log.debug("UI:videos", "Nie znaleziono oznaczonego przycisku sortowania");
+      return false;
+    }
+  }
 
   await sleepRandom(400, 700);
 
-  const res2 = await page.evaluate(() => {
+  // KROK 2: Znajdź i oznacz opcję w menu (bez klikania)
+  const res2 = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -413,9 +469,12 @@ async function ensureAllCommentsFilter(page) {
       };
     }
 
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const menu = document.querySelector("div[role='menu']") || document.querySelector("div[role='dialog']");
 
-    if (!menu) return { ok: false, action: "no-menu" };
+    if (!menu) return { ok: false, action: "no-menu", needsClick: false };
 
     const items = Array.from(menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio'], div[role='button']"))
       .filter(isVisible)
@@ -432,29 +491,41 @@ async function ensureAllCommentsFilter(page) {
     }
 
     if (!target) {
-      return { ok: false, action: "no-target", dbg: { items: items.slice(0, 12).map(pick) } };
+      return { ok: false, action: "no-target", needsClick: false, dbg: { items: items.slice(0, 12).map(pick) } };
     }
 
     try {
       target.scrollIntoView({ block: "center", inline: "nearest" });
     } catch {}
-    try {
-      target.click();
-    } catch {}
 
-    // close menu
-    try {
-      setTimeout(() => document.body.click(), 40);
-    } catch {}
-
-    return { ok: true, action: "clicked-target", dbg: pick(target) };
-  });
+    // OZNACZ element zamiast klikać
+    target.setAttribute(marker, "true");
+    return { ok: true, action: "marked-target", needsClick: true, dbg: pick(target) };
+  }, MARKER_TARGET);
 
   log.debug("UI:videos", "Filter step#2", res2);
 
+  if (!res2?.ok) return false;
+
+  // Human-like click na opcji menu
+  if (res2.needsClick) {
+    const targetBtn = await page.$(`[${MARKER_TARGET}]`);
+    if (targetBtn) {
+      log.debug("UI:videos", "humanClick na opcji filtra");
+      await preAction(page, "filter-target-click");
+      await humanClick(page, targetBtn);
+      await postAction(page, "filter-target-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER_TARGET);
+    }
+  }
+
   await sleepRandom(500, 900);
 
-  return !!res2?.ok;
+  return true;
 }
 
 /* ==========================================
@@ -464,10 +535,14 @@ async function ensureAllCommentsFilter(page) {
 export async function switchCommentsFilterToNewestScoped(page) {
   log.dev("UI:videos", "Przełączam na 'Najnowsze'...");
 
+  const MARKER_SHOW_ALL = "data-hb-click-showall-newest";
+  const MARKER_SORT = "data-hb-click-sort-newest";
+  const MARKER_TARGET = "data-hb-click-newest-target";
+
   // ZAWSZE najpierw spróbuj kliknąć "Pokaż wszystkie" żeby otworzyć pełny panel komentarzy
   log.debug("UI:videos", "Otwieranie panelu komentarzy...");
 
-  const clickedShowAll = await page.evaluate(() => {
+  const showAllRes = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -477,6 +552,9 @@ export async function switchCommentsFilterToNewestScoped(page) {
       const r = el.getBoundingClientRect();
       return !!r && r.width > 5 && r.height > 5;
     }
+
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
 
     // Szukaj przycisku "Pokaż wszystkie" / "Show all"
     const btns = Array.from(
@@ -489,18 +567,29 @@ export async function switchCommentsFilterToNewestScoped(page) {
         try {
           btn.scrollIntoView({ block: "center", inline: "nearest" });
         } catch {}
-        try {
-          btn.click();
-          return { clicked: true, label: al };
-        } catch {}
+        // OZNACZ element zamiast klikać
+        btn.setAttribute(marker, "true");
+        return { found: true, label: al };
       }
     }
-    return { clicked: false };
-  });
+    return { found: false };
+  }, MARKER_SHOW_ALL);
 
-  if (clickedShowAll?.clicked) {
-    log.debug("UI:videos", `Kliknięto '${clickedShowAll.label}'`);
-    await sleepRandom(1500, 2200);
+  if (showAllRes?.found) {
+    const showAllBtn = await page.$(`[${MARKER_SHOW_ALL}]`);
+    if (showAllBtn) {
+      log.debug("UI:videos", `humanClick na '${showAllRes.label}'`);
+      await preAction(page, "show-all-newest-click");
+      await humanClick(page, showAllBtn);
+      await postAction(page, "show-all-newest-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER_SHOW_ALL);
+
+      await sleepRandom(1500, 2200);
+    }
   } else {
     log.debug("UI:videos", "Nie znaleziono 'Pokaż wszystkie' - może już rozwinięte");
   }
@@ -520,7 +609,6 @@ export async function switchCommentsFilterToNewestScoped(page) {
   const alreadyNewest = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
     const root = document.querySelector("[data-fbw-comments-root='1']") || document.body;
-    const rootTxt = norm(root.innerText || "");
 
     // Szukamy przycisku z labelem "Najnowsze" jako aktywny filtr
     const btns = Array.from(root.querySelectorAll("div[role='button'],span[role='button'],button"));
@@ -535,8 +623,8 @@ export async function switchCommentsFilterToNewestScoped(page) {
     return { ok: true, state: "already-newest" };
   }
 
-  // Otwórz menu sortowania
-  const openRes = await page.evaluate(() => {
+  // Znajdź i oznacz przycisk sortowania (bez klikania)
+  const openRes = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -546,6 +634,9 @@ export async function switchCommentsFilterToNewestScoped(page) {
       const r = el.getBoundingClientRect();
       return !!r && r.width > 5 && r.height > 5;
     }
+
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
 
     const root = document.querySelector("[data-fbw-comments-root='1']") || document.body;
     const btns = Array.from(root.querySelectorAll("div[role='button'],span[role='button'],button")).filter(isVisible);
@@ -570,22 +661,35 @@ export async function switchCommentsFilterToNewestScoped(page) {
     try {
       sortBtn.scrollIntoView({ block: "center", inline: "nearest" });
     } catch {}
-    try {
-      sortBtn.click();
-    } catch {}
 
-    return { ok: true, action: "opened-menu" };
-  });
+    // OZNACZ element zamiast klikać
+    sortBtn.setAttribute(marker, "true");
+    return { ok: true, action: "marked-sortbtn" };
+  }, MARKER_SORT);
 
   if (!openRes?.ok) {
     log.debug("UI:videos", "Nie znaleziono przycisku sortowania");
     return { ok: false, reason: openRes?.reason || "no-sortbtn" };
   }
 
+  // Human-like click na przycisku sortowania
+  const sortBtn = await page.$(`[${MARKER_SORT}]`);
+  if (sortBtn) {
+    log.debug("UI:videos", "humanClick na przycisku sortowania (newest)");
+    await preAction(page, "sort-btn-newest-click");
+    await humanClick(page, sortBtn);
+    await postAction(page, "sort-btn-newest-click");
+
+    // Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER_SORT);
+  }
+
   await sleepRandom(400, 700);
 
-  // Wybierz "Najnowsze" z menu
-  const selectRes = await page.evaluate(() => {
+  // Znajdź i oznacz "Najnowsze" w menu (bez klikania)
+  const selectRes = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -595,6 +699,9 @@ export async function switchCommentsFilterToNewestScoped(page) {
       const r = el.getBoundingClientRect();
       return !!r && r.width > 5 && r.height > 5;
     }
+
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
 
     const menu = document.querySelector("div[role='menu']") || document.querySelector("div[role='dialog']");
     if (!menu) return { ok: false, reason: "no-menu" };
@@ -615,26 +722,37 @@ export async function switchCommentsFilterToNewestScoped(page) {
     try {
       target.scrollIntoView({ block: "center", inline: "nearest" });
     } catch {}
-    try {
-      target.click();
-    } catch {}
 
-    // Zamknij menu
-    try {
-      setTimeout(() => document.body.click(), 40);
-    } catch {}
+    // OZNACZ element zamiast klikać
+    target.setAttribute(marker, "true");
+    return { ok: true, action: "marked-newest" };
+  }, MARKER_TARGET);
 
-    return { ok: true, action: "clicked-newest" };
-  });
+  if (!selectRes?.ok) {
+    log.debug("UI:videos", `Nie znaleziono opcji 'Najnowsze': ${selectRes?.reason}`);
+    return { ok: false, reason: selectRes?.reason || "select-failed" };
+  }
 
-  if (selectRes?.ok) {
+  // Human-like click na opcji "Najnowsze"
+  const newestBtn = await page.$(`[${MARKER_TARGET}]`);
+  if (newestBtn) {
+    log.debug("UI:videos", "humanClick na opcji 'Najnowsze'");
+    await preAction(page, "newest-target-click");
+    await humanClick(page, newestBtn);
+    await postAction(page, "newest-target-click");
+
+    // Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER_TARGET);
+
     log.dev("UI:videos", "Filtr ustawiony: 'Najnowsze'");
     await sleepRandom(400, 700);
     return { ok: true };
   }
 
-  log.debug("UI:videos", `Nie udało się wybrać 'Najnowsze': ${selectRes?.reason}`);
-  return { ok: false, reason: selectRes?.reason || "select-failed" };
+  log.debug("UI:videos", "Nie znaleziono oznaczonej opcji 'Najnowsze'");
+  return { ok: false, reason: "marker-not-found" };
 }
 
 /* ==========================================
@@ -642,7 +760,9 @@ export async function switchCommentsFilterToNewestScoped(page) {
    ========================================== */
 
 async function oneSequentialAction(page) {
-  const res = await page.evaluate(() => {
+  const MARKER = "data-hb-click-sequential";
+
+  const res = await page.evaluate((marker) => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function isVisible(el) {
@@ -669,6 +789,9 @@ async function oneSequentialAction(page) {
         html: el.outerHTML ? el.outerHTML.slice(0, 260) : null,
       };
     }
+
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
 
     // scope: root (jak masz) + lekka próba zejścia do panelu komentarzy przy composerze
     const root = document.querySelector("[data-fbw-comments-root='1']") || document.body;
@@ -718,7 +841,7 @@ async function oneSequentialAction(page) {
       "see more comments",
     ];
 
-    // 1) MORE COMMENTS – tylko clickables
+    // 1) MORE COMMENTS – tylko clickables (oznacz zamiast klikać)
     for (const el of clickables) {
       const t = norm(el.getAttribute("aria-label") || el.textContent);
       if (!t) continue;
@@ -726,12 +849,12 @@ async function oneSequentialAction(page) {
 
       if (moreCommentNeedles.some((n) => t.includes(n))) {
         try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
-        try { el.click(); } catch {}
-        return { acted: true, action: "more-comments", dbg: pick(el) };
+        el.setAttribute(marker, "true");
+        return { needsClick: true, action: "more-comments", dbg: pick(el) };
       }
     }
 
-    // 2) REPLIES – tylko clickables
+    // 2) REPLIES – tylko clickables (oznacz zamiast klikać)
     for (const el of clickables) {
       const t = norm(el.getAttribute("aria-label") || el.textContent);
       if (!t) continue;
@@ -746,12 +869,12 @@ async function oneSequentialAction(page) {
 
       if (isReply) {
         try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
-        try { el.click(); } catch {}
-        return { acted: true, action: "replies", dbg: pick(el) };
+        el.setAttribute(marker, "true");
+        return { needsClick: true, action: "replies", dbg: pick(el) };
       }
     }
 
-    // 3) SCROLL – próbuj scope, potem window
+    // 3) SCROLL – próbuj scope, potem window (bez klikania)
     const step = Math.max(260, Math.min(520, Math.floor(window.innerHeight * 0.45)));
 
     const beforeScope = scope.scrollTop || 0;
@@ -760,7 +883,7 @@ async function oneSequentialAction(page) {
         scope.scrollTop = beforeScope + step;
         const afterScope = scope.scrollTop || beforeScope;
         if (afterScope > beforeScope) {
-          return { acted: true, action: "scroll-scope", dbg: { beforeScope, afterScope, step } };
+          return { needsClick: false, acted: true, action: "scroll-scope", dbg: { beforeScope, afterScope, step } };
         }
       }
     } catch {}
@@ -770,11 +893,32 @@ async function oneSequentialAction(page) {
     const afterWin = window.scrollY || 0;
 
     return {
+      needsClick: false,
       acted: afterWin > beforeWin,
       action: afterWin > beforeWin ? "scroll-window" : "no-scroll",
       dbg: { beforeWin, afterWin, step },
     };
-  });
+  }, MARKER);
+
+  // Human-like click jeśli potrzebny
+  if (res?.needsClick) {
+    const element = await page.$(`[${MARKER}]`);
+    if (element) {
+      log.debug("UI:videos", `humanClick na '${res.action}'`);
+      await preAction(page, `sequential-${res.action}`);
+      await humanClick(page, element);
+      await postAction(page, `sequential-${res.action}`);
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER);
+
+      res.acted = true;
+    } else {
+      res.acted = false;
+    }
+  }
 
   if (res?.dbg?.html) res.dbg.html = shortenHtml(res.dbg.html, 220);
   log.debug("UI:videos", "step", res);

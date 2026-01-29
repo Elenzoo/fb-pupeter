@@ -1,4 +1,4 @@
-import "dotenv/config";
+// UWAGA: .env musi być załadowany PRZED importem tego modułu (przez bootstrap.js)
 
 /* ==================== PANEL – NOWY SYSTEM ==================== */
 /**

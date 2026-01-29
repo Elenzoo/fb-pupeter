@@ -9,6 +9,9 @@ import { safeGoto } from "../utils/navigation.js";
 import { getUiCommentInfo } from "./uiCommentInfo.js";
 import log from "../utils/logger.js";
 
+// Human behavior imports
+import { humanClick, preAction, postAction } from "../lite/humanBehavior.js";
+
 import * as uiPhoto from "./ui/photo.js";
 import * as uiPost from "./ui/post.js";
 import * as uiVideos from "./ui/videos.js";
@@ -44,7 +47,9 @@ function resolveFastFlag(url, opts, ui) {
    ============================================================ */
 
 async function openCommentsMenu(page) {
-  const r = await page.evaluate(() => {
+  const MARKER = "data-hb-open-comments-menu";
+
+  const r = await page.evaluate((marker) => {
     const norm = (s) =>
       String(s || "")
         .replace(/\u00a0/g, " ")
@@ -56,8 +61,11 @@ async function openCommentsMenu(page) {
       return el.getAttribute?.("aria-label") || el.textContent || "";
     }
 
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     if (document.querySelector("div[role='menu']"))
-      return { ok: true, state: "menu-already-open" };
+      return { ok: true, state: "menu-already-open", needsClick: false };
 
     const els = Array.from(
       document.querySelectorAll(
@@ -83,26 +91,49 @@ async function openCommentsMenu(page) {
       );
     });
 
-    if (!btn) return { ok: false, reason: "no-trigger" };
+    if (!btn) return { ok: false, reason: "no-trigger", needsClick: false };
 
     try {
       btn.scrollIntoView?.({ block: "center", inline: "nearest" });
     } catch {}
 
-    try {
-      btn.click();
-      return { ok: true, state: "clicked-trigger" };
-    } catch {
-      return { ok: false, reason: "click-failed" };
+    // OZNACZ element zamiast klikać
+    btn.setAttribute(marker, "true");
+    return { ok: true, state: "marked-trigger", needsClick: true };
+  }, MARKER);
+
+  // Human-like click w Node.js
+  if (r?.ok && r.needsClick) {
+    const triggerBtn = await page.$(`[${MARKER}]`);
+    if (triggerBtn) {
+      log.debug("FILTER", "humanClick na przycisku menu komentarzy");
+      await preAction(page, "open-comments-menu-click");
+      await humanClick(page, triggerBtn);
+      await postAction(page, "open-comments-menu-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER);
+
+      return true;
+    } else {
+      log.debug("FILTER", "Nie znaleziono oznaczonego przycisku menu");
+      return false;
     }
-  });
+  }
 
   return r?.ok === true;
 }
 
 async function clickMenuOptionByPrefix(page, prefixes) {
-  return page.evaluate(
-    (prefixes) => {
+  const MARKER = "data-hb-click-menu-prefix";
+
+  // 1) Znajdź i oznacz element w evaluate (bez klikania)
+  const found = await page.evaluate(
+    (args) => {
+      const { prefixes, marker } = args;
+
       const norm = (s) =>
         String(s || "")
           .replace(/\u00a0/g, " ")
@@ -110,10 +141,13 @@ async function clickMenuOptionByPrefix(page, prefixes) {
           .trim()
           .toLowerCase();
 
+      // Cleanup poprzednich markerów
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
       const menu =
         document.querySelector("div[role='menu']") ||
         document.querySelector("div[role='dialog']");
-      if (!menu) return { ok: false, reason: "no-menu" };
+      if (!menu) return { found: false, reason: "no-menu" };
 
       const items = Array.from(
         menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio']")
@@ -124,21 +158,40 @@ async function clickMenuOptionByPrefix(page, prefixes) {
         return prefixes.some((p) => t.startsWith(p));
       });
 
-      if (!opt) return { ok: false, reason: "no-opt" };
+      if (!opt) return { found: false, reason: "no-opt" };
 
       try {
         opt.scrollIntoView?.({ block: "center", inline: "nearest" });
       } catch {}
 
-      try {
-        opt.click();
-        return { ok: true };
-      } catch {
-        return { ok: false, reason: "click-failed" };
-      }
+      // OZNACZ element zamiast klikać
+      opt.setAttribute(marker, "true");
+      return { found: true };
     },
-    prefixes
+    { prefixes, marker: MARKER }
   );
+
+  if (!found.found) {
+    return { ok: false, reason: found.reason };
+  }
+
+  // 2) Human-like click w Node.js
+  const element = await page.$(`[${MARKER}]`);
+  if (element) {
+    log.debug("FILTER", "humanClick na opcji menu (legacy)");
+    await preAction(page, "menu-option-prefix-click");
+    await humanClick(page, element);
+    await postAction(page, "menu-option-prefix-click");
+
+    // 3) Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER);
+
+    return { ok: true };
+  }
+
+  return { ok: false, reason: "marker-not-found" };
 }
 
 async function switchCommentsFilterToAllLegacy(page) {

@@ -7,6 +7,9 @@ import { ensureLoggedInOnPostOverlay, fbLogin, checkIfLogged } from "../login.js
 import { getUiCommentInfo } from "../uiCommentInfo.js";
 import log from "../../utils/logger.js";
 
+// Human behavior imports
+import { humanClick, preAction, postAction } from "../../lite/humanBehavior.js";
+
 export const type = "photo";
 
 const PACE = (process.env.FB_PACE || "local").toLowerCase();
@@ -87,12 +90,18 @@ export function matchesUrl(url) {
 /* ===================== FILTER: ALL COMMENTS (LOKALNIE) ===================== */
 
 async function clickAllCommentsInMenu(page) {
-  const result = await page.evaluate(() => {
+  const MARKER = "data-hb-click-all-comments-photo";
+
+  // 1) Znajdź i oznacz element (bez klikania)
+  const result = await page.evaluate((marker) => {
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const menu =
       document.querySelector("div[role='menu']") ||
       document.querySelector("div[role='dialog']");
 
-    if (!menu) return { clicked: false, noMenu: true };
+    if (!menu) return { found: false, noMenu: true };
 
     const items = Array.from(
       menu.querySelectorAll("div[role='menuitem'], div[role='menuitemradio']")
@@ -103,30 +112,45 @@ async function clickAllCommentsInMenu(page) {
       return t.startsWith("wszystkie komentarze") || t.startsWith("all comments");
     });
 
-    if (!opt) return { clicked: false, noMenu: false };
+    if (!opt) return { found: false, noMenu: false };
 
-    opt.click();
-    setTimeout(() => {
-      try {
-        document.body.click();
-      } catch {}
-    }, 50);
+    // OZNACZ element zamiast klikać
+    opt.setAttribute(marker, "true");
+    return { found: true, noMenu: false };
+  }, MARKER);
 
-    return { clicked: true, noMenu: false };
-  });
+  if (!result.found) {
+    return { clicked: false, noMenu: result.noMenu };
+  }
 
-  if (result.clicked) {
+  // 2) Human-like click w Node.js
+  const element = await page.$(`[${MARKER}]`);
+  if (element) {
+    log.debug("UI:photo", "humanClick na 'Wszystkie komentarze'");
+    await preAction(page, "all-comments-photo-click");
+    await humanClick(page, element);
+    await postAction(page, "all-comments-photo-click");
+
+    // 3) Cleanup marker
+    await page.evaluate((marker) => {
+      document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+    }, MARKER);
+
     await sleepRandom(180, 320);
     await page
       .waitForFunction(() => !document.querySelector("div[role='menu']"), { timeout: 2000 })
       .catch(() => {});
+
+    return { clicked: true, noMenu: false };
   }
 
-  return result;
+  return { clicked: false, noMenu: false };
 }
 
 async function switchCommentsFilterToAll(page) {
   log.debug("UI:photo", "Przełączam filtr → wszystkie komentarze");
+
+  const MARKER = "data-hb-click-filter-photo";
 
   const menuAlreadyOpen = await page.evaluate(() => !!document.querySelector("div[role='menu']"));
   if (menuAlreadyOpen) {
@@ -134,7 +158,11 @@ async function switchCommentsFilterToAll(page) {
     return !!r.clicked;
   }
 
-  const pre = await page.evaluate(() => {
+  // 1) Znajdź i oznacz przycisk filtra (bez klikania)
+  const pre = await page.evaluate((marker) => {
+    // Cleanup poprzednich markerów
+    document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+
     const els = Array.from(document.querySelectorAll("div[role='button'], span[role='button']"));
     let filterEl = null;
     let labelText = "";
@@ -155,17 +183,34 @@ async function switchCommentsFilterToAll(page) {
       }
     }
 
-    if (!filterEl) return { state: "not-found" };
+    if (!filterEl) return { state: "not-found", needsClick: false };
     if (labelText === "wszystkie komentarze" || labelText === "all comments") {
-      return { state: "already-all" };
+      return { state: "already-all", needsClick: false };
     }
 
-    filterEl.click();
-    return { state: "clicked-filter" };
-  });
+    // OZNACZ element zamiast klikać
+    filterEl.setAttribute(marker, "true");
+    return { state: "marked-filter", needsClick: true };
+  }, MARKER);
 
   if (pre.state === "not-found") return false;
   if (pre.state === "already-all") return true;
+
+  // 2) Human-like click w Node.js
+  if (pre.needsClick) {
+    const filterBtn = await page.$(`[${MARKER}]`);
+    if (filterBtn) {
+      log.debug("UI:photo", "humanClick na przycisku filtra");
+      await preAction(page, "filter-photo-click");
+      await humanClick(page, filterBtn);
+      await postAction(page, "filter-photo-click");
+
+      // Cleanup marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach((el) => el.removeAttribute(marker));
+      }, MARKER);
+    }
+  }
 
   await sleepRandom(120, 220);
   const r = await clickAllCommentsInMenu(page);
