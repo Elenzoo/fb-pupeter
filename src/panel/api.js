@@ -560,7 +560,6 @@ http
           // Watcher
           "CHECK_INTERVAL_MS",
           "FAST_MODE",
-          "FAST_MAX_AGE_MIN",
           "INCLUDE_REPLIES",
           // Logi
           "LOG_LEVEL",

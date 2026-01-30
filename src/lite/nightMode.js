@@ -117,7 +117,7 @@ function shouldCatchUp(lastCheck, catchupHours = 8) {
  * @returns {number} - rozszerzony max age w minutach
  */
 function getCatchUpMaxAge(baseMaxAgeMin, lastCheck) {
-  if (!lastCheck) return baseMaxAgeMin * 2;
+  if (!lastCheck) return baseMaxAgeMin * 3; // 540 min (9h) dla pełnego catch-up
 
   const lastCheckTime = lastCheck instanceof Date ? lastCheck : new Date(lastCheck);
   const minutesSinceLastCheck = (Date.now() - lastCheckTime.getTime()) / (1000 * 60);

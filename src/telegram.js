@@ -41,10 +41,9 @@ function parseFbRelativeTime(raw) {
 }
 
 function shouldSendByAge(comment) {
-  // ENV:
-  // TELEGRAM_MAX_AGE_MIN=60
+  // ENV: Używa WEBHOOK_MAX_AGE_MIN jako głównego źródła (edytowalne w panelu)
   // TELEGRAM_DROP_IF_NO_TIME=1  (domyślnie: 1)
-  const maxAgeMin = Number(process.env.TELEGRAM_MAX_AGE_MIN || 60);
+  const maxAgeMin = Number(process.env.WEBHOOK_MAX_AGE_MIN || process.env.TELEGRAM_MAX_AGE_MIN || 60);
   const dropIfNoTime = envBool("TELEGRAM_DROP_IF_NO_TIME", true);
 
   const rel = String(comment?.fb_time_raw || comment?.time || comment?.relative_time || "").trim();

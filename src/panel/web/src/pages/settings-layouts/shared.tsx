@@ -149,7 +149,7 @@ export const SECTIONS: SectionConfig[] = [
     fields: [
       { key: 'HUMAN_MODE', label: 'Human Mode', type: 'switch', description: 'Wlacz symulacje zachowan czlowieka' },
       { key: 'HUMAN_RANDOM_LIKE_CHANCE', label: 'Szansa na losowy like', type: 'number', placeholder: '0.20', description: 'Szansa (0-1) na polubienie podczas sesji' },
-      { key: 'WEBHOOK_MAX_AGE_MIN', label: 'Max wiek komentarzy (min)', type: 'number', placeholder: '60', description: 'Pomijaj komentarze starsze niz X minut' },
+      { key: 'WEBHOOK_MAX_AGE_MIN', label: 'Max wiek komentarzy (min)', type: 'number', placeholder: '60', description: 'Limit wieku dla: trybu Fast, Webhooka i Telegrama' },
     ],
   },
   {

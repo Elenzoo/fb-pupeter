@@ -168,7 +168,7 @@ const TABS: TabConfig[] = [
         fields: [
           { key: 'HUMAN_MODE', label: 'Tryb ludzki', type: 'switch', hint: 'Symulacja zachowan czlowieka' },
           { key: 'HUMAN_RANDOM_LIKE_CHANCE', label: 'Szansa na like', type: 'number', placeholder: '0.20', hint: '0-1, np. 0.20 = 20%' },
-          { key: 'WEBHOOK_MAX_AGE_MIN', label: 'Max wiek koment. (min)', type: 'number', placeholder: '60', hint: 'Ignoruj starsze komentarze' },
+          { key: 'WEBHOOK_MAX_AGE_MIN', label: 'Max wiek koment. (min)', type: 'number', placeholder: '60', hint: 'Fast mode + Webhook + Telegram' },
         ],
       },
       {
@@ -181,6 +181,8 @@ const TABS: TabConfig[] = [
           { key: 'WARMUP_ENABLED', label: 'Rozgrzewka', type: 'switch', hint: 'Naturalna aktywnosc przed praca' },
           { key: 'WARMUP_DURATION_MIN_MS', label: 'Min warmup (min)', type: 'number', placeholder: '5', unit: 'ms_to_min' },
           { key: 'WARMUP_DURATION_MAX_MS', label: 'Max warmup (min)', type: 'number', placeholder: '10', unit: 'ms_to_min' },
+          { key: 'BETWEEN_POSTS_PAUSE_MIN_MS', label: 'Min przerwa miedzy postami (min)', type: 'number', placeholder: '1', unit: 'ms_to_min', hint: 'Minimalna pauza przed kolejnym postem' },
+          { key: 'BETWEEN_POSTS_PAUSE_MAX_MS', label: 'Max przerwa miedzy postami (min)', type: 'number', placeholder: '3', unit: 'ms_to_min', hint: 'Maksymalna pauza przed kolejnym postem' },
         ],
       },
       {

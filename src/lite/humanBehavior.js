@@ -10,6 +10,7 @@ import { maybeVisitProfile } from "./profileVisitor.js";
 import { maybeInteractWithRandomImage } from "./imageInteraction.js";
 import { getActivityMultiplier, getAdaptiveDelay } from "./antiDetection.js";
 import log from "../utils/logger.js";
+import { BETWEEN_POSTS_PAUSE_MIN_MS, BETWEEN_POSTS_PAUSE_MAX_MS } from "../config.js";
 
 /**
  * Konfiguracja domyślna human behavior
@@ -18,7 +19,7 @@ const DEFAULT_CONFIG = {
   // Pauzy
   preActionPauseMs: [500, 1500],
   postActionPauseMs: [300, 1000],
-  betweenPostsPauseMs: [60000, 180000], // 1-3 minuty między postami
+  betweenPostsPauseMs: [BETWEEN_POSTS_PAUSE_MIN_MS, BETWEEN_POSTS_PAUSE_MAX_MS], // konfigurowalne z .env
 
   // Błędy
   typingMistakesEnabled: true,

@@ -109,7 +109,8 @@ const FAST_MODE = process.env.FAST_MODE === "true";
 
 // FAST_MAX_AGE_MIN: limit wieku komentarzy w FAST_MODE (minuty)
 // Komentarze starsze niż limit → skip posta (jeśli sort=Najnowsze)
-const FAST_MAX_AGE_MIN = Number(process.env.FAST_MAX_AGE_MIN || 180);
+// Używa WEBHOOK_MAX_AGE_MIN jako głównego źródła (edytowalne w panelu)
+const FAST_MAX_AGE_MIN = Number(process.env.WEBHOOK_MAX_AGE_MIN || process.env.FAST_MAX_AGE_MIN || 180);
 
 /* ==================== LOGOWANIE ==================== */
 /**
@@ -241,6 +242,13 @@ const FEED_SCROLL_DURATION_MAX = Number(process.env.FEED_SCROLL_DURATION_MAX || 
 const HUMAN_RANDOM_LIKE_CHANCE = Number(process.env.HUMAN_RANDOM_LIKE_CHANCE || 0.20);
 
 /**
+ * BETWEEN_POSTS_PAUSE – przerwa między postami (min/max w ms)
+ * Bot czeka losowy czas w tym zakresie między przetwarzaniem kolejnych postów
+ */
+const BETWEEN_POSTS_PAUSE_MIN_MS = Number(process.env.BETWEEN_POSTS_PAUSE_MIN_MS || 60000);
+const BETWEEN_POSTS_PAUSE_MAX_MS = Number(process.env.BETWEEN_POSTS_PAUSE_MAX_MS || 180000);
+
+/**
  * DISCOVERY_TELEGRAM_ENABLED – czy wysyłać alert Telegram przy nowym discovery
  */
 const DISCOVERY_TELEGRAM_ENABLED = process.env.DISCOVERY_TELEGRAM_ENABLED === "true";
@@ -340,6 +348,8 @@ export {
   FEED_SCROLL_DURATION_MAX,
   HUMAN_RANDOM_LIKE_CHANCE,
   DISCOVERY_TELEGRAM_ENABLED,
+  BETWEEN_POSTS_PAUSE_MIN_MS,
+  BETWEEN_POSTS_PAUSE_MAX_MS,
 
   // meta ads scanner
   METAADS_KEYWORDS,

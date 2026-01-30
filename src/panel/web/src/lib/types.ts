@@ -91,6 +91,9 @@ export interface EnvValues {
   HUMAN_RANDOM_LIKE_CHANCE: string
   DISCOVERY_TELEGRAM_ENABLED: string
   WEBHOOK_MAX_AGE_MIN: string
+  // LITE: Between Posts Pause
+  BETWEEN_POSTS_PAUSE_MIN_MS: string
+  BETWEEN_POSTS_PAUSE_MAX_MS: string
 }
 
 // Status sesji cookies
