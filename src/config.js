@@ -109,7 +109,8 @@ const FAST_MODE = process.env.FAST_MODE === "true";
 
 // FAST_MAX_AGE_MIN: limit wieku komentarzy w FAST_MODE (minuty)
 // Komentarze starsze niż limit → skip posta (jeśli sort=Najnowsze)
-const FAST_MAX_AGE_MIN = Number(process.env.FAST_MAX_AGE_MIN || 180);
+// Używa WEBHOOK_MAX_AGE_MIN jako głównego źródła (edytowalne w panelu)
+const FAST_MAX_AGE_MIN = Number(process.env.WEBHOOK_MAX_AGE_MIN || process.env.FAST_MAX_AGE_MIN || 180);
 
 /* ==================== LOGOWANIE ==================== */
 /**
@@ -241,6 +242,13 @@ const FEED_SCROLL_DURATION_MAX = Number(process.env.FEED_SCROLL_DURATION_MAX || 
 const HUMAN_RANDOM_LIKE_CHANCE = Number(process.env.HUMAN_RANDOM_LIKE_CHANCE || 0.20);
 
 /**
+ * BETWEEN_POSTS_PAUSE – przerwa między postami (min/max w ms)
+ * Bot czeka losowy czas w tym zakresie między przetwarzaniem kolejnych postów
+ */
+const BETWEEN_POSTS_PAUSE_MIN_MS = Number(process.env.BETWEEN_POSTS_PAUSE_MIN_MS || 60000);
+const BETWEEN_POSTS_PAUSE_MAX_MS = Number(process.env.BETWEEN_POSTS_PAUSE_MAX_MS || 180000);
+
+/**
  * DISCOVERY_TELEGRAM_ENABLED – czy wysyłać alert Telegram przy nowym discovery
  */
 const DISCOVERY_TELEGRAM_ENABLED = process.env.DISCOVERY_TELEGRAM_ENABLED === "true";
@@ -275,6 +283,58 @@ const METAADS_AUTO_SEND_TO_WATCHER = process.env.METAADS_AUTO_SEND_TO_WATCHER !=
  * Domyślnie: true (bez okna), ustaw na false żeby widzieć przeglądarkę
  */
 const METAADS_HEADLESS = process.env.METAADS_HEADLESS !== "false";
+
+/* ==================== MARKETPLACE AUTOPOSTING ==================== */
+/**
+ * MARKETPLACE_ENABLED – włącza moduł autopostingu na Marketplace
+ * Domyślnie: false
+ */
+const MARKETPLACE_ENABLED = process.env.MARKETPLACE_ENABLED === "true";
+
+/**
+ * MARKETPLACE_RENEWAL_INTERVAL_DAYS – co ile dni wznawiać ogłoszenia
+ * FB pozwala wznawiać co 7 dni
+ */
+const MARKETPLACE_RENEWAL_INTERVAL_DAYS = Number(process.env.MARKETPLACE_RENEWAL_INTERVAL_DAYS || 7);
+
+/**
+ * MARKETPLACE_RENEWAL_CHECK_HOURS – godziny sprawdzania wznowień
+ * Format: "8,14,20" – godziny rozdzielone przecinkami
+ */
+const MARKETPLACE_RENEWAL_CHECK_HOURS = (process.env.MARKETPLACE_RENEWAL_CHECK_HOURS || "8,14,20")
+  .split(",")
+  .map((h) => Number(h.trim()))
+  .filter((h) => !isNaN(h) && h >= 0 && h <= 23);
+
+/**
+ * MARKETPLACE_PUBLISH_INTERVAL_DAYS – minimalna przerwa między publikacjami
+ * Domyślnie: 3 dni
+ */
+const MARKETPLACE_PUBLISH_INTERVAL_DAYS = Number(process.env.MARKETPLACE_PUBLISH_INTERVAL_DAYS || 3);
+
+/**
+ * MARKETPLACE_MAX_ACTIVE_LISTINGS – maksymalna liczba aktywnych ogłoszeń
+ * Domyślnie: 10
+ */
+const MARKETPLACE_MAX_ACTIVE_LISTINGS = Number(process.env.MARKETPLACE_MAX_ACTIVE_LISTINGS || 10);
+
+/**
+ * MARKETPLACE_MAX_ERRORS_BEFORE_STOP – ile błędów z rzędu zatrzymuje scheduler
+ * Domyślnie: 3
+ */
+const MARKETPLACE_MAX_ERRORS_BEFORE_STOP = Number(process.env.MARKETPLACE_MAX_ERRORS_BEFORE_STOP || 3);
+
+/**
+ * MARKETPLACE_DATA_PATH – ścieżka do folderu z danymi marketplace
+ * Domyślnie: data/marketplace
+ */
+const MARKETPLACE_DATA_PATH = process.env.MARKETPLACE_DATA_PATH || "data/marketplace";
+
+/**
+ * MARKETPLACE_HEADLESS – czy uruchamiać przeglądarkę w trybie headless
+ * Domyślnie: true
+ */
+const MARKETPLACE_HEADLESS = process.env.MARKETPLACE_HEADLESS !== "false";
 
 export {
   // stary system – optional
@@ -340,6 +400,8 @@ export {
   FEED_SCROLL_DURATION_MAX,
   HUMAN_RANDOM_LIKE_CHANCE,
   DISCOVERY_TELEGRAM_ENABLED,
+  BETWEEN_POSTS_PAUSE_MIN_MS,
+  BETWEEN_POSTS_PAUSE_MAX_MS,
 
   // meta ads scanner
   METAADS_KEYWORDS,
@@ -347,4 +409,14 @@ export {
   METAADS_SCAN_INTERVAL_H,
   METAADS_AUTO_SEND_TO_WATCHER,
   METAADS_HEADLESS,
+
+  // marketplace autoposting
+  MARKETPLACE_ENABLED,
+  MARKETPLACE_RENEWAL_INTERVAL_DAYS,
+  MARKETPLACE_RENEWAL_CHECK_HOURS,
+  MARKETPLACE_PUBLISH_INTERVAL_DAYS,
+  MARKETPLACE_MAX_ACTIVE_LISTINGS,
+  MARKETPLACE_MAX_ERRORS_BEFORE_STOP,
+  MARKETPLACE_DATA_PATH,
+  MARKETPLACE_HEADLESS,
 };

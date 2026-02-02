@@ -1,6 +1,71 @@
 // src/telegram.js
 import axios from "axios";
+import fs from "fs";
+import path from "path";
 import log from "./utils/logger.js";
+
+/* ============================================================
+   GLOBAL ALERT THROTTLE - przetrwa restarty PM2
+   Wszystkie alerty (errory, checkpointy, starty) max 1 na 10 min
+   ============================================================ */
+const ALERT_THROTTLE_FILE = path.join(process.cwd(), ".alert_throttle.json");
+const ALERT_THROTTLE_SEC = Number(process.env.TG_ALERT_THROTTLE_SEC || 600); // 10 min domyślnie
+
+function loadThrottleData() {
+  try {
+    if (fs.existsSync(ALERT_THROTTLE_FILE)) {
+      return JSON.parse(fs.readFileSync(ALERT_THROTTLE_FILE, "utf8"));
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+
+function saveThrottleData(data) {
+  try {
+    fs.writeFileSync(ALERT_THROTTLE_FILE, JSON.stringify(data), "utf8");
+  } catch { /* ignore */ }
+}
+
+function getAlertKey(title) {
+  // Normalizuj tytuł do krótkiego klucza
+  const t = String(title || "UNKNOWN").toLowerCase().trim();
+  // Grupuj podobne alerty razem
+  if (/checkpoint|2fa/i.test(t)) return "checkpoint";
+  if (/alert.*online|start/i.test(t)) return "startup";
+  if (/timeout/i.test(t)) return "timeout";
+  if (/login.*error/i.test(t)) return "login_error";
+  if (/unhandled|uncaught|error/i.test(t)) return "error";
+  // Dla innych - pierwsze 30 znaków jako klucz
+  return t.slice(0, 30).replace(/[^a-z0-9]/g, "_");
+}
+
+function shouldThrottleAlert(title) {
+  const key = getAlertKey(title);
+  const data = loadThrottleData();
+  const now = Date.now();
+  const lastTs = data[key] || 0;
+  const elapsed = (now - lastTs) / 1000;
+
+  if (elapsed < ALERT_THROTTLE_SEC) {
+    log.dev("TELEGRAM", `Alert "${key}" throttled (${Math.round(elapsed)}s < ${ALERT_THROTTLE_SEC}s cooldown)`);
+    return true;
+  }
+
+  // Zapisz nowy timestamp
+  data[key] = now;
+  // Wyczyść stare wpisy (starsze niż 1h)
+  const oneHourAgo = now - 3600000;
+  for (const k of Object.keys(data)) {
+    if (data[k] < oneHourAgo) delete data[k];
+  }
+  saveThrottleData(data);
+  return false;
+}
+
+// Alias dla kompatybilności
+function shouldThrottleCheckpointAlert(title) {
+  return shouldThrottleAlert(title);
+}
 
 /* ============================================================
    FILTR WIEKU KOMENTARZA (TELEGRAM)
@@ -41,10 +106,9 @@ function parseFbRelativeTime(raw) {
 }
 
 function shouldSendByAge(comment) {
-  // ENV:
-  // TELEGRAM_MAX_AGE_MIN=60
+  // ENV: Używa WEBHOOK_MAX_AGE_MIN jako głównego źródła (edytowalne w panelu)
   // TELEGRAM_DROP_IF_NO_TIME=1  (domyślnie: 1)
-  const maxAgeMin = Number(process.env.TELEGRAM_MAX_AGE_MIN || 60);
+  const maxAgeMin = Number(process.env.WEBHOOK_MAX_AGE_MIN || process.env.TELEGRAM_MAX_AGE_MIN || 60);
   const dropIfNoTime = envBool("TELEGRAM_DROP_IF_NO_TIME", true);
 
   const rel = String(comment?.fb_time_raw || comment?.time || comment?.relative_time || "").trim();
@@ -240,6 +304,11 @@ async function sendOwnerAlert(title, message, opts = {}) {
   const token = String(process.env.TELEGRAM_BOT_TOKEN_OWNER || "").trim();
   const chatId = String(process.env.TELEGRAM_CHAT_ID_OWNER || "").trim();
   if (!token || !chatId) return;
+
+  // CHECKPOINT THROTTLE - max 1 alert na 10 min (przetrwa restarty PM2)
+  if (shouldThrottleCheckpointAlert(title)) {
+    return;
+  }
 
   const cooldownSec = Number(process.env.TG_ALERTS_COOLDOWN_SEC || "120");
   const maxLen = Number(process.env.TG_ALERTS_MAXLEN || "3500");
