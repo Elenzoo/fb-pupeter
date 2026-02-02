@@ -92,7 +92,7 @@ import { smoothScrollBy } from "./lite/smoothScroll.js";
 import { maybeSimulateTabSwitch } from "./lite/tabSimulation.js";
 import { maybeVisitProfile, findProfileLinks } from "./lite/profileVisitor.js";
 import { maybeInteractWithRandomImage } from "./lite/imageInteraction.js";
-import { loadKeywordsFromFile, migrateKeywordsFromEnv } from "./lite/index.js";
+import { loadKeywordsFromFile, migrateKeywordsFromEnv, getActiveKeywords } from "./lite/index.js";
 
 /**
  * ŹRÓDŁO POSTÓW (PRIMARY): panel => data/posts.json
@@ -724,8 +724,9 @@ async function startWatcher() {
 
   // Log konfiguracji Feed Scan
   const initKeywords = loadKeywordsFromFile();
-  if (initKeywords.enabled && initKeywords.keywords.length > 0) {
-    log.prod("LITE", `Feed Scan: ${initKeywords.keywords.length} keywords`);
+  const initActiveKeywords = initKeywords.keywords.filter(k => k.enabled);
+  if (initKeywords.enabled && initActiveKeywords.length > 0) {
+    log.prod("LITE", `Feed Scan: ${initActiveKeywords.length}/${initKeywords.keywords.length} keywords aktywnych`);
   }
 
   const loop = async () => {
@@ -956,17 +957,18 @@ async function startWatcher() {
       // ============ LITE: Feed Scan (losowo 30-50% szans) ============
       // Ładowanie keywords z pliku JSON (dynamicznie przy każdym cyklu)
       const keywordsData = loadKeywordsFromFile();
-      const feedScanEnabled = keywordsData.enabled && keywordsData.keywords.length > 0;
+      const activeKeywords = getActiveKeywords(); // tylko keywords z enabled: true
+      const feedScanEnabled = keywordsData.enabled && activeKeywords.length > 0;
 
       if (feedScanEnabled && Math.random() < 0.4) {
         const feedPage = await ctx.newPage();
         await setupLightweightPage(feedPage);
         await loadCookies(feedPage).catch(() => {});
 
-        const keywords = keywordsData.keywords;
+        const keywords = activeKeywords;
         const watchedUrls = currentPosts.map(p => p.url);
 
-        log.prod("LITE", `Feed Scan: ${keywords.length} keywords`);
+        log.prod("LITE", `Feed Scan: ${keywords.length} aktywnych keywords`);
 
         try {
           const scanResult = await scanFeed(feedPage, {

@@ -8,8 +8,8 @@ import {
   ChevronDown, ChevronRight,
   Zap, User, Send, Shield, Terminal, Eye, Bot, Bell, Link, Moon, Search, Clock, Heart
 } from 'lucide-react'
-import { getEnv, setEnv, pm2Start, pm2Stop, pm2Restart, getKeywords, addKeyword, removeKeyword, setKeywordsEnabled as setKeywordsEnabledApi } from '@/lib/api'
-import type { EnvValues } from '@/lib/types'
+import { getEnv, setEnv, pm2Start, pm2Stop, pm2Restart, getKeywords, addKeyword, removeKeyword, toggleKeyword, setKeywordsEnabled as setKeywordsEnabledApi } from '@/lib/api'
+import type { EnvValues, KeywordEntry } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { KeywordsManager } from '@/components/KeywordsManager'
 
@@ -326,11 +326,12 @@ interface CollapsibleSubSectionProps {
   onValueChange: (key: keyof EnvValues, value: string) => void
   defaultOpen?: boolean
   // Props dla KeywordsManager
-  keywords?: string[]
+  keywords?: KeywordEntry[]
   keywordsEnabled?: boolean
   keywordsLoading?: boolean
   onKeywordAdd?: (keyword: string) => Promise<void>
   onKeywordRemove?: (keyword: string) => Promise<void>
+  onToggleKeyword?: (keyword: string) => Promise<void>
   onKeywordsToggle?: (enabled: boolean) => Promise<void>
 }
 
@@ -344,6 +345,7 @@ function CollapsibleSubSection({
   keywordsLoading = false,
   onKeywordAdd,
   onKeywordRemove,
+  onToggleKeyword,
   onKeywordsToggle,
 }: CollapsibleSubSectionProps) {
   const [open, setOpen] = useState(defaultOpen)
@@ -367,7 +369,7 @@ function CollapsibleSubSection({
       {open && (
         <div className="px-3 py-2 bg-[#00ffff05]">
           {/* KeywordsManager jeśli subsection ma flag */}
-          {subsection.hasKeywordsManager && onKeywordAdd && onKeywordRemove && onKeywordsToggle && (
+          {subsection.hasKeywordsManager && onKeywordAdd && onKeywordRemove && onToggleKeyword && onKeywordsToggle && (
             <div className="py-2 border-b border-[#00ffff10]">
               <Label className="text-[#00ff66] text-sm block mb-2">Słowa kluczowe</Label>
               <KeywordsManager
@@ -376,7 +378,8 @@ function CollapsibleSubSection({
                 loading={keywordsLoading}
                 onAdd={onKeywordAdd}
                 onRemove={onKeywordRemove}
-                onToggle={onKeywordsToggle}
+                onToggleKeyword={onToggleKeyword}
+                onToggleGlobal={onKeywordsToggle}
               />
             </div>
           )}
@@ -406,7 +409,7 @@ export function SettingsCyber() {
   const [activeTab, setActiveTab] = useState('core')
 
   // Keywords state
-  const [keywords, setKeywords] = useState<string[]>([])
+  const [keywords, setKeywords] = useState<KeywordEntry[]>([])
   const [keywordsEnabled, setKeywordsEnabled] = useState(false)
   const [keywordsLoading, setKeywordsLoading] = useState(false)
 
@@ -447,6 +450,19 @@ export function SettingsCyber() {
       showMessage('OK: Usunieto keyword', 'success')
     } else {
       showMessage('BLAD: ' + (result.error || 'Nie udalo sie usunac'), 'error')
+    }
+  }, [])
+
+  const handleToggleKeyword = useCallback(async (keyword: string) => {
+    const result = await toggleKeyword(keyword)
+    if (result.ok && result.keywords) {
+      setKeywords(result.keywords)
+      const kw = result.keyword
+      if (kw) {
+        showMessage(kw.enabled ? `OK: "${kw.text}" wlaczony` : `OK: "${kw.text}" wylaczony`, 'success')
+      }
+    } else {
+      showMessage('BLAD: ' + (result.error || 'Nie udalo sie zmienic'), 'error')
     }
   }, [])
 
@@ -650,6 +666,7 @@ export function SettingsCyber() {
                 keywordsLoading={keywordsLoading}
                 onKeywordAdd={handleKeywordAdd}
                 onKeywordRemove={handleKeywordRemove}
+                onToggleKeyword={handleToggleKeyword}
                 onKeywordsToggle={handleKeywordsToggle}
               />
             </div>

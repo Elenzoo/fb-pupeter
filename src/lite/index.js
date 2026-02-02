@@ -132,8 +132,21 @@ export {
 } from "./feedScanner.js";
 
 /**
+ * @typedef {Object} KeywordEntry
+ * @property {string} text - tekst keyword
+ * @property {boolean} enabled - czy keyword jest aktywny
+ */
+
+/**
+ * @typedef {Object} KeywordsData
+ * @property {KeywordEntry[]} keywords - lista keywords z flagą enabled
+ * @property {boolean} enabled - globalny switch skanowania
+ */
+
+/**
  * Ładuje keywords z pliku JSON
- * @returns {{ keywords: string[], enabled: boolean }}
+ * Obsługuje zarówno nowy format (obiekty) jak i stary (stringi) dla backward compat
+ * @returns {KeywordsData}
  */
 export function loadKeywordsFromFile() {
   try {
@@ -143,8 +156,22 @@ export function loadKeywordsFromFile() {
     const raw = fs.readFileSync(KEYWORDS_PATH, "utf8").trim();
     if (!raw) return { keywords: [], enabled: false };
     const data = JSON.parse(raw);
+
+    // Normalizacja - obsługa starego formatu (string[]) i nowego ({ text, enabled }[])
+    let keywords = [];
+    if (Array.isArray(data.keywords)) {
+      keywords = data.keywords.map(k => {
+        if (typeof k === "string") {
+          // Stary format - konwertuj na nowy
+          return { text: k, enabled: true };
+        }
+        // Nowy format
+        return { text: String(k.text || ""), enabled: k.enabled !== false };
+      }).filter(k => k.text);
+    }
+
     return {
-      keywords: Array.isArray(data.keywords) ? data.keywords : [],
+      keywords,
       enabled: Boolean(data.enabled),
     };
   } catch {
@@ -153,8 +180,18 @@ export function loadKeywordsFromFile() {
 }
 
 /**
+ * Zwraca tylko aktywne keywords jako tablicę stringów (do użycia w matcherze)
+ * @returns {string[]}
+ */
+export function getActiveKeywords() {
+  const data = loadKeywordsFromFile();
+  if (!data.enabled) return [];
+  return data.keywords.filter(k => k.enabled).map(k => k.text);
+}
+
+/**
  * Zapisuje keywords do pliku JSON
- * @param {{ keywords: string[], enabled: boolean }} data
+ * @param {KeywordsData} data
  */
 export function saveKeywordsToFile(data) {
   if (!fs.existsSync(DATA_DIR)) {
@@ -168,17 +205,32 @@ export function saveKeywordsToFile(data) {
  * Wywoływane przy starcie aplikacji
  */
 export function migrateKeywordsFromEnv() {
-  // Jeśli keywords.json już istnieje, nie migruj
-  if (fs.existsSync(KEYWORDS_PATH)) return false;
+  // Jeśli keywords.json już istnieje, sprawdź czy wymaga migracji do nowego formatu
+  if (fs.existsSync(KEYWORDS_PATH)) {
+    const data = loadKeywordsFromFile();
+    // Jeśli już jest w nowym formacie, nic nie rób
+    if (data.keywords.length > 0 && typeof data.keywords[0] === "object") {
+      return false;
+    }
+  }
 
   const envKeywords = process.env.FEED_SCAN_KEYWORDS;
-  if (!envKeywords) return false;
+  if (!envKeywords && !fs.existsSync(KEYWORDS_PATH)) return false;
 
+  // Jeśli plik istnieje ale w starym formacie, zmigruj
+  if (fs.existsSync(KEYWORDS_PATH)) {
+    const data = loadKeywordsFromFile();
+    // loadKeywordsFromFile już konwertuje do nowego formatu
+    saveKeywordsToFile(data);
+    return true;
+  }
+
+  // Migracja z .env
   const keywords = envKeywords.split(",").map(k => k.trim()).filter(Boolean);
   if (keywords.length === 0) return false;
 
   const data = {
-    keywords,
+    keywords: keywords.map(text => ({ text, enabled: true })),
     enabled: process.env.FEED_SCAN_ENABLED === "true",
   };
 
@@ -193,12 +245,12 @@ export function getLiteConfig() {
   // Spróbuj załadować keywords z pliku JSON
   const keywordsData = loadKeywordsFromFile();
 
-  // Fallback na .env jeśli plik JSON nie ma keywords
-  let feedScanKeywords = keywordsData.keywords;
+  // Pobierz tylko aktywne keywords (enabled: true)
+  let feedScanKeywords = keywordsData.keywords.filter(k => k.enabled).map(k => k.text);
   let feedScanEnabled = keywordsData.enabled;
 
-  if (feedScanKeywords.length === 0) {
-    // Fallback na stary format .env
+  if (feedScanKeywords.length === 0 && !fs.existsSync(KEYWORDS_PATH)) {
+    // Fallback na stary format .env tylko jeśli plik JSON nie istnieje
     feedScanKeywords = (process.env.FEED_SCAN_KEYWORDS || "").split(",").map(k => k.trim()).filter(Boolean);
     feedScanEnabled = process.env.FEED_SCAN_ENABLED === "true";
   }

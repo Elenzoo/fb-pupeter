@@ -938,6 +938,9 @@ http
       // ===== LITE: KEYWORDS =====
       const KEYWORDS_PATH = path.join(PROJECT_DIR, "data", "keywords.json");
 
+      /**
+       * Ładuje i normalizuje keywords do nowego formatu { text, enabled }
+       */
       function readKeywords() {
         if (!fs.existsSync(KEYWORDS_PATH)) {
           return { keywords: [], enabled: false };
@@ -945,7 +948,27 @@ http
         const raw = fs.readFileSync(KEYWORDS_PATH, "utf8").trim();
         if (!raw) return { keywords: [], enabled: false };
         const parsed = safeJsonParse(raw);
-        return parsed.ok && parsed.value ? parsed.value : { keywords: [], enabled: false };
+        if (!parsed.ok || !parsed.value) return { keywords: [], enabled: false };
+
+        const data = parsed.value;
+
+        // Normalizacja - obsługa starego formatu (string[]) i nowego ({ text, enabled }[])
+        let keywords = [];
+        if (Array.isArray(data.keywords)) {
+          keywords = data.keywords.map(k => {
+            if (typeof k === "string") {
+              // Stary format - konwertuj na nowy
+              return { text: k, enabled: true };
+            }
+            // Nowy format
+            return { text: String(k.text || ""), enabled: k.enabled !== false };
+          }).filter(k => k.text);
+        }
+
+        return {
+          keywords,
+          enabled: Boolean(data.enabled),
+        };
       }
 
       function writeKeywords(data) {
@@ -975,11 +998,30 @@ http
         }
 
         const data = readKeywords();
-        if (!data.keywords.includes(keyword)) {
-          data.keywords.push(keyword);
+        const exists = data.keywords.some(k => k.text === keyword);
+        if (!exists) {
+          data.keywords.push({ text: keyword, enabled: true });
           writeKeywords(data);
         }
         json(res, { ok: true, keywords: data.keywords });
+        return;
+      }
+
+      // PUT /api/keywords/:keyword/toggle - włącz/wyłącz pojedynczy keyword
+      const mKeywordToggle = req.method === "PUT" ? match(pathname, "/api/keywords/:keyword/toggle") : null;
+      if (mKeywordToggle) {
+        const keyword = decodeURIComponent(mKeywordToggle.keyword);
+        const data = readKeywords();
+        const kw = data.keywords.find(k => k.text === keyword);
+
+        if (!kw) {
+          json(res, { ok: false, error: "Keyword not found" }, 404);
+          return;
+        }
+
+        kw.enabled = !kw.enabled;
+        writeKeywords(data);
+        json(res, { ok: true, keyword: kw, keywords: data.keywords });
         return;
       }
 
@@ -988,7 +1030,7 @@ http
       if (mKeywordDel) {
         const keyword = decodeURIComponent(mKeywordDel.keyword);
         const data = readKeywords();
-        const idx = data.keywords.indexOf(keyword);
+        const idx = data.keywords.findIndex(k => k.text === keyword);
 
         if (idx === -1) {
           json(res, { ok: false, error: "Keyword not found" }, 404);
@@ -1001,7 +1043,7 @@ http
         return;
       }
 
-      // PUT /api/keywords/enabled - włącz/wyłącz skanowanie
+      // PUT /api/keywords/enabled - włącz/wyłącz skanowanie (globalny switch)
       if (req.method === "PUT" && pathname === "/api/keywords/enabled") {
         const bodyRaw = await readBody(req);
         const parsed = safeJsonParse(bodyRaw || "{}");
