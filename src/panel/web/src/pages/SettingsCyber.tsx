@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -8,9 +8,10 @@ import {
   ChevronDown, ChevronRight,
   Zap, User, Send, Shield, Terminal, Eye, Bot, Bell, Link, Moon, Search, Clock, Heart
 } from 'lucide-react'
-import { getEnv, setEnv, pm2Start, pm2Stop, pm2Restart } from '@/lib/api'
+import { getEnv, setEnv, pm2Start, pm2Stop, pm2Restart, getKeywords, addKeyword, removeKeyword, setKeywordsEnabled as setKeywordsEnabledApi } from '@/lib/api'
 import type { EnvValues } from '@/lib/types'
 import { cn } from '@/lib/utils'
+import { KeywordsManager } from '@/components/KeywordsManager'
 
 // =============== KONFIGURACJA SEKCJI (PO POLSKU) ===============
 
@@ -29,6 +30,7 @@ interface SubSection {
   title: string
   icon: React.ReactNode
   fields: FieldConfig[]
+  hasKeywordsManager?: boolean
 }
 
 interface TabConfig {
@@ -216,12 +218,12 @@ const TABS: TabConfig[] = [
         title: 'Skaner tablicy',
         icon: <Search className="h-4 w-4" />,
         fields: [
-          { key: 'FEED_SCAN_ENABLED', label: 'Wlacz skanowanie', type: 'switch', hint: 'Szukaj postow na tablicy' },
-          { key: 'FEED_SCAN_KEYWORDS', label: 'Slowa kluczowe', placeholder: 'garaz,blaszany,hala', hint: 'Rozdziel przecinkami' },
+          // FEED_SCAN_ENABLED i FEED_SCAN_KEYWORDS są obsługiwane przez KeywordsManager
           { key: 'FEED_SCROLL_DURATION_MIN', label: 'Min scroll (min)', type: 'number', placeholder: '1' },
           { key: 'FEED_SCROLL_DURATION_MAX', label: 'Max scroll (min)', type: 'number', placeholder: '3' },
           { key: 'DISCOVERY_TELEGRAM_ENABLED', label: 'Alert Telegram', type: 'switch', hint: 'Powiadom o wykryciu' },
         ],
+        hasKeywordsManager: true,  // Specjalny flag dla KeywordsManager
       },
     ],
   },
@@ -323,10 +325,30 @@ interface CollapsibleSubSectionProps {
   values: EnvValues
   onValueChange: (key: keyof EnvValues, value: string) => void
   defaultOpen?: boolean
+  // Props dla KeywordsManager
+  keywords?: string[]
+  keywordsEnabled?: boolean
+  keywordsLoading?: boolean
+  onKeywordAdd?: (keyword: string) => Promise<void>
+  onKeywordRemove?: (keyword: string) => Promise<void>
+  onKeywordsToggle?: (enabled: boolean) => Promise<void>
 }
 
-function CollapsibleSubSection({ subsection, values, onValueChange, defaultOpen = false }: CollapsibleSubSectionProps) {
+function CollapsibleSubSection({
+  subsection,
+  values,
+  onValueChange,
+  defaultOpen = false,
+  keywords = [],
+  keywordsEnabled = false,
+  keywordsLoading = false,
+  onKeywordAdd,
+  onKeywordRemove,
+  onKeywordsToggle,
+}: CollapsibleSubSectionProps) {
   const [open, setOpen] = useState(defaultOpen)
+
+  const fieldCount = subsection.fields.length + (subsection.hasKeywordsManager ? 1 : 0)
 
   return (
     <div className="border border-[#00ffff20] mb-2">
@@ -340,10 +362,25 @@ function CollapsibleSubSection({ subsection, values, onValueChange, defaultOpen 
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         {subsection.icon}
         <span className="font-bold tracking-wider">{subsection.title.toUpperCase()}</span>
-        <span className="text-[10px] text-[#00ffff40] ml-auto">{subsection.fields.length} pól</span>
+        <span className="text-[10px] text-[#00ffff40] ml-auto">{fieldCount} pól</span>
       </button>
       {open && (
         <div className="px-3 py-2 bg-[#00ffff05]">
+          {/* KeywordsManager jeśli subsection ma flag */}
+          {subsection.hasKeywordsManager && onKeywordAdd && onKeywordRemove && onKeywordsToggle && (
+            <div className="py-2 border-b border-[#00ffff10]">
+              <Label className="text-[#00ff66] text-sm block mb-2">Słowa kluczowe</Label>
+              <KeywordsManager
+                keywords={keywords}
+                enabled={keywordsEnabled}
+                loading={keywordsLoading}
+                onAdd={onKeywordAdd}
+                onRemove={onKeywordRemove}
+                onToggle={onKeywordsToggle}
+              />
+            </div>
+          )}
+          {/* Pozostałe pola */}
           {subsection.fields.map((field) => (
             <CyberField
               key={field.key}
@@ -368,10 +405,60 @@ export function SettingsCyber() {
   const [pm2Loading, setPm2Loading] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('core')
 
+  // Keywords state
+  const [keywords, setKeywords] = useState<string[]>([])
+  const [keywordsEnabled, setKeywordsEnabled] = useState(false)
+  const [keywordsLoading, setKeywordsLoading] = useState(false)
+
   const showMessage = (text: string, type: 'success' | 'error') => {
     setMessage({ text, type })
     setTimeout(() => setMessage(null), 3000)
   }
+
+  const loadKeywords = useCallback(async () => {
+    setKeywordsLoading(true)
+    try {
+      const result = await getKeywords()
+      if (result.ok) {
+        setKeywords(result.keywords || [])
+        setKeywordsEnabled(result.enabled || false)
+      }
+    } catch {
+      // Cicho ignoruj błędy ładowania keywords
+    } finally {
+      setKeywordsLoading(false)
+    }
+  }, [])
+
+  const handleKeywordAdd = useCallback(async (keyword: string) => {
+    const result = await addKeyword(keyword)
+    if (result.ok && result.keywords) {
+      setKeywords(result.keywords)
+      showMessage('OK: Dodano keyword', 'success')
+    } else {
+      showMessage('BLAD: ' + (result.error || 'Nie udalo sie dodac'), 'error')
+    }
+  }, [])
+
+  const handleKeywordRemove = useCallback(async (keyword: string) => {
+    const result = await removeKeyword(keyword)
+    if (result.ok && result.keywords) {
+      setKeywords(result.keywords)
+      showMessage('OK: Usunieto keyword', 'success')
+    } else {
+      showMessage('BLAD: ' + (result.error || 'Nie udalo sie usunac'), 'error')
+    }
+  }, [])
+
+  const handleKeywordsToggle = useCallback(async (enabled: boolean) => {
+    const result = await setKeywordsEnabledApi(enabled)
+    if (result.ok) {
+      setKeywordsEnabled(enabled)
+      showMessage(enabled ? 'OK: Skanowanie wlaczone' : 'OK: Skanowanie wylaczone', 'success')
+    } else {
+      showMessage('BLAD: ' + (result.error || 'Nie udalo sie zmienic'), 'error')
+    }
+  }, [])
 
   const loadEnv = async () => {
     setLoading(true)
@@ -391,7 +478,8 @@ export function SettingsCyber() {
 
   useEffect(() => {
     loadEnv()
-  }, [])
+    loadKeywords()
+  }, [loadKeywords])
 
   const handleSave = async (restart = false) => {
     if (!values) return
@@ -556,6 +644,13 @@ export function SettingsCyber() {
                 values={values}
                 onValueChange={handleValueChange}
                 defaultOpen={idx === 0}
+                // Props dla KeywordsManager (tylko dla sekcji z hasKeywordsManager)
+                keywords={keywords}
+                keywordsEnabled={keywordsEnabled}
+                keywordsLoading={keywordsLoading}
+                onKeywordAdd={handleKeywordAdd}
+                onKeywordRemove={handleKeywordRemove}
+                onKeywordsToggle={handleKeywordsToggle}
               />
             </div>
           ))}

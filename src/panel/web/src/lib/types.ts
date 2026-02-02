@@ -173,3 +173,16 @@ export interface BlacklistResponse {
   total: number
   error?: string
 }
+
+// Keywords dla Feed Scannera
+export interface KeywordsData {
+  keywords: string[]
+  enabled: boolean
+}
+
+export interface KeywordsResponse {
+  ok: boolean
+  keywords: string[]
+  enabled: boolean
+  error?: string
+}

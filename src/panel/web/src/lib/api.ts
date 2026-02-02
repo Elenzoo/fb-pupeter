@@ -8,6 +8,7 @@ import type {
   DiscoveriesResponse,
   BlacklistResponse,
   BlacklistEntry,
+  KeywordsResponse,
 } from './types'
 
 const TOKEN_KEY = 'FBW_PANEL_TOKEN'
@@ -195,6 +196,31 @@ export async function uploadImage(file: File): Promise<{ ok: boolean; path?: str
   return request('/api/images/upload', {
     method: 'POST',
     body: formData,
+  })
+}
+
+// Keywords
+export async function getKeywords(): Promise<KeywordsResponse> {
+  return request<KeywordsResponse>('/api/keywords')
+}
+
+export async function addKeyword(keyword: string): Promise<{ ok: boolean; keywords?: string[]; error?: string }> {
+  return request('/api/keywords', {
+    method: 'POST',
+    body: JSON.stringify({ keyword }),
+  })
+}
+
+export async function removeKeyword(keyword: string): Promise<{ ok: boolean; keywords?: string[]; error?: string }> {
+  return request(`/api/keywords/${encodeURIComponent(keyword)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function setKeywordsEnabled(enabled: boolean): Promise<{ ok: boolean; enabled?: boolean; error?: string }> {
+  return request('/api/keywords/enabled', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
   })
 }
 

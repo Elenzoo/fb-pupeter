@@ -65,7 +65,7 @@ function parseKeywords(keywordsString, delimiter = ",") {
  */
 function containsKeyword(normalizedText, normalizedKeyword, options = {}) {
   const {
-    wholeWord = false, // czy wymagać całego słowa
+    wholeWord = true,  // domyślnie whole-word żeby uniknąć false positives (np. "wiata" w "świata")
     fuzzy = false,     // czy pozwolić na drobne błędy
   } = options;
 
@@ -84,6 +84,34 @@ function containsKeyword(normalizedText, normalizedKeyword, options = {}) {
 
   // Proste contains
   return normalizedText.includes(normalizedKeyword);
+}
+
+/**
+ * Sprawdza czy tekst zawiera frazę wielowyrazową
+ * Dla pojedynczych słów używa whole-word matching
+ * Dla fraz wielowyrazowych buduje regex dla sekwencji słów
+ * @param {string} normalizedText - znormalizowany tekst
+ * @param {string} normalizedPhrase - znormalizowana fraza
+ * @returns {boolean}
+ */
+function containsPhrase(normalizedText, normalizedPhrase) {
+  if (!normalizedText || !normalizedPhrase) return false;
+
+  const words = normalizedPhrase.split(/\s+/).filter(Boolean);
+
+  if (words.length === 0) return false;
+
+  if (words.length === 1) {
+    // Pojedyncze słowo - użyj standardowego whole-word
+    const regex = new RegExp(`\\b${escapeRegex(words[0])}\\b`, "i");
+    return regex.test(normalizedText);
+  }
+
+  // Fraza wielowyrazowa - zbuduj regex dla sekwencji słów
+  // np. "blaszany garaz" → \bblaszany\s+garaz\b
+  const pattern = words.map(w => escapeRegex(w)).join("\\s+");
+  const regex = new RegExp(`\\b${pattern}\\b`, "i");
+  return regex.test(normalizedText);
 }
 
 /**
@@ -127,9 +155,10 @@ function fuzzyMatch(text, keyword) {
  */
 function matchKeywords(text, keywords, options = {}) {
   const {
-    wholeWord = false,
+    wholeWord = true,  // domyślnie whole-word
     fuzzy = false,
     minLength = 3, // minimalna długość keyword do matchingu
+    usePhraseMatcher = true, // użyj containsPhrase dla fraz wielowyrazowych
   } = options;
 
   if (!text || !keywords || keywords.length === 0) {
@@ -144,8 +173,19 @@ function matchKeywords(text, keywords, options = {}) {
     if (keyword.length < minLength) continue;
 
     const normalizedKeyword = normalizeKeyword(keyword);
+    const isPhrase = normalizedKeyword.includes(" ");
 
-    if (containsKeyword(normalizedText, normalizedKeyword, { wholeWord, fuzzy })) {
+    let isMatch = false;
+
+    if (usePhraseMatcher && isPhrase) {
+      // Dla fraz wielowyrazowych użyj containsPhrase
+      isMatch = containsPhrase(normalizedText, normalizedKeyword);
+    } else {
+      // Dla pojedynczych słów użyj containsKeyword
+      isMatch = containsKeyword(normalizedText, normalizedKeyword, { wholeWord, fuzzy });
+    }
+
+    if (isMatch) {
       matched.push(keyword); // Zwracamy oryginalny keyword
     }
   }
@@ -164,6 +204,7 @@ function matchKeywords(text, keywords, options = {}) {
  * @returns {boolean}
  */
 function hasAnyKeyword(text, keywords, options = {}) {
+  // Przekaż opcje dalej, matchKeywords teraz domyślnie używa wholeWord=true
   const { matched } = matchKeywords(text, keywords, options);
   return matched.length > 0;
 }
@@ -268,6 +309,7 @@ export {
   normalizeKeyword,
   parseKeywords,
   containsKeyword,
+  containsPhrase,
   matchKeywords,
   hasAnyKeyword,
   highlightKeywords,

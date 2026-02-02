@@ -1,6 +1,14 @@
 // src/lite/index.js
 // FB_Watcher LITE - główny moduł eksportujący
 
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(__dirname, "..", "..", "data");
+const KEYWORDS_PATH = path.join(DATA_DIR, "keywords.json");
+
 // Anti-Detection
 export {
   getRandomViewport,
@@ -124,9 +132,77 @@ export {
 } from "./feedScanner.js";
 
 /**
+ * Ładuje keywords z pliku JSON
+ * @returns {{ keywords: string[], enabled: boolean }}
+ */
+export function loadKeywordsFromFile() {
+  try {
+    if (!fs.existsSync(KEYWORDS_PATH)) {
+      return { keywords: [], enabled: false };
+    }
+    const raw = fs.readFileSync(KEYWORDS_PATH, "utf8").trim();
+    if (!raw) return { keywords: [], enabled: false };
+    const data = JSON.parse(raw);
+    return {
+      keywords: Array.isArray(data.keywords) ? data.keywords : [],
+      enabled: Boolean(data.enabled),
+    };
+  } catch {
+    return { keywords: [], enabled: false };
+  }
+}
+
+/**
+ * Zapisuje keywords do pliku JSON
+ * @param {{ keywords: string[], enabled: boolean }} data
+ */
+export function saveKeywordsToFile(data) {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  fs.writeFileSync(KEYWORDS_PATH, JSON.stringify(data, null, 2) + "\n");
+}
+
+/**
+ * Migruje keywords ze starego formatu .env do keywords.json
+ * Wywoływane przy starcie aplikacji
+ */
+export function migrateKeywordsFromEnv() {
+  // Jeśli keywords.json już istnieje, nie migruj
+  if (fs.existsSync(KEYWORDS_PATH)) return false;
+
+  const envKeywords = process.env.FEED_SCAN_KEYWORDS;
+  if (!envKeywords) return false;
+
+  const keywords = envKeywords.split(",").map(k => k.trim()).filter(Boolean);
+  if (keywords.length === 0) return false;
+
+  const data = {
+    keywords,
+    enabled: process.env.FEED_SCAN_ENABLED === "true",
+  };
+
+  saveKeywordsToFile(data);
+  return true;
+}
+
+/**
  * Konfiguracja LITE z env
  */
 export function getLiteConfig() {
+  // Spróbuj załadować keywords z pliku JSON
+  const keywordsData = loadKeywordsFromFile();
+
+  // Fallback na .env jeśli plik JSON nie ma keywords
+  let feedScanKeywords = keywordsData.keywords;
+  let feedScanEnabled = keywordsData.enabled;
+
+  if (feedScanKeywords.length === 0) {
+    // Fallback na stary format .env
+    feedScanKeywords = (process.env.FEED_SCAN_KEYWORDS || "").split(",").map(k => k.trim()).filter(Boolean);
+    feedScanEnabled = process.env.FEED_SCAN_ENABLED === "true";
+  }
+
   return {
     // Session Management
     sessionLengthMinMs: Number(process.env.SESSION_LENGTH_MIN_MS || 30 * 60 * 1000),
@@ -155,9 +231,9 @@ export function getLiteConfig() {
     nightEndHour: Number(process.env.NIGHT_END_HOUR || 7),
     nightCatchupHours: Number(process.env.NIGHT_CATCHUP_HOURS || 8),
 
-    // Feed Scanner
-    feedScanEnabled: process.env.FEED_SCAN_ENABLED === "true",
-    feedScanKeywords: (process.env.FEED_SCAN_KEYWORDS || "").split(",").map(k => k.trim()).filter(Boolean),
+    // Feed Scanner (z pliku JSON lub fallback na .env)
+    feedScanEnabled,
+    feedScanKeywords,
     feedScrollDurationMin: Number(process.env.FEED_SCROLL_DURATION_MIN || 1),
     feedScrollDurationMax: Number(process.env.FEED_SCROLL_DURATION_MAX || 3),
 

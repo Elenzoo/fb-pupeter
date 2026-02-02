@@ -34,8 +34,7 @@ import {
   NIGHT_START_HOUR,
   NIGHT_END_HOUR,
   NIGHT_CATCHUP_HOURS,
-  FEED_SCAN_ENABLED,
-  FEED_SCAN_KEYWORDS,
+  // FEED_SCAN_ENABLED i FEED_SCAN_KEYWORDS - ładowane dynamicznie z keywords.json
   FEED_SCROLL_DURATION_MIN,
   FEED_SCROLL_DURATION_MAX,
   HUMAN_RANDOM_LIKE_CHANCE,
@@ -93,6 +92,7 @@ import { smoothScrollBy } from "./lite/smoothScroll.js";
 import { maybeSimulateTabSwitch } from "./lite/tabSimulation.js";
 import { maybeVisitProfile, findProfileLinks } from "./lite/profileVisitor.js";
 import { maybeInteractWithRandomImage } from "./lite/imageInteraction.js";
+import { loadKeywordsFromFile, migrateKeywordsFromEnv } from "./lite/index.js";
 
 /**
  * ŹRÓDŁO POSTÓW (PRIMARY): panel => data/posts.json
@@ -717,8 +717,15 @@ async function startWatcher() {
   if (WARMUP_ENABLED) {
     log.prod("LITE", `Warmup: ${Math.round(WARMUP_DURATION_MIN_MS / 60000)}-${Math.round(WARMUP_DURATION_MAX_MS / 60000)} min`);
   }
-  if (FEED_SCAN_ENABLED && FEED_SCAN_KEYWORDS) {
-    log.prod("LITE", `Feed Scan: keywords = ${FEED_SCAN_KEYWORDS}`);
+  // Migracja keywords z .env do keywords.json (jednorazowo)
+  if (migrateKeywordsFromEnv()) {
+    log.prod("LITE", "Zmigrowano keywords z .env do keywords.json");
+  }
+
+  // Log konfiguracji Feed Scan
+  const initKeywords = loadKeywordsFromFile();
+  if (initKeywords.enabled && initKeywords.keywords.length > 0) {
+    log.prod("LITE", `Feed Scan: ${initKeywords.keywords.length} keywords`);
   }
 
   const loop = async () => {
@@ -947,12 +954,16 @@ async function startWatcher() {
       }
 
       // ============ LITE: Feed Scan (losowo 30-50% szans) ============
-      if (FEED_SCAN_ENABLED && FEED_SCAN_KEYWORDS && Math.random() < 0.4) {
+      // Ładowanie keywords z pliku JSON (dynamicznie przy każdym cyklu)
+      const keywordsData = loadKeywordsFromFile();
+      const feedScanEnabled = keywordsData.enabled && keywordsData.keywords.length > 0;
+
+      if (feedScanEnabled && Math.random() < 0.4) {
         const feedPage = await ctx.newPage();
         await setupLightweightPage(feedPage);
         await loadCookies(feedPage).catch(() => {});
 
-        const keywords = FEED_SCAN_KEYWORDS.split(",").map(k => k.trim()).filter(Boolean);
+        const keywords = keywordsData.keywords;
         const watchedUrls = currentPosts.map(p => p.url);
 
         log.prod("LITE", `Feed Scan: ${keywords.length} keywords`);

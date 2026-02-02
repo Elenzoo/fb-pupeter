@@ -935,6 +935,89 @@ http
         return;
       }
 
+      // ===== LITE: KEYWORDS =====
+      const KEYWORDS_PATH = path.join(PROJECT_DIR, "data", "keywords.json");
+
+      function readKeywords() {
+        if (!fs.existsSync(KEYWORDS_PATH)) {
+          return { keywords: [], enabled: false };
+        }
+        const raw = fs.readFileSync(KEYWORDS_PATH, "utf8").trim();
+        if (!raw) return { keywords: [], enabled: false };
+        const parsed = safeJsonParse(raw);
+        return parsed.ok && parsed.value ? parsed.value : { keywords: [], enabled: false };
+      }
+
+      function writeKeywords(data) {
+        atomicWriteFile(KEYWORDS_PATH, JSON.stringify(data, null, 2) + "\n");
+      }
+
+      // GET /api/keywords - pobierz listę keywords
+      if (req.method === "GET" && pathname === "/api/keywords") {
+        const data = readKeywords();
+        json(res, { ok: true, ...data });
+        return;
+      }
+
+      // POST /api/keywords - dodaj keyword
+      if (req.method === "POST" && pathname === "/api/keywords") {
+        const bodyRaw = await readBody(req);
+        const parsed = safeJsonParse(bodyRaw || "{}");
+        if (!parsed.ok) {
+          json(res, { ok: false, error: "Invalid JSON body" }, 400);
+          return;
+        }
+
+        const keyword = String(parsed.value.keyword || "").trim();
+        if (!keyword) {
+          json(res, { ok: false, error: "Keyword is required" }, 400);
+          return;
+        }
+
+        const data = readKeywords();
+        if (!data.keywords.includes(keyword)) {
+          data.keywords.push(keyword);
+          writeKeywords(data);
+        }
+        json(res, { ok: true, keywords: data.keywords });
+        return;
+      }
+
+      // DELETE /api/keywords/:keyword - usuń keyword
+      const mKeywordDel = req.method === "DELETE" ? match(pathname, "/api/keywords/:keyword") : null;
+      if (mKeywordDel) {
+        const keyword = decodeURIComponent(mKeywordDel.keyword);
+        const data = readKeywords();
+        const idx = data.keywords.indexOf(keyword);
+
+        if (idx === -1) {
+          json(res, { ok: false, error: "Keyword not found" }, 404);
+          return;
+        }
+
+        data.keywords.splice(idx, 1);
+        writeKeywords(data);
+        json(res, { ok: true, keywords: data.keywords });
+        return;
+      }
+
+      // PUT /api/keywords/enabled - włącz/wyłącz skanowanie
+      if (req.method === "PUT" && pathname === "/api/keywords/enabled") {
+        const bodyRaw = await readBody(req);
+        const parsed = safeJsonParse(bodyRaw || "{}");
+        if (!parsed.ok) {
+          json(res, { ok: false, error: "Invalid JSON body" }, 400);
+          return;
+        }
+
+        const enabled = Boolean(parsed.value.enabled);
+        const data = readKeywords();
+        data.enabled = enabled;
+        writeKeywords(data);
+        json(res, { ok: true, enabled: data.enabled });
+        return;
+      }
+
       // ===== LITE: DISCOVERIES =====
       const DISCOVERIES_PATH = path.join(PROJECT_DIR, "data", "discoveries.json");
       const BLACKLIST_PATH = path.join(PROJECT_DIR, "data", "blacklist.json");
