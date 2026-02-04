@@ -84,32 +84,84 @@ function generateDiscoveryId() {
 async function extractVisiblePosts(page) {
   return page.evaluate(() => {
     const posts = [];
+    const seenUrls = new Set();
 
-    // Selektory dla postów FB
+    // Selektory dla postów FB (zaktualizowane 2026-02)
     const postContainers = document.querySelectorAll(
-      '[role="article"], [data-pagelet*="FeedUnit"], div[data-ad-preview]'
+      '[role="article"], [data-virtualized="false"], div[data-ad-preview]'
     );
 
     for (const container of postContainers) {
       try {
-        // Znajdź link do posta
+        // Znajdź link do posta (rozszerzone selektory - FB używa różnych formatów)
         const postLink = container.querySelector(
-          'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"]'
+          'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], ' +
+          'a[href*="/photo/"], a[href*="/reel/"], a[href*="pfbid"], a[href*="/videos/"]'
         );
 
         if (!postLink) continue;
 
-        // Tekst posta
-        const textElement = container.querySelector(
-          '[data-ad-preview="message"], [dir="auto"]'
-        );
-        const content = textElement?.textContent?.trim() || "";
+        // Deduplikacja po URL
+        const url = postLink.href.split("?")[0]; // Usuń query string
+        if (seenUrls.has(url)) continue;
+        seenUrls.add(url);
 
-        // Nazwa strony/użytkownika
-        const pageNameEl = container.querySelector(
-          'h2 a, h3 a, strong a, [role="link"] span'
-        );
-        const pageName = pageNameEl?.textContent?.trim() || "Unknown";
+        // Tekst posta - szukaj głównej treści
+        // Najpierw spróbuj znaleźć data-ad-preview="message" (reklamy)
+        // Potem szukaj większych bloków tekstu w [dir="auto"]
+        let content = "";
+
+        // Metoda 1: data-ad-preview="message" (dla reklam)
+        const adMessage = container.querySelector('[data-ad-preview="message"]');
+        if (adMessage) {
+          content = adMessage.textContent?.trim() || "";
+        }
+
+        // Metoda 2: znajdź największy blok tekstu w [dir="auto"]
+        if (!content || content.length < 20) {
+          const textElements = container.querySelectorAll('[dir="auto"]');
+          let longestText = "";
+          for (const el of textElements) {
+            const text = el.textContent?.trim() || "";
+            // Filtruj menu/nawigację/przyciski
+            if (
+              text.length > longestText.length &&
+              text.length > 10 &&
+              !text.includes("Facebook") &&
+              !text.includes("Lubię to") &&
+              !text.includes("Komentarz") &&
+              !text.includes("Udostępnij") &&
+              !text.includes("Zobacz") &&
+              !el.closest('nav') &&
+              !el.closest('[role="navigation"]') &&
+              !el.closest('[role="banner"]')
+            ) {
+              longestText = text;
+            }
+          }
+          if (longestText.length > content.length) {
+            content = longestText;
+          }
+        }
+        content = content.trim();
+
+        // Nazwa strony/użytkownika - szukaj w różnych miejscach
+        let pageName = "Unknown";
+        const pageNameSelectors = [
+          'h2 a', 'h3 a', 'h4 a', 'strong a',
+          '[role="link"] span', 'a[role="link"] span',
+          'a[href*="facebook.com/"][aria-label]'
+        ];
+        for (const sel of pageNameSelectors) {
+          const el = container.querySelector(sel);
+          if (el) {
+            const text = el.textContent?.trim() || el.getAttribute('aria-label');
+            if (text && text.length > 1 && text.length < 100) {
+              pageName = text;
+              break;
+            }
+          }
+        }
 
         if (content.length > 10) {
           posts.push({
