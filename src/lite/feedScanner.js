@@ -193,6 +193,11 @@ async function scanFeed(page, options = {}) {
     // Ekstrahuj widoczne posty
     const posts = await extractVisiblePosts(page);
 
+    // DEBUG: loguj ile postów znaleziono (tylko przy pierwszym scroll)
+    if (scrollCount === 0) {
+      log.dev("FEED", `extractVisiblePosts: ${posts.length} postów na widoku`);
+    }
+
     for (const post of posts) {
       // Skip znane
       if (knownUrls.has(post.url)) continue;
@@ -258,6 +263,9 @@ async function scanFeed(page, options = {}) {
     await saveDiscoveries(allDiscoveries);
     log.prod("FEED", `Zapisano ${newDiscoveries.length} nowych discoveries`);
   }
+
+  // DEBUG: podsumowanie skanu
+  log.dev("FEED", `Podsumowanie: scrolls=${scrollCount}, knownUrls=${knownUrls.size}, discoveries=${newDiscoveries.length}`);
 
   return {
     discoveries: newDiscoveries,
