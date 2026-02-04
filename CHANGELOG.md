@@ -1,5 +1,63 @@
 # CHANGELOG
 
+## [2026-02-04] - Naprawa selektorów Feed Scanner
+
+### Fix
+- **Co:** Feed Scanner nie znajdował postów - Facebook zmienił strukturę DOM
+- **Pliki:**
+  - `src/lite/feedScanner.js` - zaktualizowane selektory, dodane debug logi
+- **Problem:**
+  - Stare selektory linków: `/posts/`, `/permalink/`, `story_fbid` → 0 postów
+  - Facebook teraz używa głównie `/photo/`, `/reel/`, `pfbid`
+- **Rozwiązanie:**
+  1. Dodano nowe selektory linków: `/photo/`, `/reel/`, `pfbid`, `/videos/`
+  2. Zmieniono selektor kontenerów: dodano `[data-virtualized="false"]`
+  3. Dodano deduplikację po URL (przed query string)
+  4. Poprawiono filtrowanie tekstu - usuwanie elementów menu FB
+  5. Dodano szczegółowe debug logi: treść postów, wyniki matchowania
+- **Uwaga:** Brak discoveries może wynikać z algorytmu FB - feed pokazuje posty w języku ustawionym w profilu (np. angielski)
+
+---
+
+## [2026-02-02] - Filtr spamu (duplikaty autor+treść)
+
+### Feature
+- **Co:** Filtrowanie spamu - ten sam komentarz od tego samego autora na różnych postach jest blokowany
+- **Pliki:**
+  - `src/db/spam-cache.js` - nowy moduł cache spamu (autor + hash treści → timestamp)
+  - `src/watcher.js` - integracja filtra `filterSpam()` przed wysyłką do Telegram
+  - `src/config.js` - nowa zmienna `SPAM_COOLDOWN_HOURS`
+- **Jak działa:**
+  1. Dla każdego komentarza tworzy klucz: autor + SHA256(znormalizowana treść)
+  2. Sprawdza czy ten klucz był widziany w ostatnich X godzinach
+  3. Jeśli tak → blokuje (nie wysyła do Telegram)
+  4. Jeśli nie → przepuszcza i zapisuje timestamp
+- **Konfiguracja:** `SPAM_COOLDOWN_HOURS=24` (domyślnie 24h cooldown)
+- **Cache:** `data/spam-cache.json`, auto-cleanup wpisów starszych niż 48h
+
+---
+
+## [2026-02-02] - Toggle dla pojedynczych keywords
+
+### Feature
+- **Co:** Możliwość włączania/wyłączania pojedynczych słów kluczowych bez usuwania
+- **Pliki:**
+  - `src/panel/api.js` - nowy endpoint `PUT /api/keywords/:keyword/toggle`
+  - `src/lite/index.js` - `getActiveKeywords()` zwraca tylko aktywne keywords
+  - `src/panel/web/src/components/KeywordsManager.tsx` - ikona Power przy każdym tagu
+  - `src/panel/web/src/pages/SettingsCyber.tsx` - handler `handleToggleKeyword`
+  - `src/panel/web/src/lib/api.ts` - funkcja `toggleKeyword()`
+  - `src/panel/web/src/lib/types.ts` - `KeywordEntry { text, enabled }`
+  - `src/watcher.js` - używa `getActiveKeywords()` zamiast wszystkich
+- **Zmiany:**
+  1. **Nowy format storage** - keywords jako `{ text: string, enabled: boolean }[]`
+  2. **Backward compatibility** - stary format `string[]` auto-konwertowany
+  3. **UI** - zielona ikona Power = aktywny, szara + przekreślenie = wyłączony
+  4. **Logi** - pokazują "X/Y keywords aktywnych"
+- **API:** `PUT /api/keywords/:keyword/toggle` - przełącza stan enabled
+
+---
+
 ## [2026-02-02] - Poprawa systemu słów kluczowych w Feed Scannerze
 
 ### Feature/Refactor

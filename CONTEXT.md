@@ -1,73 +1,57 @@
 # Aktualny kontekst pracy
 
 ## Ostatnia aktualizacja
-- **Data:** 2026-02-02 21:30
+- **Data:** 2026-02-04 16:00
 - **Urządzenie:** komputer
 - **Status:** zakończone
 
 ## W trakcie / Do dokończenia
-- [x] Poprawa systemu słów kluczowych w Feed Scannerze
-  - [x] Whole-word matching (eliminacja false positives)
-  - [x] Obsługa fraz wielowyrazowych
-  - [x] Dedykowany storage keywords.json
-  - [x] Nowe API endpoints
-  - [x] Nowy komponent UI KeywordsManager
-  - [x] Integracja z SettingsCyber
-  - [x] Aktualizacja watcher.js
-
-## Aktualny problem / Blokery
-- Brak
+- [x] Debug Feed Scanner - dlaczego brak nowych discoveries
 
 ## Co zostało zrobione
 
-### 1. keywordMatcher.js
-- Zmiana domyślnego `wholeWord` z `false` na `true`
-- Nowa funkcja `containsPhrase()` dla fraz wielowyrazowych
-- Regex `\bword\b` eliminuje partial match ("wiata" nie matchuje "świata")
+### Debug Feed Scanner (2026-02-04)
 
-### 2. keywords.json storage
-- Nowy plik: `data/keywords.json`
-- Format: `{ "keywords": ["garaż", "blaszany garaż"], "enabled": true }`
-- Funkcje: `loadKeywordsFromFile()`, `saveKeywordsToFile()`, `migrateKeywordsFromEnv()`
+**Problem:** Feed Scanner nie znajdował nowych postów od 2 dni.
 
-### 3. API endpoints (panel/api.js)
-- `GET /api/keywords` - pobierz listę i status
-- `POST /api/keywords` - dodaj keyword
-- `DELETE /api/keywords/:keyword` - usuń keyword
-- `PUT /api/keywords/enabled` - włącz/wyłącz
+**Diagnoza:**
+1. Plik `keywords.json` istnieje i jest włączony (11 keywords)
+2. Feed Scan uruchamia się ~5x dziennie (40% szansy przy każdym cyklu)
+3. Blacklist zawiera 298 wpisów (głównie fałszywe dopasowania - stadiony, wiaty)
 
-### 4. Panel UI
-- Nowy komponent `KeywordsManager.tsx`
-- Lista tagów zamiast text input
-- Przyciski dodaj/usuń + toggle enabled
+**Znaleziony problem:**
+- Selektory w `extractVisiblePosts()` były przestarzałe - FB zmienił DOM
+- Stare selektory: `/posts/`, `/permalink/`, `story_fbid` → **0 postów**
+- Nowe selektory dodane: `/photo/`, `/reel/`, `pfbid`, `/videos/` → **1 post**
 
-### 5. watcher.js
-- Dynamiczne ładowanie keywords z JSON przy każdym cyklu
-- Automatyczna migracja ze starego formatu .env
+**Rozwiązanie:**
+1. Zaktualizowano selektory w `src/lite/feedScanner.js`
+2. Dodano deduplikację po URL
+3. Poprawiono filtrowanie tekstu (usuwanie menu FB)
+4. Dodano szczegółowe debug logi
 
-## Stan synchronizacji
-- Lokalna kopia: zmiany do commita
-- Serwer: wymaga deployment
-- GitHub: wymaga push
+**Wynik po naprawie:**
+- Feed Scanner teraz wyciąga posty
+- Brak discoveries bo feed zawiera posty po angielsku (algorytm FB)
+- To nie jest błąd kodu - po prostu w feed nie ma postów z polskimi keywords
 
-## Następne kroki
-1. Build panelu: `cd src/panel/web && npm run build`
-2. Commit zmian
-3. Push do GitHub
-4. Deploy na serwer
-5. Test w panelu
+**Zalecenia:**
+1. Zmienić język FB konta bota na polski
+2. Followować polskie strony o garażach
+3. Polubić posty o garażach żeby algorytm "nauczył się"
 
 ## Pliki zmienione
-- `src/lite/keywordMatcher.js`
-- `src/lite/index.js`
-- `src/panel/api.js`
-- `src/panel/web/src/components/KeywordsManager.tsx` (nowy)
-- `src/panel/web/src/pages/SettingsCyber.tsx`
-- `src/panel/web/src/lib/api.ts`
-- `src/panel/web/src/lib/types.ts`
-- `src/watcher.js`
-- `CHANGELOG.md`
+- `src/lite/feedScanner.js` - zaktualizowane selektory, debug logi
+- `tools/debug-fb-selectors.js` (nowy) - debug selektorów
+- `tools/test-extract-posts.js` (nowy) - test ekstrakcji
+- `tools/test-feed-scanner.js` (nowy) - pełny test Feed Scanner
+- `data/keywords.json` (lokalna kopia) - utworzony
+
+## Stan synchronizacji
+- **Serwer:** zaktualizowany (git pull + pm2 restart)
+- **GitHub:** zcommitowane
 
 ## Notatki
-- Keywords są teraz ładowane dynamicznie - zmiany w panelu działają bez restartu
-- Backward compatibility: stare keywords z .env zostaną automatycznie zmigrowane
+- Feed Scanner ma 40% szansy uruchomienia przy każdym cyklu
+- Debug logi dodane tymczasowo - można usunąć po ustabilizowaniu
+- Blacklist (298 wpisów) blokuje wiele URLs - może wyczyścić?
