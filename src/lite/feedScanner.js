@@ -248,14 +248,31 @@ async function scanFeed(page, options = {}) {
     // DEBUG: loguj ile postów znaleziono (tylko przy pierwszym scroll)
     if (scrollCount === 0) {
       log.dev("FEED", `extractVisiblePosts: ${posts.length} postów na widoku`);
+      // Debug: pokaż szczegóły pierwszych postów
+      for (let i = 0; i < Math.min(posts.length, 3); i++) {
+        const p = posts[i];
+        log.dev("FEED", `Post ${i}: ${p.pageName} | ${p.content.substring(0, 80)}...`);
+      }
     }
+
+    let skipped = 0;
+    let checked = 0;
 
     for (const post of posts) {
       // Skip znane
-      if (knownUrls.has(post.url)) continue;
+      if (knownUrls.has(post.url)) {
+        skipped++;
+        continue;
+      }
 
+      checked++;
       // Sprawdź keywords
       const { matched } = matcher.match(post.content);
+
+      // DEBUG: loguj co jest sprawdzane
+      if (scrollCount === 0 && checked <= 3) {
+        log.dev("FEED", `Checking: "${post.pageName}" | matched: ${matched.length > 0 ? matched.join(",") : "brak"}`);
+      }
 
       if (matched.length > 0) {
         // Nowy discovery!
@@ -287,6 +304,11 @@ async function scanFeed(page, options = {}) {
 
       // Dodaj URL do znanych (nawet bez match, żeby nie sprawdzać ponownie)
       knownUrls.add(post.url);
+    }
+
+    // DEBUG: podsumowanie pętli (tylko przy pierwszym scroll)
+    if (scrollCount === 0 && posts.length > 0) {
+      log.dev("FEED", `Pętla: ${posts.length} postów, ${skipped} skipowanych (znane), ${checked} sprawdzonych`);
     }
 
     // Scroll
