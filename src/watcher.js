@@ -9,6 +9,7 @@ console.log("[STEALTH] Plugin stealth włączony");
 
 import fs from "fs";
 import path from "path";
+import os from "os";
 import {
   EXPAND_COMMENTS,
   CHECK_INTERVAL_MS,
@@ -39,6 +40,10 @@ import {
   FEED_SCROLL_DURATION_MAX,
   HUMAN_RANDOM_LIKE_CHANCE,
   DISCOVERY_TELEGRAM_ENABLED,
+  // Dead Posts config
+  DEAD_POST_THRESHOLD_DAYS,
+  DEAD_POST_AUTO_MOVE,
+  DEAD_POST_ALERT,
 } from "./config.js";
 
 // Konfiguracja captcha solver (2Captcha) - zostawiam jak masz (nie rozbudowuję tego)
@@ -66,6 +71,7 @@ import { isCheckpoint, getCheckpointType } from "./fb/checkpoint.js";
 import { parseFbRelativeTime, filterByAge } from "./utils/time.js";
 import { shuffleArray } from "./utils/sleep.js";
 import { loadCache, saveCache, getCacheSize, getCacheEntryCount } from "./db/cache.js";
+import { loadDeadPosts, addDeadPost, isDeadPost } from "./db/dead-posts.js";
 import { sendTelegramLeads, sendOwnerAlert } from "./telegram.js";
 import log from "./utils/logger.js";
 
@@ -139,6 +145,7 @@ const HARD_FAILS_RESET_CONTEXT = Number(process.env.HARD_FAILS_RESET_CONTEXT || 
 const HARD_FAILS_RESET_BROWSER = Number(process.env.HARD_FAILS_RESET_BROWSER || 5);
 const MAX_POST_RETRY = Number(process.env.POST_RETRY_MAX || 1); // retry per post na nowym page
 const BROWSER_RECYCLE_EVERY_CYCLES = Number(process.env.BROWSER_RECYCLE_EVERY_CYCLES || 10);
+const BROWSER_RECYCLE_EVERY_POSTS = Number(process.env.BROWSER_RECYCLE_EVERY_POSTS || 15); // recykling CO N POSTÓW w cyklu
 
 // ======= Stary licznik nawigacji (zostawiam, ale ulepszamy wykrywanie) =======
 let navErrorCount = 0;
@@ -159,9 +166,10 @@ function getCommentAgeMinutes(timeStr) {
 }
 
 // ================== TELEGRAM (FILTER AGE) ==================
+// Zwraca liczbę faktycznie wysłanych komentarzy (po filtrowaniu wieku)
 async function sendTelegramIfFresh(post, comments, ctx = "normal") {
   const list = Array.isArray(comments) ? comments : [];
-  if (list.length === 0) return;
+  if (list.length === 0) return 0;
 
   const now = Date.now();
 
@@ -198,6 +206,8 @@ async function sendTelegramIfFresh(post, comments, ctx = "normal") {
   } else {
     log.dev("TELEGRAM", "Brak świeżych komentarzy - nic nie wysyłam");
   }
+
+  return fresh.length;
 }
 
 /* ============================================================
@@ -305,6 +315,41 @@ async function safeCloseBrowser(browser) {
   try {
     await browser.close();
   } catch {}
+}
+
+// === CRASH PROTECTION: Monitorowanie pamięci ===
+const MEMORY_THRESHOLD_MB = Number(process.env.MEMORY_THRESHOLD_MB || 2800); // 2.8GB - zostaw bufor dla systemu
+
+function getMemoryUsageMB() {
+  try {
+    const used = process.memoryUsage();
+    // RSS = Resident Set Size - całkowita pamięć procesu Node.js
+    return Math.round(used.rss / 1024 / 1024);
+  } catch {
+    return 0;
+  }
+}
+
+function getSystemMemoryMB() {
+  try {
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    return {
+      total: Math.round(totalMem / 1024 / 1024),
+      used: Math.round(usedMem / 1024 / 1024),
+      free: Math.round(freeMem / 1024 / 1024),
+      percent: Math.round((usedMem / totalMem) * 100),
+    };
+  } catch {
+    return { total: 0, used: 0, free: 0, percent: 0 };
+  }
+}
+
+function shouldRestartDueToMemory() {
+  const sysMem = getSystemMemoryMB();
+  // Restart gdy zostało mniej niż 15% wolnej pamięci LUB użyto więcej niż threshold
+  return sysMem.percent > 85 || sysMem.used > MEMORY_THRESHOLD_MB;
 }
 
 async function setupLightweightPage(page) {
@@ -640,6 +685,241 @@ function flushCacheToDisk() {
 }
 
 /* ============================================================
+   =====================   STATS HELPERS   =====================
+   ============================================================ */
+
+const STATS_FILE = path.join(process.cwd(), "data", "stats.json");
+const DAILY_STATS_RETENTION_DAYS = 30;
+
+/**
+ * Ładuje globalne statystyki
+ */
+function loadGlobalStats() {
+  const defaultStats = {
+    global: {
+      totalCommentsSent: 0,
+      totalCommentsDetected: 0,
+      cyclesCompleted: 0,
+      startedAt: new Date().toISOString(),
+      lastSessionStart: null,
+      lastCycleAt: null,
+      restartCount: 0,
+    },
+    daily: {},
+  };
+
+  try {
+    if (!fs.existsSync(STATS_FILE)) {
+      return defaultStats;
+    }
+    const raw = fs.readFileSync(STATS_FILE, "utf8");
+    if (!raw.trim()) return defaultStats;
+
+    const loaded = JSON.parse(raw);
+    // Migracja starych pól
+    if (!loaded.global.totalCommentsDetected) loaded.global.totalCommentsDetected = loaded.global.totalCommentsSent || 0;
+    if (!loaded.global.restartCount) loaded.global.restartCount = 0;
+    return loaded;
+  } catch (e) {
+    log.warn("STATS", `Błąd ładowania stats: ${e.message}`);
+    return defaultStats;
+  }
+}
+
+/**
+ * Zapisuje globalne statystyki
+ */
+function saveGlobalStats(stats) {
+  try {
+    const dir = path.dirname(STATS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const tmpFile = path.join(dir, `.stats.${Date.now()}.tmp`);
+    fs.writeFileSync(tmpFile, JSON.stringify(stats, null, 2), "utf8");
+    fs.renameSync(tmpFile, STATS_FILE);
+  } catch (e) {
+    log.warn("STATS", `Błąd zapisu stats: ${e.message}`);
+  }
+}
+
+/**
+ * Czyści stare wpisy daily (starsze niż DAILY_STATS_RETENTION_DAYS)
+ */
+function cleanupOldDailyStats(stats) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - DAILY_STATS_RETENTION_DAYS);
+  const cutoffStr = cutoff.toISOString().split("T")[0];
+
+  for (const date of Object.keys(stats.daily)) {
+    if (date < cutoffStr) {
+      delete stats.daily[date];
+    }
+  }
+}
+
+/**
+ * Aktualizuje statystyki per post w cache
+ * @param {string} cacheKey URL posta
+ * @param {number} newCommentsCount Liczba nowych komentarzy wykrytych w tym cyklu
+ * @param {string|null} newestTimeRaw Relatywny czas najnowszego komentarza z FB (np. "2 godz", "5 dni")
+ */
+function updatePostStats(cacheKey, newCommentsCount, newestTimeRaw = null) {
+  const now = new Date().toISOString();
+
+  if (!commentsCache[cacheKey]) {
+    commentsCache[cacheKey] = { lastCount: 0, knownIds: [] };
+  }
+
+  if (!commentsCache[cacheKey].stats) {
+    commentsCache[cacheKey].stats = {
+      totalDetected: 0,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      lastNewCommentAt: null,
+      lastNewCommentAge: null,
+      // Nowe pola - rzeczywisty czas komentarza z FB
+      lastCommentTime: null,
+      lastCommentAge: null,
+    };
+  }
+
+  const stats = commentsCache[cacheKey].stats;
+  stats.lastSeenAt = now;
+
+  // Aktualizuj czas najnowszego komentarza z FB (niezależnie od tego czy jest nowy)
+  if (newestTimeRaw) {
+    const parsedTime = parseFbRelativeTime(newestTimeRaw);
+    if (parsedTime) {
+      stats.lastCommentTime = parsedTime.toISOString();
+      stats.lastCommentAge = formatAge(Date.now() - parsedTime.getTime());
+      log.dev("STATS", `lastCommentTime: raw="${newestTimeRaw}" → ${stats.lastCommentAge}`);
+    }
+  }
+
+  if (newCommentsCount > 0) {
+    stats.totalDetected += newCommentsCount;
+    stats.lastNewCommentAt = now;
+    stats.lastNewCommentAge = "teraz";
+  } else if (stats.lastNewCommentAt) {
+    // Oblicz wiek od ostatniego wykrycia przez bota
+    const lastNew = new Date(stats.lastNewCommentAt);
+    const diffMs = Date.now() - lastNew.getTime();
+    stats.lastNewCommentAge = formatAge(diffMs);
+  }
+
+  // Zapisz cache po każdym poście (szybki atomic write ~5-10ms)
+  saveCache(commentsCache);
+}
+
+/**
+ * Aktualizuje globalne statystyki po cyklu
+ * @param {number} newCommentsTotal Łączna liczba nowych komentarzy w cyklu
+ */
+function updateGlobalStats(newCommentsTotal) {
+  const stats = loadGlobalStats();
+  const today = new Date().toISOString().split("T")[0];
+  const now = new Date().toISOString();
+
+  // Ustaw startedAt przy pierwszym cyklu
+  if (!stats.global.startedAt) {
+    stats.global.startedAt = now;
+  }
+
+  // Globalne
+  stats.global.totalCommentsSent += newCommentsTotal;
+  stats.global.cyclesCompleted += 1;
+  stats.global.lastCycleAt = now;
+
+  // Dzienne
+  if (!stats.daily[today]) {
+    stats.daily[today] = { comments: 0, cycles: 0 };
+  }
+  stats.daily[today].comments += newCommentsTotal;
+  stats.daily[today].cycles += 1;
+
+  // Cleanup starych wpisów
+  cleanupOldDailyStats(stats);
+
+  saveGlobalStats(stats);
+
+  log.dev("STATS", `Zapisano statystyki: +${newCommentsTotal} komentarzy, cykl #${stats.global.cyclesCompleted}`);
+}
+
+/**
+ * Formatuje czytelny wiek (np. "3 dni", "5 godz")
+ */
+function formatAge(ms) {
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  const hours = Math.floor((ms % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+
+  if (days > 0) return `${days} ${days === 1 ? "dzień" : "dni"}`;
+  if (hours > 0) return `${hours} ${hours === 1 ? "godz" : "godz"}`;
+  return "< 1 godz";
+}
+
+/**
+ * Sprawdza czy post jest martwy i ewentualnie przenosi do dead-posts
+ * @param {Object} post Post do sprawdzenia
+ * @param {Object} postsData Obiekt z postami do modyfikacji (jeśli trzeba dezaktywować)
+ * @returns {boolean} true jeśli post został przeniesiony do martwych
+ */
+async function checkDeadPost(post) {
+  if (!DEAD_POST_AUTO_MOVE) return false;
+
+  const cacheKey = getCacheKey(post);
+  const entry = commentsCache[cacheKey];
+
+  // Sprawdź czy post był w ogóle widziany
+  if (!entry?.stats?.firstSeenAt) return false;
+
+  // Priorytet: lastCommentTime (rzeczywisty czas komentarza z FB) > lastNewCommentAt (czas wykrycia) > firstSeenAt
+  let referenceTime = null;
+  let referenceSource = "";
+
+  if (entry.stats.lastCommentTime) {
+    // Mamy rzeczywisty czas najnowszego komentarza z FB
+    referenceTime = new Date(entry.stats.lastCommentTime);
+    referenceSource = "last_comment";
+  } else if (entry.stats.lastNewCommentAt) {
+    // Fallback: czas ostatniego wykrycia przez bota
+    referenceTime = new Date(entry.stats.lastNewCommentAt);
+    referenceSource = "last_detection";
+  } else {
+    // Brak komentarzy - użyj firstSeenAt
+    referenceTime = new Date(entry.stats.firstSeenAt);
+    referenceSource = "first_seen";
+  }
+
+  const daysSinceActivity = (Date.now() - referenceTime.getTime()) / (1000 * 60 * 60 * 24);
+
+  if (daysSinceActivity < DEAD_POST_THRESHOLD_DAYS) return false;
+
+  // Post jest martwy
+  const totalDetected = entry.stats.totalDetected || 0;
+
+  if (isDeadPost(post.id)) return false;
+
+  const added = addDeadPost(post, Math.floor(daysSinceActivity), totalDetected, "no_activity_14_days");
+
+  if (added && DEAD_POST_ALERT) {
+    const reasonText = referenceSource === "last_comment"
+      ? `Ostatni komentarz: ${Math.floor(daysSinceActivity)} dni temu.`
+      : referenceSource === "last_detection"
+      ? `Ostatnie wykrycie: ${Math.floor(daysSinceActivity)} dni temu.`
+      : `Brak komentarzy przez ${Math.floor(daysSinceActivity)} dni.`;
+
+    await sendOwnerAlert(
+      "Martwy post",
+      `Post "${post.name || post.id}" został przeniesiony do martwych.\n\n` +
+      `${reasonText}\n` +
+      `Łącznie wykrytych przed śmiercią: ${totalDetected}`
+    );
+  }
+
+  return !!added;
+}
+
+/* ============================================================
    =====================   BROWSER FACTORY   ===================
    ============================================================ */
 
@@ -664,10 +944,30 @@ function buildLaunchOptions() {
   const args = [
     "--disable-notifications",
     "--disable-blink-features=AutomationControlled",
+    // Optymalizacja pamięci - zapobiega crashom na serwerach z ograniczoną RAM
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--disable-translate",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+    "--safebrowsing-disable-auto-update",
+    // Limity pamięci
+    "--js-flags=--max-old-space-size=512",
+    "--disable-features=TranslateUI",
+    "--disable-ipc-flooding-protection",
+    // Single process mode dla mniejszego zużycia RAM (opcjonalnie)
+    // "--single-process", // może być niestabilne, ale oszczędza RAM
   ];
 
   if (linux) {
     args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+    // Dodatkowe optymalizacje dla Linux serwerów
+    args.push("--disable-accelerated-2d-canvas", "--no-zygote");
   }
 
   if (REMOTE_DEBUG_PORT > 0) {
@@ -709,6 +1009,13 @@ async function startWatcher() {
     logLevel: log.level,
     liteMode: true,
   });
+
+  // Zapisz czas uruchomienia sesji i zwiększ licznik restartów
+  const stats = loadGlobalStats();
+  stats.global.lastSessionStart = new Date().toISOString();
+  stats.global.restartCount = (stats.global.restartCount || 0) + 1;
+  saveGlobalStats(stats);
+  log.prod("WATCHER", `Sesja #${stats.global.restartCount}, startedAt: ${stats.global.startedAt?.split("T")[0] || "?"}`);
 
   // LITE: Log konfiguracji
   if (NIGHT_MODE_ENABLED) {
@@ -790,13 +1097,51 @@ async function startWatcher() {
       const shouldRecycleByCycle =
         BROWSER_RECYCLE_EVERY_CYCLES > 0 && cycleNumber % BROWSER_RECYCLE_EVERY_CYCLES === 0;
 
+      // === CRASH PROTECTION: Sprawdź pamięć przed startem ===
+      const sysMem = getSystemMemoryMB();
+      log.dev("MEMORY", `System: ${sysMem.used}/${sysMem.total}MB (${sysMem.percent}%), Node RSS: ${getMemoryUsageMB()}MB`);
+
+      if (shouldRestartDueToMemory()) {
+        log.warn("MEMORY", `Wysokie zużycie pamięci (${sysMem.percent}%) - wymuszam garbage collection`);
+        if (global.gc) {
+          global.gc();
+          log.dev("MEMORY", "Garbage collection wykonane");
+        }
+      }
+
       // Start browser/context
       browser = await puppeteer.launch(buildLaunchOptions());
+
+      // === CRASH PROTECTION: Obsługa zdarzenia disconnected ===
+      let browserDisconnected = false;
+      browser.on('disconnected', () => {
+        browserDisconnected = true;
+        log.error("BROWSER", "Przeglądarka została rozłączona (crash/OOM/timeout)!");
+      });
+
+      // Funkcja helper do sprawdzania czy browser żyje
+      const isBrowserAlive = () => {
+        if (browserDisconnected) return false;
+        try {
+          return browser.isConnected();
+        } catch {
+          return false;
+        }
+      };
+
+      // Funkcja do bezpiecznego tworzenia nowej strony z sprawdzeniem browsera
+      const safeNewPage = async () => {
+        if (!isBrowserAlive()) {
+          throw new Error("Browser disconnected - cannot create new page");
+        }
+        return await ctx.newPage();
+      };
+
       ctx = await browser.createBrowserContext(); // izolacja sesji per cykl (stabilniej niż default)
 
       // ====== LOGIN FLOW na osobnym page (jednorazowy) ======
       {
-        const loginPage = await ctx.newPage();
+        const loginPage = await safeNewPage();
         await setupLightweightPage(loginPage);
 
         await loadCookies(loginPage);
@@ -936,7 +1281,7 @@ async function startWatcher() {
 
       // ============ LITE: Warmup Session ============
       if (WARMUP_ENABLED && isFirstCycleOfSession) {
-        const warmupPage = await ctx.newPage();
+        const warmupPage = await safeNewPage();
         await setupLightweightPage(warmupPage);
         await loadCookies(warmupPage).catch(() => {});
 
@@ -960,8 +1305,8 @@ async function startWatcher() {
       const activeKeywords = getActiveKeywords(); // tylko keywords z enabled: true
       const feedScanEnabled = keywordsData.enabled && activeKeywords.length > 0;
 
-      if (feedScanEnabled && Math.random() < 0.4) {
-        const feedPage = await ctx.newPage();
+      if (feedScanEnabled) { // TEST: zawsze uruchamiaj (było: Math.random() < 0.4)
+        const feedPage = await safeNewPage();
         await setupLightweightPage(feedPage);
         await loadCookies(feedPage).catch(() => {});
 
@@ -1002,7 +1347,16 @@ async function startWatcher() {
       if (!currentPosts.length) {
         log.warn("WATCHER", "Brak aktywnych postów do monitorowania");
       } else {
-        const shuffledPosts = shuffleArray(currentPosts);
+        // Filtruj martwe posty przed przetwarzaniem
+        const livePostsToProcess = currentPosts.filter(p => !isDeadPost(p.id));
+        const skippedDeadCount = currentPosts.length - livePostsToProcess.length;
+        if (skippedDeadCount > 0) {
+          log.prod("DEAD-POSTS", `Pominięto ${skippedDeadCount} martwych postów (${livePostsToProcess.length} aktywnych)`);
+        } else {
+          log.prod("WATCHER", `Przetwarzam ${livePostsToProcess.length} postów (0 martwych)`);
+        }
+
+        const shuffledPosts = shuffleArray(livePostsToProcess);
         const postOrder = shuffledPosts.map((p) => p.name || p.id.slice(0, 8)).join(" → ");
         log.dev("HUMAN", `Kolejność postów: ${postOrder}`);
 
@@ -1010,7 +1364,92 @@ async function startWatcher() {
         let lastPostPage = null; // Referencja do ostatniego page dla akcji między postami
 
         for (const post of shuffledPosts) {
+          // === CRASH PROTECTION: Sprawdź czy browser żyje przed każdym postem ===
+          if (!isBrowserAlive()) {
+            log.error("BROWSER", "Browser martwy - przerywam przetwarzanie postów, restart w następnym cyklu");
+            break; // wyjdź z pętli postów, cykl się zakończy i browser zostanie zrestartowany
+          }
+
+          // === CRASH PREVENTION: Proaktywny recykling gdy pamięć wysoka ===
+          const memCheck = getSystemMemoryMB();
+          if (memCheck.percent > 80) {
+            log.warn("MEMORY", `Wysoka pamięć (${memCheck.percent}%) - wymuszam recykling browsera`);
+
+            // Usuń listener przed zamknięciem (zapobiega fałszywym alarmom)
+            browser.removeAllListeners('disconnected');
+            await safeCloseContext(ctx);
+            await safeCloseBrowser(browser);
+
+            if (global.gc) global.gc();
+            await new Promise(r => setTimeout(r, 3000));
+
+            browser = await puppeteer.launch(buildLaunchOptions());
+            browserDisconnected = false;
+            browser.on('disconnected', () => {
+              browserDisconnected = true;
+              log.error("BROWSER", "Przeglądarka została rozłączona (crash/OOM/timeout)!");
+            });
+            ctx = await browser.createBrowserContext();
+
+            const reloginPage = await ctx.newPage();
+            await setupLightweightPage(reloginPage);
+            await loadCookies(reloginPage);
+            await reloginPage.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
+            await saveCookies(reloginPage).catch(() => {});
+            await safeClosePage(reloginPage);
+
+            const afterMem = getSystemMemoryMB();
+            log.prod("MEMORY", `Po recyklingu: ${afterMem.percent}%`);
+          }
+
           postIndex++;
+
+          // === CRASH PREVENTION: Recykling browsera co N postów ===
+          if (BROWSER_RECYCLE_EVERY_POSTS > 0 && postIndex > 1 && (postIndex - 1) % BROWSER_RECYCLE_EVERY_POSTS === 0) {
+            const sysMem = getSystemMemoryMB();
+            log.prod("BROWSER", `Prewencyjny recykling po ${postIndex - 1} postach (mem: ${sysMem.percent}%)`);
+
+            // Zamknij stary browser (usuń listener przed zamknięciem)
+            browser.removeAllListeners('disconnected');
+            await safeCloseContext(ctx);
+            await safeCloseBrowser(browser);
+
+            // Wymuś garbage collection jeśli dostępne
+            if (global.gc) {
+              global.gc();
+              log.dev("MEMORY", "Garbage collection wykonane");
+            }
+
+            // Krótka pauza przed restartem
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Utwórz nowy browser
+            browser = await puppeteer.launch(buildLaunchOptions());
+            browserDisconnected = false;
+            browser.on('disconnected', () => {
+              browserDisconnected = true;
+              log.error("BROWSER", "Przeglądarka została rozłączona (crash/OOM/timeout)!");
+            });
+            ctx = await browser.createBrowserContext();
+
+            // Zaloguj ponownie w nowej sesji
+            const reloginPage = await ctx.newPage();
+            await setupLightweightPage(reloginPage);
+            await loadCookies(reloginPage);
+            await reloginPage.goto("https://www.facebook.com/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
+            const stillLogged = await checkIfLogged(reloginPage).catch(() => false);
+            if (stillLogged) {
+              await saveCookies(reloginPage);
+              log.dev("BROWSER", "Sesja FB zachowana po recyklingu");
+            } else {
+              log.warn("BROWSER", "Utracono sesję FB po recyklingu - próbuję zalogować");
+              // Tu można dodać pełne logowanie, ale na razie kontynuuj z cookies
+            }
+            await safeClosePage(reloginPage);
+
+            const newMem = getSystemMemoryMB();
+            log.prod("BROWSER", `Recykling zakończony (mem: ${newMem.percent}%)`);
+          }
 
           const cacheKey = getCacheKey(post);
           const postLabel = post.name || post.id.slice(0, 8);
@@ -1020,11 +1459,18 @@ async function startWatcher() {
           let done = false;
 
           while (!done && attempt <= MAX_POST_RETRY) {
+            // === CRASH PROTECTION: Sprawdź przed każdą próbą ===
+            if (!isBrowserAlive()) {
+              log.error("BROWSER", `Browser martwy podczas przetwarzania ${postLabel} - przerywam`);
+              done = true;
+              break;
+            }
+
             attempt++;
 
             let page = null;
             try {
-              page = await ctx.newPage();
+              page = await safeNewPage();
               lastPostPage = page; // Zapisz referencję do page
               await setupLightweightPage(page);
 
@@ -1081,12 +1527,17 @@ async function startWatcher() {
                     continue;
                   }
 
-                  if (sample.length > 0) {
-                    const newestTime = sample[0]?.time || sample[0]?.fb_time_raw;
-                    const newestAge = getCommentAgeMinutes(newestTime);
+                  // Pobierz czas najnowszego komentarza (do statystyk i dead-post detection)
+                  const newestTimeRaw = sample.length > 0 ? (sample[0]?.time || sample[0]?.fb_time_raw) : null;
+
+                  if (sample.length > 0 && newestTimeRaw) {
+                    const newestAge = getCommentAgeMinutes(newestTimeRaw);
 
                     if (newestAge !== null && newestAge > FAST_MAX_AGE_MIN) {
                       log.dev("FAST", `${postLabel}: SKIP - najnowszy ${Math.round(newestAge)} min`, { limit: FAST_MAX_AGE_MIN });
+                      // Zapisz stats nawet przy SKIP (żeby mieć czas ostatniego komentarza)
+                      updatePostStats(cacheKey, 0, newestTimeRaw);
+                      await checkDeadPost(post);
                       done = true;
                       continue;
                     }
@@ -1105,9 +1556,9 @@ async function startWatcher() {
 
                   cleanupKnownIds(knownSet);
 
+                  let sentCount = 0;
                   if (newComments.length > 0) {
-                    log.success("FAST", `${postLabel}: +${newComments.length} nowych`);
-                    newCommentsTotal += newComments.length;
+                    log.dev("FAST", `${postLabel}: znaleziono ${newComments.length} nowych`);
 
                     const safeComments = newComments.filter((c) => c.__postId === post.id);
                     if (safeComments.length !== newComments.length) {
@@ -1116,10 +1567,20 @@ async function startWatcher() {
                         after: safeComments.length,
                       });
                     }
-                    await sendTelegramIfFresh(post, safeComments, "fast");
+                    sentCount = await sendTelegramIfFresh(post, safeComments, "fast");
+                    if (sentCount > 0) {
+                      log.success("FAST", `${postLabel}: +${sentCount} wysłanych`);
+                    }
+                    newCommentsTotal += sentCount;
                   } else {
                     log.dev("FAST", `${postLabel}: Brak nowych`);
                   }
+
+                  // STATS: Aktualizuj statystyki per post (z czasem najnowszego komentarza)
+                  updatePostStats(cacheKey, sentCount, newestTimeRaw);
+
+                  // DEAD POST: Sprawdź czy post jest martwy
+                  await checkDeadPost(post);
 
                   done = true;
                   continue;
@@ -1171,6 +1632,9 @@ async function startWatcher() {
               await loadAllComments(page, { expectedTotal: hasCount ? count : undefined }).catch(() => {});
               const snapshot = await extractCommentsData(page, post.url).catch(() => []);
 
+              // Pobierz czas najnowszego komentarza (do statystyk i dead-post detection)
+              const snapshotNewestTime = snapshot.length > 0 ? (snapshot[0]?.time || snapshot[0]?.fb_time_raw) : null;
+
               const newComments = [];
               for (const c of snapshot) {
                 if (!c?.id) continue;
@@ -1195,16 +1659,23 @@ async function startWatcher() {
                 for (const c of tail) if (c?.id) knownSet.add(c.id);
 
                 log.dev("WATCHER", `${postLabel}: Fallback - biorę ostatnie ${diff}`);
-                await sendTelegramIfFresh(post, tail, "fallback");
-                newCommentsTotal += tail.length;
+                const sentCount = await sendTelegramIfFresh(post, tail, "fallback");
+                if (sentCount > 0) {
+                  log.success("WATCHER", `${postLabel}: +${sentCount} wysłanych (fallback)`);
+                }
+                newCommentsTotal += sentCount;
+
+                // STATS: Aktualizuj statystyki per post (fallback - z czasem najnowszego komentarza)
+                updatePostStats(cacheKey, sentCount, snapshotNewestTime);
+                await checkDeadPost(post);
 
                 done = true;
                 continue;
               }
 
+              let sentCount = 0;
               if (newComments.length > 0) {
-                log.success("WATCHER", `${postLabel}: +${newComments.length} nowych`);
-                newCommentsTotal += newComments.length;
+                log.dev("WATCHER", `${postLabel}: znaleziono ${newComments.length} nowych`);
 
                 const safeComments = newComments.filter((c) => c.__postId === post.id);
                 if (safeComments.length !== newComments.length) {
@@ -1213,8 +1684,16 @@ async function startWatcher() {
                     after: safeComments.length,
                   });
                 }
-                await sendTelegramIfFresh(post, safeComments, "normal");
+                sentCount = await sendTelegramIfFresh(post, safeComments, "normal");
+                if (sentCount > 0) {
+                  log.success("WATCHER", `${postLabel}: +${sentCount} wysłanych`);
+                }
+                newCommentsTotal += sentCount;
               }
+
+              // STATS: Aktualizuj statystyki per post (normal mode - z czasem najnowszego komentarza)
+              updatePostStats(cacheKey, sentCount, snapshotNewestTime);
+              await checkDeadPost(post);
 
               // sukces → reset liczników hard fail
               consecutiveHardFails = 0;
@@ -1275,21 +1754,44 @@ async function startWatcher() {
                 done = true;
               }
 
-              // Eskalacje globalne
-              if (consecutiveHardFails >= HARD_FAILS_RESET_BROWSER) {
+              // === CRASH PROTECTION: Natychmiastowa reakcja na disconnect ===
+              if (!isBrowserAlive() || c.isTargetClosed) {
+                log.error("BROWSER", "Browser disconnected - natychmiastowy restart");
+                browser.removeAllListeners('disconnected');
+                await safeCloseContext(ctx);
+                await safeCloseBrowser(browser);
+
+                // Utwórz nowy browser z nowym listenerem
+                browser = await puppeteer.launch(buildLaunchOptions());
+                browserDisconnected = false; // reset flagi
+                browser.on('disconnected', () => {
+                  browserDisconnected = true;
+                  log.error("BROWSER", "Przeglądarka została rozłączona (crash/OOM/timeout)!");
+                });
+                ctx = await browser.createBrowserContext();
+                consecutiveHardFails = 0;
+                log.prod("BROWSER", "Browser zrestartowany pomyślnie");
+              }
+              // Eskalacje globalne (legacy - zachowane dla innych błędów)
+              else if (consecutiveHardFails >= HARD_FAILS_RESET_BROWSER) {
                 log.error("WATCHER", `Eskalacja: reset BROWSER (consecutiveHardFails=${consecutiveHardFails})`);
-                // reset: zamknij context i browser, stwórz od nowa
+                browser.removeAllListeners('disconnected');
                 await safeCloseContext(ctx);
                 await safeCloseBrowser(browser);
 
                 browser = await puppeteer.launch(buildLaunchOptions());
+                browserDisconnected = false;
+                browser.on('disconnected', () => {
+                  browserDisconnected = true;
+                  log.error("BROWSER", "Przeglądarka została rozłączona (crash/OOM/timeout)!");
+                });
                 ctx = await browser.createBrowserContext();
-                consecutiveHardFails = 0; // po pełnym resecie
-              } else if (consecutiveHardFails >= HARD_FAILS_RESET_CONTEXT) {
+                consecutiveHardFails = 0;
+              } else if (consecutiveHardFails >= HARD_FAILS_RESET_CONTEXT && isBrowserAlive()) {
                 log.error("WATCHER", `Eskalacja: reset CONTEXT (consecutiveHardFails=${consecutiveHardFails})`);
                 await safeCloseContext(ctx);
                 ctx = await browser.createBrowserContext();
-                consecutiveHardFails = 0; // po resecie contextu
+                consecutiveHardFails = 0;
               }
 
               if (isNavigationError(err)) {
@@ -1312,11 +1814,16 @@ async function startWatcher() {
     } finally {
       flushCacheToDisk();
 
+      // STATS: Aktualizuj globalne statystyki po cyklu
+      updateGlobalStats(newCommentsTotal);
+
       if (!hadNavErrorThisRound && navErrorCount > 0) {
         log.dev("WATCHER", `Reset licznika błędów nawigacji (było ${navErrorCount})`);
         navErrorCount = 0;
       }
 
+      // Usuń listener przed zamknięciem (zapobiega fałszywym alarmom na końcu cyklu)
+      browser.removeAllListeners('disconnected');
       await safeCloseContext(ctx);
       await safeCloseBrowser(browser);
 
@@ -1354,6 +1861,7 @@ async function startWatcher() {
       lastCheckTime = new Date();
 
       // LITE: Sprawdź czy sesja powinna się zakończyć
+      // (browser jest już zamknięty w finally - przy następnym cyklu zostanie utworzony nowy)
       if (sessionFingerprint && shouldEndSession(sessionStartTime, sessionFingerprint.sessionLength)) {
         log.prod("LITE", "Koniec sesji - następny cykl z nową sesją");
         sessionFingerprint = null;

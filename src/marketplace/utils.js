@@ -7,15 +7,24 @@ import fs from "fs";
 import path from "path";
 import { MARKETPLACE_DATA_PATH } from "../config.js";
 
+// Import funkcji Human Behavior z modułu LITE
+import { humanClick as liteHumanClick, randomMouseMovement } from "../utils/mouse.js";
+import { smoothScrollBy, smoothScrollToElement } from "../lite/smoothScroll.js";
+import { preAction, postAction, humanType as liteHumanType } from "../lite/humanBehavior.js";
+import { gaussianRandom, sleep } from "../utils/sleep.js";
+
 /**
- * Opóźnienie z losowym czasem (human-like)
+ * Opóźnienie z losowym czasem (human-like) - używa rozkładu Gaussa
  * @param {number} minMs - minimum w ms
  * @param {number} maxMs - maximum w ms
  * @returns {Promise<void>}
  */
 export async function humanDelay(minMs = 500, maxMs = 2000) {
-  const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
-  return new Promise((resolve) => setTimeout(resolve, delay));
+  const mean = (minMs + maxMs) / 2;
+  const stdDev = (maxMs - minMs) / 4;
+  let delay = gaussianRandom(mean, stdDev);
+  delay = Math.max(minMs, Math.min(maxMs, delay));
+  return sleep(delay);
 }
 
 /**
@@ -200,27 +209,87 @@ export function shuffleArray(arr) {
 }
 
 /**
- * Symulacja ludzkiego wpisywania tekstu
+ * Symulacja ludzkiego wpisywania tekstu z literówkami i naturalnymi pauzami
  * @param {object} page - Puppeteer page
  * @param {string} selector - selektor pola
  * @param {string} text - tekst do wpisania
  */
 export async function humanType(page, selector, text) {
-  await page.click(selector);
+  const element = await page.$(selector);
+  if (!element) return;
+
+  // Kliknij z ruchem myszy
+  await humanClickElement(page, element);
   await shortDelay();
 
-  for (const char of text) {
-    await page.type(selector, char, { delay: 50 + Math.random() * 100 });
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
 
-    // Czasami dłuższa pauza (symulacja myślenia)
+    // 3% szansa na literówkę
+    if (Math.random() < 0.03) {
+      // Wpisz błędny znak
+      const wrongChar = String.fromCharCode(char.charCodeAt(0) + (Math.random() > 0.5 ? 1 : -1));
+      await page.keyboard.type(wrongChar);
+      await sleep(gaussianRandom(80, 20));
+
+      // Pauza "zauważenia" błędu
+      await sleep(gaussianRandom(300, 100));
+
+      // Cofnij
+      await page.keyboard.press("Backspace");
+      await sleep(gaussianRandom(100, 30));
+    }
+
+    // Wpisz poprawny znak
+    await page.keyboard.type(char);
+
+    // Naturalne opóźnienie między znakami (rozkład Gaussa)
+    const charDelay = gaussianRandom(90, 30);
+    await sleep(Math.max(40, Math.min(200, charDelay)));
+
+    // 5% szansa na dłuższą pauzę (myślenie)
     if (Math.random() < 0.05) {
-      await humanDelay(200, 500);
+      await humanDelay(300, 800);
+    }
+
+    // 2% szansa na ruch myszy podczas pisania
+    if (Math.random() < 0.02) {
+      await randomMouseMovement(page).catch(() => {});
     }
   }
 }
 
 /**
- * Bezpieczne kliknięcie z retry
+ * Human-like kliknięcie elementu z ruchem myszy krzywą Beziera
+ * @param {object} page - Puppeteer page
+ * @param {object} element - ElementHandle
+ * @returns {Promise<boolean>}
+ */
+export async function humanClickElement(page, element) {
+  try {
+    // Pre-action pauza (symulacja "myślenia")
+    await preAction(page, "click");
+
+    // Kliknięcie z ruchem myszy Beziera
+    await liteHumanClick(page, element);
+
+    // Post-action pauza
+    await postAction(page, "click");
+
+    return true;
+  } catch (err) {
+    // Fallback do normalnego kliku
+    try {
+      await element.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * Bezpieczne kliknięcie z retry i ruchem myszy
  * @param {object} page - Puppeteer page
  * @param {string} selector - selektor
  * @param {number} maxRetries - max prób
@@ -230,9 +299,14 @@ export async function safeClick(page, selector, maxRetries = 3) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       await page.waitForSelector(selector, { timeout: 5000 });
-      await humanDelay(200, 500);
-      await page.click(selector);
-      return true;
+
+      const element = await page.$(selector);
+      if (!element) continue;
+
+      // Użyj humanClickElement z ruchem myszy
+      const clicked = await humanClickElement(page, element);
+      if (clicked) return true;
+
     } catch (err) {
       if (i === maxRetries - 1) {
         console.error(`[MARKETPLACE] Nie można kliknąć ${selector}:`, err.message);
@@ -337,6 +411,40 @@ export function formatCurrency(amount) {
   }).format(amount);
 }
 
+/**
+ * Płynne scrollowanie w dół (human-like)
+ * @param {object} page - Puppeteer page
+ * @param {number} amount - ilość pixeli
+ * @returns {Promise<void>}
+ */
+export async function humanScroll(page, amount = 300) {
+  await preAction(page, "scroll");
+  await smoothScrollBy(page, amount);
+  await postAction(page, "scroll");
+}
+
+/**
+ * Płynne scrollowanie do elementu z overshoot
+ * @param {object} page - Puppeteer page
+ * @param {string} selector - selektor elementu
+ * @returns {Promise<boolean>}
+ */
+export async function humanScrollToElement(page, selector) {
+  await preAction(page, "scroll");
+  const result = await smoothScrollToElement(page, selector);
+  await postAction(page, "scroll");
+  return result;
+}
+
+/**
+ * Losowy ruch myszy (symulacja rozglądania się)
+ * @param {object} page - Puppeteer page
+ * @returns {Promise<void>}
+ */
+export async function doRandomMouseMovement(page) {
+  await randomMouseMovement(page).catch(() => {});
+}
+
 export default {
   humanDelay,
   shortDelay,
@@ -355,9 +463,13 @@ export default {
   imageExists,
   shuffleArray,
   humanType,
+  humanClickElement,
   safeClick,
   waitForAnySelector,
   takeScreenshot,
   isOnLoginOrCheckpoint,
   formatCurrency,
+  humanScroll,
+  humanScrollToElement,
+  doRandomMouseMovement,
 };

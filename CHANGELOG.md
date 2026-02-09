@@ -1,5 +1,127 @@
 # CHANGELOG
 
+## [2026-02-09] - Human Behavior dla modułu Marketplace + integracja panelu
+
+### Feature
+- **Co:** Dodanie pełnego Human Behavior do modułu Marketplace oraz integracja z panelem
+- **Pliki:**
+  - `src/marketplace/utils.js` - nowe funkcje: humanClickElement(), humanScroll(), humanScrollToElement(), doRandomMouseMovement()
+  - `src/marketplace/publisher.js` - zamiana page.click() na humanClickElement(), scrollowanie przez humanScroll()
+  - `src/marketplace/renewer.js` - wzorzec "mark + click", humanScroll(), losowe ruchy myszy
+  - `src/panel/api.js` - 10 nowych endpointów API dla Marketplace
+  - `src/panel/web/src/pages/Marketplace.tsx` - nowa strona panelu
+  - `src/panel/web/src/lib/api.ts` - funkcje API dla Marketplace
+  - `src/panel/web/src/lib/types.ts` - 15+ nowych interfejsów TypeScript
+  - `src/panel/web/src/components/layouts/CyberLayout.tsx` - nawigacja do Marketplace
+
+### Human Behavior w Marketplace:
+1. **humanClickElement()** - klikanie z ruchem myszy krzywą Beziera + preAction/postAction
+2. **humanType()** - 3% szansa na literówkę z korektą backspace
+3. **humanScroll()** - płynne scrollowanie z easing (używa smoothScrollBy z LITE)
+4. **humanDelay()** - rozkład Gaussa zamiast równomiernego
+5. **doRandomMouseMovement()** - losowe ruchy myszy między akcjami
+6. **Wzorzec "mark + click"** - oznaczanie elementów atrybutem data-hb-*, klikanie z Node.js
+
+### Publisher.js:
+- `fillTextField()` - humanClickElement() + humanType()
+- `clickPublish()` - humanScroll() zamiast window.scrollTo
+- Wszystkie `element.click()` → `humanClickElement()`
+
+### Renewer.js:
+- `getListingsFromPage()` - humanScroll() + losowe ruchy myszy
+- `renewSingleListing()` - pełny "mark + click" pattern:
+  - Oznaczanie przycisków: `data-hb-renew-click="renew-button|menu-button|menu-option|confirm-button"`
+  - doRandomMouseMovement() przed kliknięciem
+  - humanClickElement() z Bezier mouse movement
+
+### API (nowe endpointy):
+- `GET /api/marketplace/status` - status schedulera
+- `PUT /api/marketplace/status` - włącz/wyłącz scheduler
+- `GET /api/marketplace/listings` - lista ogłoszeń
+- `GET /api/marketplace/content-pool` - pula treści
+- `PUT /api/marketplace/content-pool` - aktualizuj pulę
+- `GET /api/marketplace/renewals` - log wznowień
+- `GET /api/marketplace/random-content` - losowa treść (preview)
+- `POST /api/marketplace/manual-renew` - ręczne wznowienie
+- `POST /api/marketplace/manual-publish` - ręczna publikacja
+- `POST /api/marketplace/scheduler/stop|resume` - kontrola schedulera
+
+---
+
+## [2026-02-09] - Poprawki systemu statystyk i filtrowanie martwych postów
+
+### Bugfix/Feature
+- **Co:** Kompleksowa naprawa i usprawnienia systemu statystyk
+- **Pliki:**
+  - `src/watcher.js` - filtrowanie martwych postów w cyklu, śledzenie sesji (lastSessionStart, restartCount)
+  - `src/panel/api.js` - filtrowanie martwych z /api/stats, nowe pola summary
+  - `src/panel/web/src/pages/Stats.tsx` - poprawki UI (wykres, badge, etykiety czasowe)
+  - `src/panel/web/src/lib/types.ts` - nowe pola w StatsResponse
+  - `src/utils/time.js` - rozszerzone parsowanie czasów FB
+  - `src/fb/ui/post.js` - rozszerzone regex dla ekstrakcji czasu komentarzy
+
+### Zmiany:
+1. **Filtrowanie martwych postów w watcher**
+   - Martwe posty (>14 dni bez aktywności) są pomijane w cyklu monitorowania
+   - Log: `[DEAD-POSTS] Pominięto X martwych postów (Y aktywnych)`
+
+2. **Filtrowanie martwych w API /stats**
+   - Endpoint /api/stats nie zwraca już martwych postów w liście
+   - Summary zawiera totalPosts, activePosts, deadPosts osobno
+
+3. **Śledzenie sesji PM2**
+   - `lastSessionStart` - kiedy wystartował aktualny proces
+   - `restartCount` - ile razy PM2 restartował proces
+   - Log przy starcie: `Sesja #N, startedAt: YYYY-MM-DD`
+
+4. **Poprawki wyświetlania statystyk**
+   - "51 komentarzy **łącznie od 06.02**" zamiast "od uruchomienia"
+   - "28 cykli od 06.02" - spójne daty
+   - Wyraźne rozdzielenie: ostatni cykl vs sesja PM2
+
+5. **Naprawa wykresu "Ostatnie 7 dni"**
+   - Słupki używają pikseli zamiast procent (height: 80px max)
+   - Zero = 4px, proporcjonalne skalowanie dla wartości
+
+6. **Naprawa badge "MARTWY"**
+   - Biały tekst na czerwonym tle (było: czerwony tekst niewidoczny)
+   - Badge "SŁABY" z żółtą ramką
+
+7. **Sortowanie postów po liczbie komentarzy**
+   - Ranking postów sortowany malejąco po totalDetected
+
+8. **Rozszerzone parsowanie czasów FB**
+   - Nowe formaty: "właśnie", "tydz" (tydzień), daty absolutne ("23 sty", "5 lut")
+   - Obsługa przełomu roku dla dat absolutnych
+
+---
+
+## [2026-02-06] - System statystyk i ranking postów
+
+### Feature
+- **Co:** Kompletny system statystyk z dashboardem w panelu
+- **Pliki:**
+  - `src/watcher.js` - funkcje updatePostStats(), updateGlobalStats(), loadGlobalStats(), saveGlobalStats()
+  - `src/panel/api.js` - endpoint GET /api/stats z obliczaniem tier postów
+  - `src/panel/web/src/pages/Stats.tsx` - nowa strona dashboardu statystyk
+  - `src/panel/web/src/lib/api.ts` - funkcja getStats()
+  - `src/panel/web/src/lib/types.ts` - typy StatsResponse, PostWithStats, PostTier, DailyStats
+  - `data/stats.json` - plik przechowujący statystyki
+- **Funkcjonalności:**
+  1. **Statystyki per post** - liczba wykrytych komentarzy, data ostatniego komentarza
+  2. **Statystyki globalne** - łączne komentarze, liczba cykli, daty
+  3. **Statystyki dzienne** - agregacja po dniach z retencją 30 dni
+  4. **Tier system** - automatyczna klasyfikacja postów:
+     - HOT: nowe komentarze w ciągu ostatniej doby
+     - ACTIVE: normalna aktywność
+     - WEAK: brak aktywności 7-14 dni
+     - DEAD: brak aktywności > 14 dni
+  5. **Dashboard UI** - karty podsumowania, wykres 7 dni, tabela ranking postów
+- **API:**
+  - `GET /api/stats` - zwraca summary, posts z tier, daily stats
+
+---
+
 ## [2026-02-02] - Poprawa systemu słów kluczowych w Feed Scannerze
 
 ### Feature/Refactor

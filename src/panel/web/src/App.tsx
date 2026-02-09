@@ -11,6 +11,9 @@ import { Campaigns } from '@/pages/Campaigns'
 import { Cookies } from '@/pages/Cookies'
 import { Settings } from '@/pages/Settings'
 import { Logs } from '@/pages/Logs'
+import { Stats } from '@/pages/Stats'
+import { DeadPosts } from '@/pages/DeadPosts'
+import { Marketplace } from '@/pages/Marketplace'
 
 export default function App() {
   return (
@@ -28,6 +31,9 @@ export default function App() {
               <Route path="/cookies" element={<Cookies />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/logs" element={<Logs />} />
+              <Route path="/stats" element={<Stats />} />
+              <Route path="/dead-posts" element={<DeadPosts />} />
+              <Route path="/marketplace" element={<Marketplace />} />
             </Route>
           </Routes>
         </BrowserRouter>

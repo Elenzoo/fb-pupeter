@@ -9,6 +9,9 @@ import {
   Cookie,
   Settings,
   Terminal,
+  BarChart3,
+  Skull,
+  Store,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -98,6 +101,8 @@ export function Sidebar({ className }: SidebarProps) {
             </p>
           </div>
           <NavItem to="/watched" icon={<Eye className="h-4 w-4" />} label="Obserwowane" />
+          <NavItem to="/stats" icon={<BarChart3 className="h-4 w-4" />} label="Statystyki" />
+          <NavItem to="/dead-posts" icon={<Skull className="h-4 w-4" />} label="Martwe posty" />
           <NavItem
             to="/sources"
             icon={<Globe className="h-4 w-4" />}
@@ -112,6 +117,11 @@ export function Sidebar({ className }: SidebarProps) {
               Automatyzacja
             </p>
           </div>
+          <NavItem
+            to="/marketplace"
+            icon={<Store className="h-4 w-4" />}
+            label="Marketplace"
+          />
           <NavItem
             to="/campaigns"
             icon={<Megaphone className="h-4 w-4" />}

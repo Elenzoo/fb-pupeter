@@ -15,6 +15,9 @@ import {
   getDataPath,
   formatDate,
   getNextRenewalDate,
+  humanScroll,
+  humanClickElement,
+  doRandomMouseMovement,
 } from "./utils.js";
 import {
   loadPublished,
@@ -106,9 +109,10 @@ async function getListingsFromPage(page) {
 
   await humanDelay(2000, 4000);
 
-  // Scroll żeby załadować wszystkie ogłoszenia
+  // Scroll żeby załadować wszystkie ogłoszenia (human-like)
   for (let i = 0; i < 3; i++) {
-    await page.evaluate(() => window.scrollBy(0, 500));
+    await doRandomMouseMovement(page);
+    await humanScroll(page, 500);
     await humanDelay(1000, 2000);
   }
 
@@ -151,14 +155,19 @@ async function getListingsFromPage(page) {
 }
 
 /**
- * Wznów pojedyncze ogłoszenie
+ * Wznów pojedyncze ogłoszenie (z Human Behavior)
  */
 async function renewSingleListing(page, listingIndex) {
   console.log(`[MARKETPLACE:RENEWER] Próba wznowienia ogłoszenia #${listingIndex}...`);
 
+  const MARKER = "data-hb-renew-click";
+
   try {
-    // Znajdź ogłoszenie i kliknij przycisk wznowienia
-    const renewed = await page.evaluate((index) => {
+    // Krok 1: Znajdź i oznacz przycisk wznowienia lub menu
+    const findResult = await page.evaluate((index, marker) => {
+      // Usuń stare markery
+      document.querySelectorAll(`[${marker}]`).forEach(el => el.removeAttribute(marker));
+
       const listItems = document.querySelectorAll('[role="listitem"]');
       const item = listItems[index];
 
@@ -168,56 +177,77 @@ async function renewSingleListing(page, listingIndex) {
       const buttons = item.querySelectorAll('div[role="button"]');
       for (const btn of buttons) {
         if (btn.textContent.includes("Renew") || btn.textContent.includes("Wznów")) {
-          btn.click();
-          return { success: true, clickedButton: true };
+          btn.setAttribute(marker, "renew-button");
+          return { success: true, type: "renew-button" };
         }
       }
 
       // Może trzeba najpierw kliknąć menu "..."
       const menuBtn = item.querySelector('[aria-label="More"], [aria-label="Więcej"]');
       if (menuBtn) {
-        menuBtn.click();
-        return { success: true, clickedMenu: true };
+        menuBtn.setAttribute(marker, "menu-button");
+        return { success: true, type: "menu-button" };
       }
 
       return { success: false, error: "Nie znaleziono przycisku wznowienia" };
-    }, listingIndex);
+    }, listingIndex, MARKER);
 
-    if (!renewed.success) {
-      return { success: false, error: renewed.error };
+    if (!findResult.success) {
+      return { success: false, error: findResult.error };
+    }
+
+    // Krok 2: Kliknij oznaczony element z Human Behavior
+    const markedElement = await page.$(`[${MARKER}]`);
+    if (markedElement) {
+      await doRandomMouseMovement(page);
+      await humanClickElement(page, markedElement);
+      // Usuń marker
+      await page.evaluate((marker) => {
+        document.querySelectorAll(`[${marker}]`).forEach(el => el.removeAttribute(marker));
+      }, MARKER);
     }
 
     await mediumDelay();
 
-    // Jeśli kliknęliśmy menu, szukaj opcji "Wznów" w dropdown
-    if (renewed.clickedMenu) {
+    // Krok 3: Jeśli kliknęliśmy menu, szukaj opcji "Wznów" w dropdown
+    if (findResult.type === "menu-button") {
       await humanDelay(500, 1000);
 
-      const menuRenewed = await page.evaluate(() => {
+      // Oznacz opcję w menu
+      const menuFound = await page.evaluate((marker) => {
         const menuItems = document.querySelectorAll('[role="menuitem"]');
         for (const item of menuItems) {
           if (item.textContent.includes("Renew") || item.textContent.includes("Wznów")) {
-            item.click();
+            item.setAttribute(marker, "menu-option");
             return true;
           }
         }
         return false;
-      });
+      }, MARKER);
 
-      if (!menuRenewed) {
+      if (!menuFound) {
         // Zamknij menu
         await page.keyboard.press("Escape");
         return { success: false, error: "Brak opcji wznowienia w menu" };
       }
 
+      // Kliknij opcję menu z Human Behavior
+      const menuOption = await page.$(`[${MARKER}]`);
+      if (menuOption) {
+        await humanClickElement(page, menuOption);
+        await page.evaluate((marker) => {
+          document.querySelectorAll(`[${marker}]`).forEach(el => el.removeAttribute(marker));
+        }, MARKER);
+      }
+
       await mediumDelay();
     }
 
-    // Szukaj dialogu potwierdzenia i potwierdź
+    // Krok 4: Szukaj dialogu potwierdzenia i potwierdź
     await humanDelay(1000, 2000);
 
-    const confirmed = await page.evaluate(() => {
-      // Szukaj przycisku potwierdzenia w dialogu
+    // Oznacz przycisk potwierdzenia
+    const confirmFound = await page.evaluate((marker) => {
       const confirmSelectors = [
         '[role="dialog"] [role="button"]',
         '[aria-label="Renew"]',
@@ -229,14 +259,26 @@ async function renewSingleListing(page, listingIndex) {
         for (const btn of buttons) {
           const text = btn.textContent.toLowerCase();
           if (text.includes("renew") || text.includes("wznów") || text.includes("confirm") || text.includes("potwierdź")) {
-            btn.click();
+            btn.setAttribute(marker, "confirm-button");
             return true;
           }
         }
       }
 
       return false;
-    });
+    }, MARKER);
+
+    // Kliknij przycisk potwierdzenia z Human Behavior
+    if (confirmFound) {
+      const confirmBtn = await page.$(`[${MARKER}]`);
+      if (confirmBtn) {
+        await doRandomMouseMovement(page);
+        await humanClickElement(page, confirmBtn);
+        await page.evaluate((marker) => {
+          document.querySelectorAll(`[${marker}]`).forEach(el => el.removeAttribute(marker));
+        }, MARKER);
+      }
+    }
 
     await longDelay();
 
@@ -366,7 +408,8 @@ export async function run(page, options = {}) {
         logRenewal(dbListing.id, false, { title: dbListing.title, error: renewResult.error });
       }
 
-      // Pauza między ogłoszeniami
+      // Pauza między ogłoszeniami (human-like)
+      await doRandomMouseMovement(page);
       await humanDelay(3000, 6000);
 
       // Odśwież stronę co 3 ogłoszenia

@@ -16,6 +16,7 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | `src/config.js` | ~172 | eksport zmiennych | env variables |
 | `src/fb/cookies.js` | ~149 | `loadCookies()`, `saveCookies()` | zarządzanie sesją |
 | `src/db/cache.js` | ~116 | `getCache()`, `updateCache()` | deduplikacja |
+| `src/db/dead-posts.js` | ~120 | `loadDeadPosts()`, `addDeadPost()`, `removeDeadPost()` | martwe posty |
 | `src/bootstrap.js` | ~27 | - | **PUNKT WEJŚCIA** - ładuje .env przed importami |
 | `src/index.js` | ~83 | `main()` | główna logika (importowany przez bootstrap.js) |
 | `src/utils/time.js` | ~63 | `parseRelativeTime()` | parsowanie "2 godz." |
@@ -40,6 +41,8 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | `src/lite/randomActions.js` | ~150 | `maybeRandomLike()`, `executeRandomActions()` | losowe akcje |
 | `data/discoveries.json` | - | - | znalezione posty z Feed Scannera |
 | `data/blacklist.json` | - | - | odrzucone posty |
+| `data/stats.json` | - | - | globalne statystyki (cykle, komentarze) |
+| `data/dead-posts.json` | - | - | martwe posty (brak aktywności > 14 dni) |
 
 ## Częste operacje (gdzie edytować)
 
@@ -61,6 +64,8 @@ Bot monitorujący komentarze na postach Facebook za pomocą Puppeteer. Wykrywa n
 | LITE feed scanner | `src/lite/feedScanner.js` | `scanFeed()` |
 | LITE discoveries | `data/discoveries.json` | (plik JSON) |
 | LITE blacklist | `data/blacklist.json` | (plik JSON) |
+| Statystyki | `src/watcher.js` | `updatePostStats()`, `updateGlobalStats()` |
+| Martwe posty | `src/db/dead-posts.js` | `checkDeadPost()` |
 
 ## Architektura
 
@@ -231,6 +236,16 @@ FEED_SCROLL_DURATION_MAX=3         # max czas scrollowania (minuty)
 HUMAN_RANDOM_LIKE_CHANCE=0.20      # szansa na losowy like (20%)
 DISCOVERY_TELEGRAM_ENABLED=false   # alert Telegram przy nowym discovery
 WEBHOOK_MAX_AGE_MIN=60             # max wiek komentarzy do wysłania
+
+# Stabilność / Crash Prevention
+BROWSER_RECYCLE_EVERY_POSTS=15     # recykling browsera co N postów (zapobiega OOM)
+BROWSER_RECYCLE_EVERY_CYCLES=10    # recykling browsera co N cykli
+MEMORY_THRESHOLD_MB=2800           # próg pamięci do restartu (MB)
+
+# Statystyki / Dead Posts
+DEAD_POST_THRESHOLD_DAYS=14        # próg "martwego" posta (dni bez aktywności)
+DEAD_POST_AUTO_MOVE=true           # auto-przeniesienie do dead-posts.json
+DEAD_POST_ALERT=false              # alert Telegram przy przeniesieniu
 ```
 
 ## Ważne informacje techniczne
@@ -317,6 +332,9 @@ POST /api/discoveries/reject-all   - odrzuć wszystkie
 GET  /api/blacklist                - lista blacklist
 DELETE /api/blacklist/:id          - usuń z blacklist
 POST /api/blacklist                - dodaj URL ręcznie
+GET  /api/stats                    - statystyki (summary, posts z tier, daily)
+GET  /api/dead-posts               - lista martwych postów
+POST /api/dead-posts/:id/reactivate - reaktywuj martwy post
 ```
 
 Logi przy `LOG_LEVEL=2`:

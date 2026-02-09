@@ -10,6 +10,7 @@ import {
   mediumDelay,
   longDelay,
   humanType,
+  humanClickElement,
   safeClick,
   waitForAnySelector,
   takeScreenshot,
@@ -18,6 +19,8 @@ import {
   generateId,
   formatDate,
   getNextRenewalDate,
+  humanScroll,
+  doRandomMouseMovement,
 } from "./utils.js";
 import {
   getRandomContent,
@@ -92,7 +95,7 @@ async function uploadImages(page, imagePaths) {
 }
 
 /**
- * Wypełnij pole tekstowe z fallbackami
+ * Wypełnij pole tekstowe z fallbackami i human behavior
  */
 async function fillTextField(page, selectorOptions, value, fieldName) {
   const selectors = Array.isArray(selectorOptions) ? selectorOptions : [selectorOptions];
@@ -101,7 +104,8 @@ async function fillTextField(page, selectorOptions, value, fieldName) {
     try {
       const element = await page.$(selector);
       if (element) {
-        await element.click();
+        // Kliknięcie z ruchem myszy Beziera
+        await humanClickElement(page, element);
         await shortDelay();
 
         // Wyczyść pole
@@ -110,8 +114,9 @@ async function fillTextField(page, selectorOptions, value, fieldName) {
         await page.keyboard.up("Control");
         await shortDelay();
 
-        // Wpisz tekst
-        await page.type(selector, value, { delay: 30 + Math.random() * 50 });
+        // Wpisz tekst z human behavior (literówki, naturalne pauzy)
+        await humanType(page, selector, value);
+
         console.log(`[MARKETPLACE:PUBLISHER] Wypełniono ${fieldName}`);
         return true;
       }
@@ -161,7 +166,8 @@ async function fillListingForm(page, content) {
       try {
         const categoryButton = await page.$(SELECTORS.createListing.categoryButton);
         if (categoryButton) {
-          await categoryButton.click();
+          // Kliknięcie z ruchem myszy
+          await humanClickElement(page, categoryButton);
           await mediumDelay();
 
           // Wybierz kategorię
@@ -184,7 +190,8 @@ async function fillListingForm(page, content) {
     try {
       const conditionDropdown = await page.$(SELECTORS.createListing.conditionDropdown);
       if (conditionDropdown) {
-        await conditionDropdown.click();
+        // Kliknięcie z ruchem myszy
+        await humanClickElement(page, conditionDropdown);
         await shortDelay();
         await safeClick(page, SELECTORS.createListing.conditionUsed);
         await mediumDelay();
@@ -209,16 +216,20 @@ async function fillListingForm(page, content) {
       try {
         const locationInput = await page.$(SELECTORS.createListing.locationInput);
         if (locationInput) {
-          await locationInput.click();
+          // Kliknięcie z ruchem myszy
+          await humanClickElement(page, locationInput);
           await shortDelay();
 
-          // Wyczyść i wpisz miasto
+          // Wyczyść i wpisz miasto z human behavior
           await page.keyboard.down("Control");
           await page.keyboard.press("a");
           await page.keyboard.up("Control");
-          await page.type(SELECTORS.createListing.locationInput, content.location.city, { delay: 50 });
+          await humanType(page, SELECTORS.createListing.locationInput, content.location.city);
 
           await humanDelay(1500, 3000);
+
+          // Losowy ruch myszy podczas czekania na sugestie
+          await doRandomMouseMovement(page);
 
           // Wybierz pierwszą sugestię
           const suggestionSelector = SELECTORS.createListing.locationSuggestion;
@@ -244,9 +255,13 @@ async function clickPublish(page) {
   console.log("[MARKETPLACE:PUBLISHER] Klikanie przycisku publikacji...");
 
   try {
-    // Scroll na dół formularza
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    // Płynne scrollowanie na dół formularza
+    const scrollHeight = await page.evaluate(() => document.body.scrollHeight - window.innerHeight);
+    await humanScroll(page, scrollHeight);
     await humanDelay(1000, 2000);
+
+    // Losowy ruch myszy
+    await doRandomMouseMovement(page);
 
     // Szukaj przycisku publikacji
     const publishSelectors = [
@@ -265,7 +280,8 @@ async function clickPublish(page) {
           }, button);
 
           if (!isDisabled) {
-            await button.click();
+            // Kliknięcie z ruchem myszy Beziera
+            await humanClickElement(page, button);
             clicked = true;
             console.log("[MARKETPLACE:PUBLISHER] Kliknięto przycisk publikacji");
             break;
@@ -428,7 +444,8 @@ export async function run(page, options = {}) {
     try {
       const nextButton = await page.$(SELECTORS.createListing.nextButton);
       if (nextButton) {
-        await nextButton.click();
+        // Kliknięcie z ruchem myszy
+        await humanClickElement(page, nextButton);
         await longDelay();
       }
     } catch (e) {

@@ -1211,7 +1211,14 @@ export async function extractComments(page, url) {
 
       for (let j = i + 1; j < Math.min(allLinks.length, i + 5); j++) {
         const timeText = allLinks[j]?.textContent?.trim()?.toLowerCase();
-        if (timeText && /^\d+\s?(min|godz|sek|dni|tyg|h|d|m)\b/.test(timeText)) {
+        if (timeText && (
+          // Formaty względne: "2 godz", "5 min", "3 dni", "1 tydz", "2 tyg"
+          /^\d+\s?(min|godz|sek|dni|tyg|tydz|h|d|m|w)\b/.test(timeText) ||
+          // "wczoraj", "yesterday", "teraz", "now", "przed chwilą", "just now"
+          /^(wczoraj|yesterday|teraz|now|przed chwilą|just now|właśnie)/.test(timeText) ||
+          // Daty absolutne: "23 sty", "5 lut", "12 mar" itp.
+          /^\d{1,2}\s+(sty|lut|mar|kwi|maj|cze|lip|sie|wrz|paź|lis|gru|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/.test(timeText)
+        )) {
           idToTimeMap[id] = timeText;
           break;
         }

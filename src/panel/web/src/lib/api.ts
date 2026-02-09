@@ -10,6 +10,16 @@ import type {
   BlacklistEntry,
   KeywordsResponse,
   KeywordEntry,
+  StatsResponse,
+  DeadPostsResponse,
+  DeadPost,
+  MarketplaceStatusResponse,
+  MarketplaceListingsResponse,
+  MarketplaceContentPoolResponse,
+  MarketplaceContentPool,
+  MarketplaceRenewalsResponse,
+  MarketplaceRandomContentResponse,
+  MarketplaceActionResponse,
 } from './types'
 
 const TOKEN_KEY = 'FBW_PANEL_TOKEN'
@@ -228,6 +238,75 @@ export async function setKeywordsEnabled(enabled: boolean): Promise<{ ok: boolea
   return request('/api/keywords/enabled', {
     method: 'PUT',
     body: JSON.stringify({ enabled }),
+  })
+}
+
+// Stats
+export async function getStats(): Promise<StatsResponse> {
+  return request<StatsResponse>('/api/stats')
+}
+
+// Dead Posts
+export async function getDeadPosts(): Promise<DeadPostsResponse> {
+  return request<DeadPostsResponse>('/api/dead-posts')
+}
+
+export async function reactivateDeadPost(id: string): Promise<{ ok: boolean; reactivated?: DeadPost; error?: string }> {
+  return request(`/api/dead-posts/${encodeURIComponent(id)}/reactivate`, {
+    method: 'POST',
+  })
+}
+
+// ==================== MARKETPLACE ====================
+
+export async function getMarketplaceStatus(): Promise<MarketplaceStatusResponse> {
+  return request<MarketplaceStatusResponse>('/api/marketplace/status')
+}
+
+export async function getMarketplaceListings(): Promise<MarketplaceListingsResponse> {
+  return request<MarketplaceListingsResponse>('/api/marketplace/listings')
+}
+
+export async function getMarketplaceContentPool(): Promise<MarketplaceContentPoolResponse> {
+  return request<MarketplaceContentPoolResponse>('/api/marketplace/content-pool')
+}
+
+export async function updateMarketplaceContentPool(pool: MarketplaceContentPool): Promise<{ ok: boolean; error?: string }> {
+  return request('/api/marketplace/content-pool', {
+    method: 'PUT',
+    body: JSON.stringify({ pool }),
+  })
+}
+
+export async function getMarketplaceRenewals(limit = 50): Promise<MarketplaceRenewalsResponse> {
+  return request<MarketplaceRenewalsResponse>(`/api/marketplace/renewals?limit=${limit}`)
+}
+
+export async function getMarketplaceRandomContent(): Promise<MarketplaceRandomContentResponse> {
+  return request<MarketplaceRandomContentResponse>('/api/marketplace/random-content')
+}
+
+export async function marketplaceManualRenew(): Promise<MarketplaceActionResponse> {
+  return request<MarketplaceActionResponse>('/api/marketplace/manual-renew', {
+    method: 'POST',
+  })
+}
+
+export async function marketplaceManualPublish(): Promise<MarketplaceActionResponse> {
+  return request<MarketplaceActionResponse>('/api/marketplace/manual-publish', {
+    method: 'POST',
+  })
+}
+
+export async function marketplaceStopScheduler(): Promise<{ ok: boolean; error?: string }> {
+  return request('/api/marketplace/scheduler/stop', {
+    method: 'POST',
+  })
+}
+
+export async function marketplaceResumeScheduler(): Promise<{ ok: boolean; error?: string }> {
+  return request('/api/marketplace/scheduler/resume', {
+    method: 'POST',
   })
 }
 

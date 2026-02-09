@@ -253,6 +253,25 @@ const BETWEEN_POSTS_PAUSE_MAX_MS = Number(process.env.BETWEEN_POSTS_PAUSE_MAX_MS
  */
 const DISCOVERY_TELEGRAM_ENABLED = process.env.DISCOVERY_TELEGRAM_ENABLED === "true";
 
+/* ==================== DEAD POSTS (STATYSTYKI) ==================== */
+/**
+ * DEAD_POST_THRESHOLD_DAYS – po ilu dniach bez komentarzy post jest "martwy"
+ * Domyślnie: 14 dni
+ */
+const DEAD_POST_THRESHOLD_DAYS = Number(process.env.DEAD_POST_THRESHOLD_DAYS || 14);
+
+/**
+ * DEAD_POST_AUTO_MOVE – czy automatycznie przenosić martwe posty do dead-posts.json
+ * Domyślnie: true
+ */
+const DEAD_POST_AUTO_MOVE = process.env.DEAD_POST_AUTO_MOVE !== "false";
+
+/**
+ * DEAD_POST_ALERT – czy wysyłać alert Telegram przy przeniesieniu posta do martwych
+ * Domyślnie: false
+ */
+const DEAD_POST_ALERT = process.env.DEAD_POST_ALERT === "true";
+
 /* ==================== META ADS SCANNER ==================== */
 /**
  * METAADS_KEYWORDS – słowa kluczowe do wyszukiwania reklam (rozdzielone przecinkami)
@@ -402,6 +421,11 @@ export {
   DISCOVERY_TELEGRAM_ENABLED,
   BETWEEN_POSTS_PAUSE_MIN_MS,
   BETWEEN_POSTS_PAUSE_MAX_MS,
+
+  // dead posts (stats)
+  DEAD_POST_THRESHOLD_DAYS,
+  DEAD_POST_AUTO_MOVE,
+  DEAD_POST_ALERT,
 
   // meta ads scanner
   METAADS_KEYWORDS,

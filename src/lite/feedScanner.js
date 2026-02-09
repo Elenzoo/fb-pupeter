@@ -79,16 +79,36 @@ function generateDiscoveryId() {
 /**
  * Ekstrahuje posty z aktualnego widoku strony
  * @param {import('puppeteer').Page} page
- * @returns {Promise<Array<{url: string, content: string, pageName: string}>>}
+ * @returns {Promise<{posts: Array, debug: object}>}
  */
 async function extractVisiblePosts(page) {
-  return page.evaluate(() => {
+  const result = await page.evaluate(() => {
     const posts = [];
     const seenUrls = new Set();
+    const debug = {
+      articleCount: 0,
+      virtualizedCount: 0,
+      adPreviewCount: 0,
+      withLinkCount: 0,
+      withContentCount: 0,
+      noLinkSamples: [],
+      noContentSamples: [],
+    };
 
     // Selektory dla postów FB (zaktualizowane 2026-02)
+    // FB używa różnych kontenerów w zależności od typu contentu
+    debug.articleCount = document.querySelectorAll('[role="article"]').length;
+    debug.virtualizedCount = document.querySelectorAll('[data-virtualized="false"]').length;
+    debug.adPreviewCount = document.querySelectorAll('div[data-ad-preview]').length;
+
+    // Rozszerzone selektory dla różnych typów postów FB
     const postContainers = document.querySelectorAll(
-      '[role="article"], [data-virtualized="false"], div[data-ad-preview]'
+      '[role="article"], ' +
+      '[data-virtualized="false"], ' +
+      'div[data-ad-preview], ' +
+      '[data-pagelet^="FeedUnit"], ' +          // Feed units
+      '[class*="x1lliihq"][class*="xjkvuk6"], ' + // Nowe klasy FB 2026
+      'div[data-testid="Keycommand_wrapper"]'    // Wrapper dla interakcji
     );
 
     for (const container of postContainers) {
@@ -99,7 +119,18 @@ async function extractVisiblePosts(page) {
           'a[href*="/photo/"], a[href*="/reel/"], a[href*="pfbid"], a[href*="/videos/"]'
         );
 
-        if (!postLink) continue;
+        if (!postLink) {
+          // Debug: sprawdź jakie linki są w kontenerze
+          const allLinks = container.querySelectorAll('a[href*="facebook.com"]');
+          if (allLinks.length > 0 && debug.noLinkSamples.length < 3) {
+            debug.noLinkSamples.push({
+              linkCount: allLinks.length,
+              sample: allLinks[0]?.href?.substring(0, 100) || "brak",
+            });
+          }
+          continue;
+        }
+        debug.withLinkCount++;
 
         // Deduplikacja po URL
         const url = postLink.href.split("?")[0]; // Usuń query string
@@ -143,6 +174,35 @@ async function extractVisiblePosts(page) {
             content = longestText;
           }
         }
+
+        // Metoda 3: dla reeli/wideo - sprawdź aria-label obrazka lub overlay
+        if (!content || content.length < 10) {
+          const videoOverlay = container.querySelector('[aria-label]');
+          if (videoOverlay) {
+            const ariaText = videoOverlay.getAttribute('aria-label');
+            if (ariaText && ariaText.length > 10 && ariaText.length < 500) {
+              content = ariaText;
+            }
+          }
+        }
+
+        // Metoda 4: dla reeli - szukaj span z tekstem w kontenerze
+        if (!content || content.length < 10) {
+          const spans = container.querySelectorAll('span');
+          let longestSpan = "";
+          for (const sp of spans) {
+            const text = sp.textContent?.trim() || "";
+            if (text.length > longestSpan.length && text.length > 15 && text.length < 500 &&
+                !text.includes("Lubię to") && !text.includes("Komentarz") &&
+                !text.includes("Udostępnij") && !text.includes("wyświetleń")) {
+              longestSpan = text;
+            }
+          }
+          if (longestSpan.length > content.length) {
+            content = longestSpan;
+          }
+        }
+
         content = content.trim();
 
         // Nazwa strony/użytkownika - szukaj w różnych miejscach
@@ -164,19 +224,38 @@ async function extractVisiblePosts(page) {
         }
 
         if (content.length > 10) {
+          debug.withContentCount++;
           posts.push({
             url: postLink.href,
             content: content.substring(0, 500), // Max 500 znaków
             pageName,
           });
+        } else if (debug.noContentSamples.length < 3) {
+          debug.noContentSamples.push({
+            url: postLink.href?.substring(0, 80),
+            contentLen: content.length,
+          });
         }
-      } catch {
+      } catch (e) {
         // Ignoruj błędy pojedynczych postów
       }
     }
 
-    return posts;
+    return { posts, debug };
   });
+
+  // Loguj debug info w Node.js
+  log.dev("FEED", `[DEBUG] articles=${result.debug.articleCount}, virtualized=${result.debug.virtualizedCount}, adPreview=${result.debug.adPreviewCount}`);
+  log.dev("FEED", `[DEBUG] withLink=${result.debug.withLinkCount}, withContent=${result.debug.withContentCount}, posts=${result.posts.length}`);
+
+  if (result.debug.noLinkSamples.length > 0) {
+    log.dev("FEED", `[DEBUG] Bez linku: ${JSON.stringify(result.debug.noLinkSamples)}`);
+  }
+  if (result.debug.noContentSamples.length > 0) {
+    log.dev("FEED", `[DEBUG] Bez contentu: ${JSON.stringify(result.debug.noContentSamples)}`);
+  }
+
+  return result.posts;
 }
 
 /**

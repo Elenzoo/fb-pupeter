@@ -1311,6 +1311,357 @@ http
         return;
       }
 
+      // ===== STATS API =====
+      const STATS_PATH = path.join(PROJECT_DIR, "data", "stats.json");
+      const CACHE_PATH = path.join(PROJECT_DIR, "data", "comments-cache.json");
+      const DEAD_POSTS_PATH = path.join(PROJECT_DIR, "data", "dead-posts.json");
+
+      function readStatsFile() {
+        if (!fs.existsSync(STATS_PATH)) {
+          return {
+            global: { totalCommentsSent: 0, cyclesCompleted: 0, startedAt: null, lastCycleAt: null },
+            daily: {},
+          };
+        }
+        const raw = fs.readFileSync(STATS_PATH, "utf8").trim();
+        if (!raw) return { global: { totalCommentsSent: 0, cyclesCompleted: 0, startedAt: null, lastCycleAt: null }, daily: {} };
+        const parsed = safeJsonParse(raw);
+        return parsed.ok ? parsed.value : { global: { totalCommentsSent: 0, cyclesCompleted: 0, startedAt: null, lastCycleAt: null }, daily: {} };
+      }
+
+      function readCacheFile() {
+        if (!fs.existsSync(CACHE_PATH)) return {};
+        const raw = fs.readFileSync(CACHE_PATH, "utf8").trim();
+        if (!raw) return {};
+        const parsed = safeJsonParse(raw);
+        return parsed.ok ? parsed.value : {};
+      }
+
+      function readDeadPosts() {
+        if (!fs.existsSync(DEAD_POSTS_PATH)) return [];
+        const raw = fs.readFileSync(DEAD_POSTS_PATH, "utf8").trim();
+        if (!raw) return [];
+        const parsed = safeJsonParse(raw);
+        return parsed.ok && Array.isArray(parsed.value) ? parsed.value : [];
+      }
+
+      function writeDeadPosts(data) {
+        atomicWriteFile(DEAD_POSTS_PATH, JSON.stringify(data, null, 2) + "\n");
+      }
+
+      // Funkcja obliczająca tier posta
+      function calculatePostTier(stats, daysSinceLastComment) {
+        if (daysSinceLastComment === null) return "active"; // Brak danych = zakładamy aktywny
+        if (daysSinceLastComment > 14) return "dead";
+        if (daysSinceLastComment > 7) return "weak";
+        if (daysSinceLastComment < 1 && stats && stats.totalDetected > 0) return "hot";
+        return "active";
+      }
+
+      // Funkcja formatująca wiek - preferuje lastCommentTime (rzeczywisty czas z FB)
+      function formatLastCommentAge(stats) {
+        if (!stats) return null;
+        // Priorytet: lastCommentTime (czas komentarza z FB) > lastNewCommentAt (czas wykrycia przez bota)
+        const timeSource = stats.lastCommentTime || stats.lastNewCommentAt;
+        if (!timeSource) return null;
+        const lastTime = new Date(timeSource);
+        const diffMs = Date.now() - lastTime.getTime();
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        if (diffDays > 0) return `${diffDays} ${diffDays === 1 ? "dzień" : "dni"}`;
+        if (diffHours > 0) return `${diffHours} godz`;
+        return "< 1 godz";
+      }
+
+      // Funkcja obliczająca dni od ostatniego komentarza
+      function getDaysSinceLastComment(stats) {
+        if (!stats) return null;
+        const timeSource = stats.lastCommentTime || stats.lastNewCommentAt;
+        if (!timeSource) return null;
+        const lastTime = new Date(timeSource);
+        return (Date.now() - lastTime.getTime()) / (1000 * 60 * 60 * 24);
+      }
+
+      // GET /api/stats - pełne statystyki
+      if (req.method === "GET" && pathname === "/api/stats") {
+        const statsData = readStatsFile();
+        const cacheData = readCacheFile();
+        const deadPosts = readDeadPosts();
+        const posts = readPosts(POSTS_PATH);
+
+        // Zbuduj Set ID martwych postów do szybkiego filtrowania
+        const deadPostIds = new Set(deadPosts.map((dp) => dp.id));
+
+        // Filtruj martwe posty z listy (są już w /api/dead-posts)
+        const livePosts = posts.filter((p) => !deadPostIds.has(p.id));
+
+        // Buduj listę postów z statystykami
+        const postsWithStats = livePosts.map((post) => {
+          const cacheEntry = cacheData[post.url];
+          const stats = cacheEntry?.stats || null;
+
+          const daysSinceLastComment = getDaysSinceLastComment(stats);
+          const tier = calculatePostTier(stats, daysSinceLastComment);
+
+          return {
+            ...post,
+            stats: stats || undefined,
+            tier,
+            daysSinceLastComment: daysSinceLastComment !== null ? Math.floor(daysSinceLastComment) : null,
+            lastCommentAge: formatLastCommentAge(stats),
+            // Dodaj info o źródle czasu (do debugowania)
+            lastCommentSource: stats?.lastCommentTime ? "fb" : stats?.lastNewCommentAt ? "bot" : null,
+          };
+        });
+
+        // Sortuj po liczbie wykrytych komentarzy (malejąco)
+        postsWithStats.sort((a, b) => {
+          const aComments = a.stats?.totalDetected || 0;
+          const bComments = b.stats?.totalDetected || 0;
+          return bComments - aComments;
+        });
+
+        const activePosts = livePosts.filter((p) => p.active !== false).length;
+
+        json(res, {
+          ok: true,
+          summary: {
+            totalPosts: livePosts.length,
+            activePosts,
+            deadPosts: deadPosts.length,
+            totalComments: statsData.global?.totalCommentsSent || 0,
+            lastCycleAt: statsData.global?.lastCycleAt || null,
+            cyclesCompleted: statsData.global?.cyclesCompleted || 0,
+            // Nowe pola - info o sesji
+            startedAt: statsData.global?.startedAt || null,
+            lastSessionStart: statsData.global?.lastSessionStart || null,
+            restartCount: statsData.global?.restartCount || 0,
+          },
+          posts: postsWithStats,
+          daily: statsData.daily || {},
+        });
+        return;
+      }
+
+      // GET /api/dead-posts - lista martwych postów
+      if (req.method === "GET" && pathname === "/api/dead-posts") {
+        const deadPosts = readDeadPosts();
+        json(res, { ok: true, deadPosts, total: deadPosts.length });
+        return;
+      }
+
+      // POST /api/dead-posts/:id/reactivate - reaktywuj martwy post
+      const mReactivate = req.method === "POST" ? match(pathname, "/api/dead-posts/:id/reactivate") : null;
+      if (mReactivate) {
+        const id = mReactivate.id;
+        const deadPosts = readDeadPosts();
+        const idx = deadPosts.findIndex((dp) => dp.id === id);
+
+        if (idx === -1) {
+          json(res, { ok: false, error: "Dead post not found" }, 404);
+          return;
+        }
+
+        const deadPost = deadPosts[idx];
+
+        // Sprawdź czy post już istnieje w watched
+        const posts = readPosts(POSTS_PATH);
+        const existingPost = posts.find((p) => p.url === deadPost.url || p.id === deadPost.id);
+
+        if (existingPost) {
+          // Post już istnieje, tylko aktywuj go
+          existingPost.active = true;
+          existingPost.updatedAt = nowIso();
+          writePosts(POSTS_PATH, posts);
+        } else {
+          // Dodaj post z powrotem do watched
+          const newPost = {
+            id: deadPost.id,
+            url: deadPost.url,
+            name: deadPost.name,
+            active: true,
+            image: "",
+            description: `Reaktywowany ${nowIso()}`,
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+          };
+          posts.push(newPost);
+          writePosts(POSTS_PATH, posts);
+        }
+
+        // Usuń z dead-posts
+        deadPosts.splice(idx, 1);
+        writeDeadPosts(deadPosts);
+
+        json(res, { ok: true, reactivated: deadPost });
+        return;
+      }
+
+      // ===== MARKETPLACE API =====
+      const MARKETPLACE_DATA_DIR = path.join(PROJECT_DIR, "data", "marketplace");
+
+      function readMarketplaceFile(filename, defaultValue = {}) {
+        const filePath = path.join(MARKETPLACE_DATA_DIR, filename);
+        if (!fs.existsSync(filePath)) return defaultValue;
+        const raw = fs.readFileSync(filePath, "utf8").trim();
+        if (!raw) return defaultValue;
+        const parsed = safeJsonParse(raw);
+        return parsed.ok ? parsed.value : defaultValue;
+      }
+
+      function writeMarketplaceFile(filename, data) {
+        ensureDir(MARKETPLACE_DATA_DIR);
+        const filePath = path.join(MARKETPLACE_DATA_DIR, filename);
+        atomicWriteFile(filePath, JSON.stringify(data, null, 2) + "\n");
+      }
+
+      // GET /api/marketplace/status
+      if (req.method === "GET" && pathname === "/api/marketplace/status") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const status = marketplaceApi.getStatus();
+          json(res, { ok: true, ...status });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // GET /api/marketplace/listings
+      if (req.method === "GET" && pathname === "/api/marketplace/listings") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const published = marketplaceApi.getPublished();
+          json(res, { ok: true, listings: published.listings || [] });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // GET /api/marketplace/content-pool
+      if (req.method === "GET" && pathname === "/api/marketplace/content-pool") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const pool = marketplaceApi.getContentPool();
+          json(res, { ok: true, pool });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // PUT /api/marketplace/content-pool
+      if (req.method === "PUT" && pathname === "/api/marketplace/content-pool") {
+        const bodyRaw = await readBody(req);
+        const parsed = safeJsonParse(bodyRaw || "{}");
+        if (!parsed.ok) {
+          json(res, { ok: false, error: "Invalid JSON body" }, 400);
+          return;
+        }
+
+        const pool = parsed.value.pool;
+        if (!pool) {
+          json(res, { ok: false, error: "Missing pool object" }, 400);
+          return;
+        }
+
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+
+          // Walidacja struktury
+          const validation = marketplaceApi.validatePool(pool);
+          if (!validation.valid) {
+            json(res, { ok: false, error: `Validation failed: ${validation.errors.join(", ")}` }, 400);
+            return;
+          }
+
+          marketplaceApi.saveContentPool(pool);
+          json(res, { ok: true });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // GET /api/marketplace/renewals
+      if (req.method === "GET" && pathname === "/api/marketplace/renewals") {
+        const limit = Math.min(Math.max(parseInt(query.limit || "50", 10) || 50, 1), 1000);
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const renewals = marketplaceApi.getRenewalLog();
+          const log = (renewals.log || []).slice(0, limit);
+          json(res, { ok: true, log, stats: renewals.stats || {} });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // GET /api/marketplace/random-content
+      if (req.method === "GET" && pathname === "/api/marketplace/random-content") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const content = marketplaceApi.getRandomContent();
+          if (!content) {
+            json(res, { ok: false, error: "Brak aktywnych kategorii w puli treści" }, 400);
+            return;
+          }
+          json(res, { ok: true, content });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // POST /api/marketplace/manual-renew
+      if (req.method === "POST" && pathname === "/api/marketplace/manual-renew") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const result = await marketplaceApi.manualRenewal();
+          json(res, { ok: true, result });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // POST /api/marketplace/manual-publish
+      if (req.method === "POST" && pathname === "/api/marketplace/manual-publish") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          const result = await marketplaceApi.manualPublish();
+          json(res, { ok: true, result });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // POST /api/marketplace/scheduler/stop
+      if (req.method === "POST" && pathname === "/api/marketplace/scheduler/stop") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          marketplaceApi.stopScheduler("Stopped from panel");
+          json(res, { ok: true });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
+      // POST /api/marketplace/scheduler/resume
+      if (req.method === "POST" && pathname === "/api/marketplace/scheduler/resume") {
+        try {
+          const { marketplaceApi } = await import("../marketplace/index.js");
+          marketplaceApi.resumeScheduler();
+          json(res, { ok: true });
+        } catch (err) {
+          json(res, { ok: false, error: err.message }, 500);
+        }
+        return;
+      }
+
       json(res, { ok: false, error: "Not found" }, 404);
     } catch (e) {
       json(res, { ok: false, error: e.message }, 500);

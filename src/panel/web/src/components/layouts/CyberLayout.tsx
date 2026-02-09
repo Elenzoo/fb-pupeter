@@ -14,16 +14,22 @@ import {
   Menu,
   X,
   Activity,
+  BarChart3,
+  Skull,
+  Store,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'PANEL',
   '/watched': 'OBSERWOWANE',
+  '/stats': 'STATYSTYKI',
+  '/dead-posts': 'MARTWE_POSTY',
   '/sources': 'ZRODLA',
   '/discoveries': 'WYKRYCIA',
   '/blacklist': 'CZARNA_LISTA',
   '/campaigns': 'KAMPANIE',
+  '/marketplace': 'MARKETPLACE',
   '/cookies': 'SESJE',
   '/settings': 'USTAWIENIA',
   '/logs': 'LOGI',
@@ -40,6 +46,8 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: '/', icon: Home, label: 'PANEL', key: 'h' },
   { to: '/watched', icon: Eye, label: 'OBSERWOWANE', key: 'w' },
+  { to: '/stats', icon: BarChart3, label: 'STATYSTYKI', key: 't' },
+  { to: '/dead-posts', icon: Skull, label: 'MARTWE', key: 'm' },
   { to: '/discoveries', icon: Bell, label: 'WYKRYCIA', key: 'd' },
   { to: '/blacklist', icon: Ban, label: 'BLACKLIST', key: 'b' },
   { to: '/settings', icon: Settings, label: 'USTAWIENIA', key: 's' },
@@ -47,6 +55,7 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 const NAV_ITEMS_SECONDARY: NavItem[] = [
+  { to: '/marketplace', icon: Store, label: 'MARKETPLACE', key: 'k' },
   { to: '/sources', icon: Globe, label: 'ZRODLA', key: 'r', disabled: true },
   { to: '/campaigns', icon: Megaphone, label: 'KAMPANIE', key: 'c', disabled: true },
   { to: '/cookies', icon: Cookie, label: 'SESJE', key: 'e' },
